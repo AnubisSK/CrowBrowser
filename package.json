@@ -1,0 +1,19 @@
+{
+  "name": "crowbrowser",
+  "version": "1.0.0",
+  "main": "app.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [],
+  "author": "AnubisSVK",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "electron": "^33.2.1"
+  },
+  "dependencies": {
+    "@types/chrome": "^0.0.145",
+    "electron-tabs": "^1.0.4"
+  }
+}
