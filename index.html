@@ -4,275 +4,54 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Crow Browser</title>
+    <link rel="stylesheet" href="css/styles.css"> <!-- Načítanie CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css"></link>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
-    <style>
-        body {
-            margin: 0;
-            padding: 0;
-            font-family: 'Roboto', sans-serif;
-            overflow: hidden; /* Hides the scrollbars */
-        }
-        .webview {
-            width: 100%;
-            height: calc(100vh - 50px); /* Adjust height to fit below the header */
-            border: none; /* Odstranit okraje */
-        }
-        .tab {
-            display: flex;
-            align-items: center;
-            padding: 10px 15px;
-            border-radius: 4px; /* Zaoblení */
-            cursor: pointer;
-            transition: background-color 0.3s;
-            color: white; /* Text color */
-            background-color: #333; /* Background color for tabs */
-        }
-
-        .tab.active {
-            background-color: #4285f4; /* Barva aktivní záložky */
-            color: white;
-        }
-
-        .tab:hover {
-            background-color: #555; /* Barva při najetí myší */
-        }
-
-        .tab-list {
-            display: flex;
-            flex-direction: column; /* Vertikální uspořádání */
-            width: 200px; /* Šířka záložek */
-            background-color: #222; /* Barva pozadí záložek */
-            height: 100%; /* Výška záložek */
-            padding: 10px 0; /* Vnitřní okraje */
-        }
-
-        .add-tab-button {
-            background-color: #444; /* Barva tlačítka pro přidání záložky */
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: background-color 0.3s;
-            color: white; /* Text color */
-        }
-
-        .add-tab-button:hover {
-            background-color: #555; /* Barva při najetí myší */
-        }
-
-        .close-tab {
-            margin-left: 10px;
-            cursor: pointer;
-            color: white; /* Barva ikony zavření */
-            font-weight: bold;
-            font-size: 16px;
-            transition: color 0.3s;
-        }
-
-        .close-tab:hover {
-            color: red; /* Barva při najetí myší */
-        }
-
-        .container {
-            display: flex; /* Flexbox pro horizontální uspořádání */
-            height: 100vh; /* Zajištění, že kontejner zabere celou výšku */
-        }
-
-        .webview-container {
-            flex-grow: 1; /* Zajištění, že webview zabere zbytek místa */
-            display: flex;
-            flex-direction: column; /* Umožňuje správné uspořádání */
-        }
-    </style>
 </head>
-<body class="bg-gray-100">
-    <div class="bg-gray-800 text-white flex items-center p-2">
-        <div class="flex items-center space-x-2">
-            <button id="backButton" class="p- 2 hover:bg-gray-700 rounded">
-                <i class="fas fa-arrow-left"></i>
-            </button>
-            <button id="forwardButton" class="p-2 hover:bg-gray-700 rounded">
-                <i class="fas fa-arrow-right"></i>
-            </button>
-            <button id="reloadButton" class="p-2 hover:bg-gray-700 rounded">
-                <i class="fas fa-redo"></i>
-            </button>
-            <button id="homeButton" class="p-2 hover:bg-gray-700 rounded">
-                <i class="fas fa-home"></i>
-            </button>
+<body>
+    <div class="sidebar bg-gray-800 text-white flex flex-col p-2" id="sidebar" style="width: 247px;">
+        <div class="flex items-center p-2 mb-4">
+            <img alt="Logo of the web browser" class="mr-2" height="40" src="https://storage.googleapis.com/a1aa/image/4IWGcaqkjYK1AtP5U300kw4Zj1hPVUli2YnQosOeh7bJEb9JA.jpg" width="40"/>
+            <span class="text-lg font-bold">Crow Browser</span>
         </div>
-        <div class="flex-grow mx-4">
-            <input type="text" class="w-full p-2 rounded bg-gray-700 text-white placeholder-gray-400" placeholder="Zadejte URL nebo vyhledávací dotaz" id="urlInput">
+        <div class="tab-list flex flex-wrap mb-2" id="tabList"></div>
+        <button class="new-tab p-2 cursor-pointer border-t border-gray-700 hover:bg-gray-700 mt-auto flex items-center justify-center" id="addTabButton">
+            <i class="fas fa-plus"></i> New Tab
+        </button>
+    </div>
+    <div class="resizer" id="resizer"></div>
+    <div class="main-content flex flex-col flex-1">
+        <div class="top-bar bg-gray-700 text-white p-2 flex items-center">
+            <div class="button mr-2 cursor-pointer" id="backButton"><i class ="fas fa-arrow-left"></i></div>
+            <div class="button mr-2 cursor-pointer" id="forwardButton"><i class="fas fa-arrow-right"></i></div>
+            <div class="button mr-2 cursor-pointer" id="reloadButton"><i class="fas fa-redo"></i></div>
+            <div class="button mr-2 cursor-pointer" id="homeButton"><i class="fas fa-home"></i></div>
+            <div class="button mr-2 cursor-pointer" id="downloadButton"><i class="fas fa-download"></i></div>
+            <div class="button mr-2 cursor-pointer" id="historyButton"><i class="fas fa-history"></i></div>
+            <div class="url-bar flex-1 mx-2">
+                <input type="text" id="urlInput" placeholder="Zadejte URL nebo hledání" class="w-full p-1 rounded bg-gray-800 text-white placeholder-gray-400">
+            </div>
         </div>
-        <div class="flex items-center space-x-2">
-            <button class="p-2 hover:bg-gray-700 rounded">
-                <i class="fas fa-star"></i>
-            </button>
-            <button class="p-2 hover:bg-gray-700 rounded">
-                <i class="fas fa-cog"></i>
-            </button>
-            <button class="p-2 hover:bg-gray-700 rounded">
-                <i class="fas fa-user-circle"></i>
-            </button>
-            <button class="p-2 hover:bg-gray-700 rounded">
-                <i class="fas fa-bars"></i>
-            </button>
+        <div class="content flex-1 p-0 bg-white">
+            <webview id="webview" src="https://www.google.com"></webview>
         </div>
     </div>
 
-    <div class="container">
-        <div class="tab-list">
-            <div class="tab active" data-url="https://www.google.com">Tab 1 <span class="close-tab">&times;</span></div>
-            <button class="add-tab-button">+ Přidat záložku</button>
-        </div>
-        <div class="webview-container">
-            <webview id="webview" class="webview" src="https://www.google.com" partition="persist:my-partition"></webview>
-        </div>
+    <!-- Popup for history -->
+    <div class="popup" id="historyPopup">
+        <span class="popup-close" id="historyPopupClose">&times;</span>
+        <div class="popup-header">Historie</div>
+        <div id="historyList"></div>
     </div>
 
-    <script>
-        const webview = document.getElementById('webview');
-        const urlInput = document.getElementById('urlInput');
-        const backButton = document.getElementById('backButton');
-        const forwardButton = document.getElementById('forwardButton');
-        const reloadButton = document.getElementById('reloadButton');
-        const homeButton = document.getElementById('homeButton');
-        const addTabButton = document.querySelector('.add-tab-button');
-        const tabList = document.querySelector('.tab-list');
+    <!-- Popup for downloads -->
+    <div class="popup" id="downloadPopup">
+        <span class="popup-close" id="downloadPopupClose">&times;</span>
+        <div class="popup-header">Stiahnutia</div>
+        <div id="downloadList"></div>
+    </div>
 
-        webview.nodeIntegration = true; // Povolit nodeIntegration
-
-        // Funkce pro načtení URL nebo vyhledávacího dotazu
-        function loadUrl(url) {
-            if (url) {
-                webview.src = url; // Load the entered URL
-            }
-        }
-
-        // Přidání události pro stisknutí klávesy Enter
-        urlInput.addEventListener('keypress', (event) => {
-            if (event.key === 'Enter') {
-                const inputValue = urlInput.value.trim();
-                if (inputValue) {
-                    if (inputValue.startsWith('http://') || inputValue.startsWith('https://')) {
-                        loadUrl(inputValue); // Load the entered URL
-                    } else {
-                        loadUrl('https://www.google.com/search?q=' + encodeURIComponent(inputValue));
-                    }
-                    urlInput.value = ''; // Clear input after loading
-                }
-            }
-        });
-
-        // Funkce pro navigaci zpět
-        backButton.addEventListener('click', () => {
-            if (webview.canGoBack()) {
-                webview.goBack(); // Přejít zpět
-            } else {
-                console.log('Není možné jít zpět');
-            }
-        });
-
-        // Funkce pro navigaci vpřed
-        forwardButton.addEventListener('click', () => {
-            if (webview.canGoForward()) {
-                webview.goForward(); // Přejít vpřed
-            } else {
-                console.log('Není možné jít vpřed');
-            }
-        });
-
-        // Funkce pro restartování stránky
-        reloadButton.addEventListener('click', () => {
-            webview.reload(); // Restartovat aktuální stránku
-        });
-
-        // Funkce pro návrat na domovskou stránku
-        homeButton.addEventListener('click', () => {
-            loadUrl('https://www.google.com'); // Přejít na domovskou stránku
-        });
-
-        addTabButton.addEventListener('click', () => { const newTab = document.createElement('div');
-            newTab.className = 'tab';
-            newTab.setAttribute('data-url', 'https://www.google.com'); // Default URL for new tab
-            const closeTabButton = document.createElement('span');
-            closeTabButton.className = 'close-tab';
-            closeTabButton.textContent = '×'; // Close icon
-            newTab.appendChild(closeTabButton); // Add close icon to tab
-            newTab.textContent = 'Nová záložka'; // Set default tab text
-            tabList.insertBefore(newTab, addTabButton); // Add new tab before the add tab button
-
-            // Add event for clicking on the new tab
-            newTab.addEventListener('click', () => {
-                const url = newTab.getAttribute('data-url');
-                loadUrl(url);
-                setActiveTab(newTab);
-            });
-
-            // Add event for closing the tab
-            closeTabButton.addEventListener('click', (event) => {
-                event.stopPropagation(); // Prevent event propagation
-                newTab.remove(); // Remove the tab
-                if (newTab.classList.contains('active')) {
-                    const tabs = document.querySelectorAll('.tab');
-                    if (tabs.length > 0) {
-                        const nextTab = tabs[tabs.length - 1]; // Select the last tab
-                        loadUrl(nextTab.getAttribute('data-url')); // Load the URL of the last tab
-                        setActiveTab(nextTab); // Set it as active
-                    }
-                }
-            });
-        });
-
-        // Function to set the active tab
-        function setActiveTab(tab) {
-            const tabs = document.querySelectorAll('.tab');
-            tabs.forEach(t => t.classList.remove('active')); // Remove active class from all tabs
-            tab.classList.add('active'); // Add active class to clicked tab
-
-            // Update URL and title for the active tab
-            const url = tab.getAttribute('data-url');
-            loadUrl(url);
-        }
-
-        // Add event for clicking on existing tabs
-        const existingTabs = document.querySelectorAll('.tab');
-        existingTabs.forEach(tab => {
-            tab.addEventListener('click', () => {
-                const url = tab.getAttribute('data-url');
-                loadUrl(url);
-                setActiveTab(tab);
-            });
-
-            // Add event for closing existing tabs
-            const closeButton = tab.querySelector('.close-tab');
-            closeButton.addEventListener('click', (event) => {
-                event.stopPropagation(); // Prevent event propagation
-                tab.remove(); // Remove the tab
-                if (tab.classList.contains('active')) {
-                    const tabs = document.querySelectorAll('.tab');
-                    if (tabs.length > 0) {
-                        const nextTab = tabs[tabs.length - 1]; // Select the last tab
-                        loadUrl(nextTab.getAttribute('data-url')); // Load the URL of the last tab
-                        setActiveTab(nextTab); // Set it as active
-                    }
-                }
-            });
-        });
-
-        // You can also add an event for page load
-        webview.addEventListener('did-finish-load', () => {
-            const currentUrl = webview.getURL();
-            const activeTab = document.querySelector('.tab.active');
-            if (activeTab) {
-                activeTab.setAttribute('data-url', currentUrl); // Save current URL to active tab
-                webview.executeJavaScript('document.title').then((title) => {
-                    activeTab.textContent = title; // Set tab text to page title
-                    activeTab.appendChild(closeTabButton); // Add close icon back
-                });
-            }
-        });
-    </script>
+    <script src="js/script.js"></script> <!-- Načítanie JavaScript -->
 </body>
 </html>

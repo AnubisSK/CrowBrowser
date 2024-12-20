@@ -1,4 +1,4 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, session } = require('electron');
 
 function createWindow() {
     const win = new BrowserWindow({
@@ -16,6 +16,22 @@ function createWindow() {
 
     win.setMenu(null); // Odstrániť menu úplne
     win.loadFile('index.html'); // Načítajte HTML súbor
+
+    // Oprava web vieweru
+    win.webContents.on('new-window', (event, url) => {
+        event.preventDefault();
+        const webview = new webContents.Webview({
+            src: url,
+            nodeIntegration: true,
+            contextIsolation: false,
+            webviewTag: true,
+            enableRemoteModule: true,
+            allowRunningInsecureContent: true, // Povolit načítání nezabezpečeného obsahu
+            webSecurity: false // Vypnout zabezpečení webu (pouze pro testování)
+        });
+        event.newGuest = webview;
+    });
+
 }
 
 app.whenReady().then(createWindow);
