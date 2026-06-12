@@ -169,7 +169,7 @@ namespace CrowBrowser {
 
         private void setup_initial_tabs () {
             // Private and Tor windows always start with a blank tab
-            if (window_mode != "normal") {
+            if (window_mode == "private" || window_mode == "tor") {
                 new_tab ("about:blank");
                 return;
             }
@@ -198,7 +198,7 @@ namespace CrowBrowser {
 
         public string[] get_open_urls () {
             // Don't save private or Tor window sessions
-            if (window_mode != "normal") return new string[0];
+            if (window_mode == "private" || window_mode == "tor") return new string[0];
             var urls = new Gee.ArrayList<string> ();
             for (int i = 0; i < tab_view.n_pages; i++) {
                 var pg = tab_view.get_nth_page (i);
@@ -269,7 +269,7 @@ namespace CrowBrowser {
             // Full-width header bar + body inside ToolbarView
             var tview = new Adw.ToolbarView ();
             tview.add_top_bar (build_header_bar ());
-            if (window_mode != "normal")
+            if (window_mode == "private" || window_mode == "tor")
                 tview.add_top_bar (build_mode_bar ());
             tview.content = body;
 
