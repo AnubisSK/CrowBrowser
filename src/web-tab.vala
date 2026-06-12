@@ -335,8 +335,15 @@ namespace CrowBrowser {
         private static WebKit.NetworkSession? _shared_session = null;
 
         public static unowned WebKit.NetworkSession get_shared_session () {
-            if (_shared_session == null)
-                _shared_session = WebKit.NetworkSession.get_default ();
+            if (_shared_session == null) {
+                string data_dir = GLib.Path.build_filename (
+                    GLib.Environment.get_user_data_dir (), "crow-browser"
+                );
+                string cache_dir = GLib.Path.build_filename (
+                    GLib.Environment.get_user_cache_dir (), "crow-browser"
+                );
+                _shared_session = new WebKit.NetworkSession (data_dir, cache_dir);
+            }
             return _shared_session;
         }
 
@@ -388,9 +395,8 @@ namespace CrowBrowser {
                 web_view = (WebKit.WebView) GLib.Object.new (typeof (WebKit.WebView),
                     "network-session", tab_network_session);
             } else {
-                web_view = new WebKit.WebView ();
-                if (_shared_session == null)
-                    _shared_session = web_view.get_network_session ();
+                web_view = (WebKit.WebView) GLib.Object.new (typeof (WebKit.WebView),
+                    "network-session", get_shared_session ());
             }
             web_view.settings = settings;
             web_view.vexpand = true;
