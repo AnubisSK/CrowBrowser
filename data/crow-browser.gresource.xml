@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/org/crowbrowser/CrowBrowser/icons">
+    <file alias="scalable/actions/crow-video-dl-symbolic.svg">icons/scalable/actions/crow-video-dl-symbolic.svg</file>
+  </gresource>
+</gresources>

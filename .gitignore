@@ -1,0 +1,7 @@
+build/
+.ninja_deps
+.ninja_log
+*.o
+*.so
+*.vala.stamp
+.claude/

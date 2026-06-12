@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- Film strip outer frame -->
+  <rect x="0.75" y="0.75" width="14.5" height="14.5" rx="1.75"
+        fill="none" stroke="currentColor" stroke-width="1.5"/>
+  <!-- Left perforation strip divider -->
+  <line x1="3.5" y1="0.75" x2="3.5" y2="15.25"
+        stroke="currentColor" stroke-width="0.8"/>
+  <!-- Right perforation strip divider -->
+  <line x1="12.5" y1="0.75" x2="12.5" y2="15.25"
+        stroke="currentColor" stroke-width="0.8"/>
+  <!-- Left perforations (3 holes) -->
+  <rect x="1" y="2.5" width="2" height="2" rx="0.4" fill="currentColor"/>
+  <rect x="1" y="7"   width="2" height="2" rx="0.4" fill="currentColor"/>
+  <rect x="1" y="11.5" width="2" height="2" rx="0.4" fill="currentColor"/>
+  <!-- Right perforations (3 holes) -->
+  <rect x="13" y="2.5" width="2" height="2" rx="0.4" fill="currentColor"/>
+  <rect x="13" y="7"   width="2" height="2" rx="0.4" fill="currentColor"/>
+  <rect x="13" y="11.5" width="2" height="2" rx="0.4" fill="currentColor"/>
+  <!-- Download arrow: vertical stem -->
+  <line x1="8" y1="3.5" x2="8" y2="9"
+        stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  <!-- Download arrow: arrowhead -->
+  <polyline points="5.5,7 8,9.5 10.5,7"
+            fill="none" stroke="currentColor" stroke-width="1.5"
+            stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Download bar -->
+  <line x1="5.5" y1="12" x2="10.5" y2="12"
+        stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+</svg>
