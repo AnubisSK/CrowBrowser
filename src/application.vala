@@ -81,6 +81,12 @@ namespace CrowBrowser {
             setup_widevine_cdm_path ();
             setup_actions ();
             load_styles ();
+
+            // Check for updates 8 seconds after startup so it doesn't delay launch
+            GLib.Timeout.add_seconds (8, () => {
+                UpdateManager.get_instance ().check_async.begin ();
+                return GLib.Source.REMOVE;
+            });
         }
 
         // Point WebKit to Widevine CDM if installed

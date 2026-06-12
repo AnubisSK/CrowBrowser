@@ -342,7 +342,16 @@ namespace CrowBrowser {
                 string cache_dir = GLib.Path.build_filename (
                     GLib.Environment.get_user_cache_dir (), "crow-browser"
                 );
+                GLib.DirUtils.create_with_parents (data_dir, 0755);
+                GLib.DirUtils.create_with_parents (cache_dir, 0755);
                 _shared_session = new WebKit.NetworkSession (data_dir, cache_dir);
+                // Without explicit persistent storage, WebKit stores cookies only in memory.
+                var cm = _shared_session.get_cookie_manager ();
+                cm.set_accept_policy (WebKit.CookieAcceptPolicy.ALWAYS);
+                cm.set_persistent_storage (
+                    GLib.Path.build_filename (data_dir, "cookies.db"),
+                    WebKit.CookiePersistentStorage.SQLITE
+                );
             }
             return _shared_session;
         }

@@ -36,6 +36,7 @@ sources = files(
   'src/web-tab.vala',
   'src/browser-window.vala',
   'src/video-downloader.vala',
+  'src/update-manager.vala',
 )
 
 executable('crow-browser', sources, resources,

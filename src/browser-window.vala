@@ -111,6 +111,9 @@ namespace CrowBrowser {
         private Gtk.Label dl_pop_header;
         private Gtk.Label dl_badge;
 
+        private Adw.ToolbarView tview;
+        private Adw.Banner update_banner;
+
         // Ephemeral network session shared by all tabs in this private/tor window
         private WebKit.NetworkSession? private_session = null;
         private bool tor_not_found = false;
@@ -165,6 +168,49 @@ namespace CrowBrowser {
                     return GLib.Source.REMOVE;
                 });
             }
+
+            // Connect update-manager signals (only normal windows show the update banner)
+            if (window_mode != "private" && window_mode != "tor") {
+                var um = UpdateManager.get_instance ();
+                um.update_available.connect ((ver) => {
+                    GLib.Idle.add (() => { show_update_available (ver); return GLib.Source.REMOVE; });
+                });
+                um.install_progress.connect ((status) => {
+                    GLib.Idle.add (() => {
+                        update_banner.title = status;
+                        update_banner.button_label = "";
+                        update_banner.revealed = true;
+                        return GLib.Source.REMOVE;
+                    });
+                });
+                um.install_done.connect (() => {
+                    GLib.Idle.add (() => {
+                        update_banner.title = "Aktualizácia nainštalovaná — reštartujte CrowBrowser";
+                        update_banner.button_label = "";
+                        update_banner.revealed = true;
+                        return GLib.Source.REMOVE;
+                    });
+                });
+                um.install_failed.connect ((msg) => {
+                    GLib.Idle.add (() => {
+                        update_banner.revealed = false;
+                        var t = new Adw.Toast ("Aktualizácia zlyhala: " + msg);
+                        t.timeout = 8;
+                        toast_overlay.add_toast (t);
+                        return GLib.Source.REMOVE;
+                    });
+                });
+            }
+        }
+
+        private void show_update_available (string version) {
+            update_banner.title = "Dostupná aktualizácia v%s".printf (version);
+            update_banner.button_label = "Nainštalovať";
+            update_banner.revealed = true;
+            update_banner.button_clicked.connect (() => {
+                update_banner.button_label = "";
+                UpdateManager.get_instance ().install_async.begin (version);
+            });
         }
 
         private void setup_initial_tabs () {
@@ -267,10 +313,16 @@ namespace CrowBrowser {
             body.append (toast_overlay);
 
             // Full-width header bar + body inside ToolbarView
-            var tview = new Adw.ToolbarView ();
+            tview = new Adw.ToolbarView ();
             tview.add_top_bar (build_header_bar ());
             if (window_mode == "private" || window_mode == "tor")
                 tview.add_top_bar (build_mode_bar ());
+
+            // Update notification banner (hidden until an update is available)
+            update_banner = new Adw.Banner ("");
+            update_banner.revealed = false;
+            tview.add_top_bar (update_banner);
+
             tview.content = body;
 
             content = tview;

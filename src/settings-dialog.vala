@@ -538,7 +538,7 @@ namespace CrowBrowser {
 
             var app_row = new Adw.ActionRow ();
             app_row.title = "CrowBrowser";
-            app_row.subtitle = "Verzia 1.0.0";
+            app_row.subtitle = "Verzia " + UpdateManager.APP_VERSION;
             var app_ico = new Gtk.Image.from_icon_name ("web-browser-symbolic");
             app_ico.pixel_size = 32;
             app_row.add_prefix (app_ico);
