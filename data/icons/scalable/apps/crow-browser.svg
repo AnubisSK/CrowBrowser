@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <!-- Neck (filled stroke connecting head to body) -->
+  <path d="M 55 46 Q 52 54 48 58"
+        stroke="#e0d8ff" stroke-width="14" fill="none" stroke-linecap="round"/>
+
+  <!-- Body (tilted ellipse) -->
+  <ellipse cx="42" cy="65" rx="22" ry="28"
+           transform="rotate(-15 42 65)" fill="#e0d8ff"/>
+
+  <!-- Head (circle) -->
+  <circle cx="65" cy="32" r="20" fill="#e0d8ff"/>
+
+  <!-- Upper beak -->
+  <path d="M 82 26 L 102 29 L 82 34 Z" fill="#e0d8ff"/>
+  <!-- Lower beak (slightly tinted) -->
+  <path d="M 82 34 L 100 35 L 82 42 Z" fill="#b8acf0"/>
+
+  <!-- Tail fork -->
+  <path d="M 24 80 Q 12 90 7 97 L 21 89 L 33 89 L 40 97
+           Q 44 87 38 79 Z" fill="#e0d8ff"/>
+
+  <!-- Wing fold hint (feather edge) -->
+  <path d="M 30 57 Q 18 64 16 73" stroke="#b8acf0" stroke-width="3"
+        fill="none" stroke-linecap="round" opacity="0.7"/>
+
+  <!-- Crown feathers -->
+  <path d="M 52 15 Q 56  7 60 15" stroke="#c8c0ff" stroke-width="2"
+        fill="none" stroke-linecap="round" opacity="0.8"/>
+  <path d="M 61 12 Q 65  4 69 13" stroke="#c8c0ff" stroke-width="2"
+        fill="none" stroke-linecap="round" opacity="0.8"/>
+  <path d="M 70 14 Q 74  7 77 16" stroke="#c8c0ff" stroke-width="1.5"
+        fill="none" stroke-linecap="round" opacity="0.7"/>
+
+  <!-- Eye (dark socket + purple iris + white glint) -->
+  <circle cx="70" cy="28" r="6"  fill="#14121e"/>
+  <circle cx="70" cy="28" r="3"  fill="#7c5cf5"/>
+  <circle cx="72" cy="26" r="1.3" fill="white" opacity="0.9"/>
+</svg>

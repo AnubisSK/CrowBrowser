@@ -372,6 +372,18 @@ progressbar.crow-progress trough progress {
     min-height: 26px;
 }
 
+/* ── Sidebar logo header ─────────────────────────────────── */
+.crow-sidebar-logo {
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.crow-sidebar-logo-label {
+    color: rgba(255,255,255,0.75);
+    font-size: 0.87rem;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+}
+
 /* ── DRM warning button ────────────────────────────────── */
 .crow-sidebar-action-warn {
     color: #f0a500;

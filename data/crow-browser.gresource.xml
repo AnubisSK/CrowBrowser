@@ -2,5 +2,6 @@
 <gresources>
   <gresource prefix="/org/crowbrowser/CrowBrowser/icons">
     <file alias="scalable/actions/crow-video-dl-symbolic.svg">icons/scalable/actions/crow-video-dl-symbolic.svg</file>
+    <file alias="scalable/apps/crow-browser.svg">icons/scalable/apps/crow-browser.svg</file>
   </gresource>
 </gresources>

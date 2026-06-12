@@ -490,10 +490,35 @@ namespace CrowBrowser {
             var panel = new Gtk.Box (Gtk.Orientation.VERTICAL, 0);
             panel.add_css_class ("crow-sidebar-panel");
             panel.width_request = 168;
+            panel.append (build_sidebar_logo ());
             panel.append (scroll);
             panel.append (bottom);
 
             return panel;
+        }
+
+        private Gtk.Widget build_sidebar_logo () {
+            var box = new Gtk.Box (Gtk.Orientation.HORIZONTAL, 7);
+            box.add_css_class ("crow-sidebar-logo");
+            box.margin_start  = 10;
+            box.margin_end    = 8;
+            box.margin_top    = 10;
+            box.margin_bottom = 10;
+
+            var ico = new Gtk.Image.from_icon_name ("crow-browser");
+            ico.pixel_size = 26;
+            ico.valign = Gtk.Align.CENTER;
+
+            var lbl = new Gtk.Label ("CrowBrowser");
+            lbl.add_css_class ("heading");
+            lbl.add_css_class ("crow-sidebar-logo-label");
+            lbl.halign = Gtk.Align.START;
+            lbl.valign = Gtk.Align.CENTER;
+            lbl.hexpand = true;
+
+            box.append (ico);
+            box.append (lbl);
+            return box;
         }
 
         private Gtk.Button make_sidebar_btn (string icon, string tip) {
@@ -607,48 +632,99 @@ namespace CrowBrowser {
 
         private void setup_shortcuts () {
             var app = application as Gtk.Application;
-            if (app == null) return;
+            if (app != null) {
+                // Keep these for menu accelerator labels (display only).
+                // Actual handling is done by the CAPTURE key controller below
+                // so shortcuts fire even when WebKitWebView has keyboard focus.
+                app.set_accels_for_action ("win.new-tab",            {"<primary>t"});
+                app.set_accels_for_action ("win.close-tab",          {"<primary>w"});
+                app.set_accels_for_action ("win.reload",             {"<primary>r", "F5"});
+                app.set_accels_for_action ("win.focus-url",          {"<primary>l", "F6"});
+                app.set_accels_for_action ("win.download-video",     {"<primary>d"});
+                app.set_accels_for_action ("win.toggle-sidebar",     {"<primary>b"});
+                app.set_accels_for_action ("win.open-devtools",      {"F12"});
+                app.set_accels_for_action ("win.view-source",        {"<primary>u"});
+                app.set_accels_for_action ("win.history",            {"<primary>h"});
+                app.set_accels_for_action ("win.downloads",          {"<primary>j"});
+                app.set_accels_for_action ("win.settings",           {"<primary>comma"});
+                app.set_accels_for_action ("app.new-private-window", {"<primary><shift>n"});
+                app.set_accels_for_action ("app.new-tor-window",     {"<primary><shift>t"});
+            }
 
-            app.set_accels_for_action ("win.new-tab",            {"<primary>t"});
-            app.set_accels_for_action ("win.close-tab",          {"<primary>w"});
-            app.set_accels_for_action ("win.reload",             {"<primary>r", "F5"});
-            app.set_accels_for_action ("win.focus-url",          {"<primary>l", "F6"});
-            app.set_accels_for_action ("win.download-video",     {"<primary>d"});
-            app.set_accels_for_action ("win.toggle-sidebar",     {"<primary>b"});
-            app.set_accels_for_action ("win.open-devtools",      {"F12"});
-            app.set_accels_for_action ("win.view-source",        {"<primary>u"});
-            app.set_accels_for_action ("win.history",            {"<primary>h"});
-            app.set_accels_for_action ("win.downloads",          {"<primary>j"});
-            app.set_accels_for_action ("win.settings",           {"<primary>comma"});
-            app.set_accels_for_action ("app.new-private-window", {"<primary><shift>n"});
-            app.set_accels_for_action ("app.new-tor-window",     {"<primary><shift>t"});
+            // CAPTURE phase: fires before WebKit gets the event regardless of focus.
+            // Cast to Gtk.Widget to bypass Gtk.ShortcutManager.add_controller overload.
+            var kc = new Gtk.EventControllerKey ();
+            kc.set_propagation_phase (Gtk.PropagationPhase.CAPTURE);
+            kc.key_pressed.connect (on_key_pressed);
+            (this as Gtk.Widget).add_controller (kc);
+        }
 
-            var ctrl = new Gtk.ShortcutController ();
-            ctrl.add_shortcut (new Gtk.Shortcut (
-                Gtk.ShortcutTrigger.parse_string ("<alt>Left"),
-                new Gtk.CallbackAction (() => { current_tab ()?.go_back (); return true; })
-            ));
-            ctrl.add_shortcut (new Gtk.Shortcut (
-                Gtk.ShortcutTrigger.parse_string ("<alt>Right"),
-                new Gtk.CallbackAction (() => { current_tab ()?.go_forward (); return true; })
-            ));
-            ctrl.add_shortcut (new Gtk.Shortcut (
-                Gtk.ShortcutTrigger.parse_string ("<primary>Tab"),
-                new Gtk.CallbackAction (() => { cycle_tabs (1); return true; })
-            ));
-            ctrl.add_shortcut (new Gtk.Shortcut (
-                Gtk.ShortcutTrigger.parse_string ("<primary><shift>Tab"),
-                new Gtk.CallbackAction (() => { cycle_tabs (-1); return true; })
-            ));
-            ctrl.add_shortcut (new Gtk.Shortcut (
-                Gtk.ShortcutTrigger.parse_string ("Escape"),
-                new Gtk.CallbackAction (() => {
-                    if (!is_fullscreen) return false;
-                    on_leave_fullscreen ();
+        private bool on_key_pressed (uint keyval, uint keycode, Gdk.ModifierType state) {
+            bool ctrl  = (state & Gdk.ModifierType.CONTROL_MASK) != 0;
+            bool shift = (state & Gdk.ModifierType.SHIFT_MASK)   != 0;
+            bool alt   = (state & Gdk.ModifierType.ALT_MASK)     != 0;
+            bool none  = !ctrl && !shift && !alt;
+
+            if (ctrl && !alt) {
+                if (!shift) switch (keyval) {
+                    case Gdk.Key.t:
+                        new_tab ("about:blank"); return true;
+                    case Gdk.Key.w:
+                        var page = tab_view.selected_page;
+                        if (page != null) tab_view.close_page (page);
+                        return true;
+                    case Gdk.Key.r:
+                        current_tab ()?.reload (); return true;
+                    case Gdk.Key.l:
+                        url_entry.grab_focus ();
+                        url_entry.select_region (0, -1);
+                        return true;
+                    case Gdk.Key.d:
+                        activate_action ("win.download-video", null); return true;
+                    case Gdk.Key.b:
+                        toggle_sidebar (); return true;
+                    case Gdk.Key.h:
+                        activate_action ("win.history", null); return true;
+                    case Gdk.Key.j:
+                        activate_action ("win.downloads", null); return true;
+                    case Gdk.Key.u:
+                        activate_action ("win.view-source", null); return true;
+                    case Gdk.Key.comma:
+                        activate_action ("win.settings", null); return true;
+                    case Gdk.Key.Tab:
+                        cycle_tabs (1); return true;
+                }
+                if (shift) switch (keyval) {
+                    case Gdk.Key.ISO_Left_Tab:
+                    case Gdk.Key.Tab:
+                        cycle_tabs (-1); return true;
+                }
+            }
+
+            if (alt && !ctrl && !shift) switch (keyval) {
+                case Gdk.Key.Left:  current_tab ()?.go_back ();    return true;
+                case Gdk.Key.Right: current_tab ()?.go_forward (); return true;
+            }
+
+            if (none) switch (keyval) {
+                case Gdk.Key.F5:
+                    current_tab ()?.reload (); return true;
+                case Gdk.Key.F6:
+                    url_entry.grab_focus ();
+                    url_entry.select_region (0, -1);
                     return true;
-                })
-            ));
-            add_controller (ctrl);
+                case Gdk.Key.F11:
+                    if (is_fullscreen) on_leave_fullscreen ();
+                    else on_enter_fullscreen ();
+                    return true;
+                case Gdk.Key.F12:
+                    activate_action ("win.open-devtools", null); return true;
+                case Gdk.Key.Escape:
+                    if (is_fullscreen) { on_leave_fullscreen (); return true; }
+                    break;
+            }
+
+            return false;
         }
 
         // ── Sidebar toggle ────────────────────────────────────────────────────
