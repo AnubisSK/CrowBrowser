@@ -1,0 +1,1 @@
+/Users/anubissvk/Documents/CrowBrowserMac/target/debug/crow-browser: /Users/anubissvk/Documents/CrowBrowserMac/src/main.rs /Users/anubissvk/Documents/CrowBrowserMac/src/settings.html /Users/anubissvk/Documents/CrowBrowserMac/src/settings.rs /Users/anubissvk/Documents/CrowBrowserMac/src/toolbar.html

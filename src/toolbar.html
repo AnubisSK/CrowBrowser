@@ -1,0 +1,81 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #1f1f23; --line: #2c2c31; --fg: #e6e6e9; --icon: #c9c9ce;
+    --hover: #2e2e34; --active: #38383f; --input: #2a2a2f; --input-focus: #18181b; --accent: #5b8def;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --bg: #f4f4f6; --line: #dcdce1; --fg: #1d1d1f; --icon: #4a4a50;
+      --hover: #e4e4e9; --active: #d8d8de; --input: #e6e6eb; --input-focus: #fff;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    display: flex; align-items: center; gap: 4px;
+    padding: 0 10px 0 80px; /* space for traffic lights */
+    background: var(--bg); border-bottom: 1px solid var(--line);
+    font: 13px -apple-system, BlinkMacSystemFont, sans-serif; color: var(--fg);
+    user-select: none; -webkit-user-select: none; cursor: default;
+  }
+  button {
+    width: 30px; height: 28px; border: 0; border-radius: 7px; flex: none;
+    background: transparent; color: var(--icon); display: grid; place-items: center;
+  }
+  button:hover { background: var(--hover); color: var(--fg); }
+  button:active, button.on { background: var(--active); }
+  svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  #url {
+    flex: 1; height: 28px; margin: 0 6px; padding: 0 12px;
+    border: 1px solid transparent; border-radius: 14px; outline: none;
+    background: var(--input); color: var(--fg); font: inherit;
+    transition: border-color .15s, background .15s;
+  }
+  #url:focus { background: var(--input-focus); border-color: var(--accent); }
+  #bar {
+    position: fixed; left: 0; bottom: 0; height: 2px; width: 0;
+    background: var(--accent); opacity: 0; transition: width .4s ease, opacity .3s;
+  }
+  body.loading #bar { width: 70%; opacity: 1; }
+  body.loading #reload .r { display: none; }
+  body:not(.loading) #reload .x { display: none; }
+</style>
+</head>
+<body>
+  <button id="back" title="Späť (⌘[)"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
+  <button id="forward" title="Vpred (⌘])"><svg viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg></button>
+  <button id="reload" title="Obnoviť (⌘R)">
+    <svg class="r" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+    <svg class="x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+  </button>
+  <button id="home" title="Domov (⌘⇧H)"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></button>
+  <input id="url" spellcheck="false" autocomplete="off" placeholder="Hľadať alebo zadať adresu">
+  <button id="settings" title="Nastavenia (⌘,)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+  <div id="bar"></div>
+<script>
+  const send = (m) => window.ipc.postMessage(m);
+  const url = document.getElementById('url');
+  home.onclick = () => send('home');
+  settings.onclick = () => send('settings');
+  window.setSettingsOpen = (on) => settings.classList.toggle('on', on);
+  back.onclick = () => send('back');
+  forward.onclick = () => send('forward');
+  reload.onclick = () => send(document.body.classList.contains('loading') ? 'stop' : 'reload');
+  url.onkeydown = (e) => {
+    if (e.key === 'Enter') { send('go:' + url.value); url.blur(); }
+    if (e.key === 'Escape') { url.blur(); }
+  };
+  url.onfocus = () => setTimeout(() => url.select(), 0);
+  document.body.onmousedown = (e) => { if (e.target === document.body) send('drag'); };
+  window.setUrl = (u) => { if (document.activeElement !== url) url.value = u; };
+  window.setLoading = (on) => document.body.classList.toggle('loading', on);
+  window.focusUrl = () => { url.focus(); url.select(); };
+</script>
+</body>
+</html>
