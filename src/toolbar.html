@@ -1,81 +1,195 @@
-<!doctype html>
+2<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
   :root {
     color-scheme: dark;
-    --bg: #1f1f23; --line: #2c2c31; --fg: #e6e6e9; --icon: #c9c9ce;
+    --bg: #1b1b1f; --nav: #232328; --line: #2c2c31; --fg: #e6e6e9; --mute: #8e8e96; --icon: #c9c9ce;
     --hover: #2e2e34; --active: #38383f; --input: #2a2a2f; --input-focus: #18181b; --accent: #5b8def;
+    --tab: transparent; --tab-on: #232328;
   }
   @media (prefers-color-scheme: light) {
     :root {
       color-scheme: light;
-      --bg: #f4f4f6; --line: #dcdce1; --fg: #1d1d1f; --icon: #4a4a50;
-      --hover: #e4e4e9; --active: #d8d8de; --input: #e6e6eb; --input-focus: #fff;
+      --bg: #e9e9ed; --nav: #f7f7f9; --line: #d6d6dc; --fg: #1d1d1f; --mute: #6e6e76; --icon: #4a4a50;
+      --hover: #dcdce2; --active: #cfcfd6; --input: #e6e6eb; --input-focus: #fff; --tab-on: #f7f7f9;
     }
   }
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; overflow: hidden; }
   body {
-    display: flex; align-items: center; gap: 4px;
-    padding: 0 10px 0 80px; /* space for traffic lights */
-    background: var(--bg); border-bottom: 1px solid var(--line);
+    display: flex; flex-direction: column; background: var(--bg);
     font: 13px -apple-system, BlinkMacSystemFont, sans-serif; color: var(--fg);
     user-select: none; -webkit-user-select: none; cursor: default;
   }
+  .row { display: flex; align-items: center; gap: 4px; flex: none; }
+  #tabrow { height: 36px; padding: 6px 8px 0 80px; align-items: stretch; }
+  #nav { height: 40px; padding: 0 8px; background: var(--nav); border-bottom: 1px solid var(--line); }
+  #find { height: 36px; padding: 0 8px; background: var(--nav); border-bottom: 1px solid var(--line); display: none; }
+  body.finding #find { display: flex; }
+
+  #tabs { display: flex; flex: 1; min-width: 0; gap: 2px; }
+  .tab {
+    flex: 1 1 200px; max-width: 220px; min-width: 48px; display: flex; align-items: center; gap: 6px;
+    padding: 0 6px 0 10px; border-radius: 8px 8px 0 0; background: var(--tab); color: var(--mute);
+    position: relative;
+  }
+  .tab:hover { background: var(--hover); color: var(--fg); }
+  .tab.on { background: var(--tab-on); color: var(--fg); }
+  .tab.asleep .t { opacity: .6; }
+  .tab .t { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .tab .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mute); flex: none; opacity: .5; }
+  .tab.loading .dot { background: transparent; border: 2px solid var(--accent); border-right-color: transparent; animation: spin .8s linear infinite; opacity: 1; }
+  .tab .x { width: 18px; height: 18px; border-radius: 4px; display: grid; place-items: center; opacity: 0; font-size: 14px; flex: none; }
+  .tab:hover .x, .tab.on .x { opacity: .7; }
+  .tab .x:hover { background: var(--active); opacity: 1; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
   button {
     width: 30px; height: 28px; border: 0; border-radius: 7px; flex: none;
-    background: transparent; color: var(--icon); display: grid; place-items: center;
+    background: transparent; color: var(--icon); display: grid; place-items: center; position: relative;
   }
   button:hover { background: var(--hover); color: var(--fg); }
-  button:active, button.on { background: var(--active); }
+  button:active, button.on { background: var(--active); color: var(--fg); }
+  #newtab { height: 26px; align-self: center; margin-left: 2px; }
   svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  #url {
-    flex: 1; height: 28px; margin: 0 6px; padding: 0 12px;
+
+  .urlwrap { flex: 1; position: relative; margin: 0 6px; display: flex; }
+  #url, #fq {
+    flex: 1; height: 28px; padding: 0 34px 0 12px;
     border: 1px solid transparent; border-radius: 14px; outline: none;
     background: var(--input); color: var(--fg); font: inherit;
-    transition: border-color .15s, background .15s;
   }
-  #url:focus { background: var(--input-focus); border-color: var(--accent); }
-  #bar {
-    position: fixed; left: 0; bottom: 0; height: 2px; width: 0;
-    background: var(--accent); opacity: 0; transition: width .4s ease, opacity .3s;
-  }
+  #url:focus, #fq:focus { background: var(--input-focus); border-color: var(--accent); }
+  #star { position: absolute; right: 2px; top: 0; width: 28px; }
+  #star.on { background: transparent; color: #f5c518; }
+  #star.on svg { fill: #f5c518; }
+  #shield.off { opacity: .35; }
+  #dl.busy { color: var(--accent); }
+  #dl.busy::after { content: ''; position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+  #fq { flex: 0 1 320px; padding-right: 12px; }
+  #fcount { color: var(--mute); min-width: 110px; padding: 0 8px; }
+  .spacer { flex: 1; }
+
+  #bar { position: absolute; left: 0; top: 74px; height: 2px; width: 0; background: var(--accent); opacity: 0; transition: width .4s ease, opacity .3s; }
   body.loading #bar { width: 70%; opacity: 1; }
   body.loading #reload .r { display: none; }
-  body:not(.loading) #reload .x { display: none; }
+  body:not(.loading) #reload .s { display: none; }
+
+  #toast {
+    position: absolute; right: 10px; top: 7px; max-width: 45%; padding: 4px 12px; border-radius: 12px;
+    background: var(--accent); color: #fff; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    opacity: 0; transform: translateY(-4px); transition: .2s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; transform: none; }
 </style>
 </head>
 <body>
-  <button id="back" title="Späť (⌘[)"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
-  <button id="forward" title="Vpred (⌘])"><svg viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg></button>
-  <button id="reload" title="Obnoviť (⌘R)">
-    <svg class="r" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
-    <svg class="x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
-  </button>
-  <button id="home" title="Domov (⌘⇧H)"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></button>
-  <input id="url" spellcheck="false" autocomplete="off" placeholder="Hľadať alebo zadať adresu">
-  <button id="settings" title="Nastavenia (⌘,)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+  <div id="tabrow" class="row">
+    <div id="tabs"></div>
+    <button id="newtab" title="Nová karta (⌘T)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+  </div>
+  <div id="nav" class="row">
+    <button id="back" title="Späť (⌘[)"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <button id="forward" title="Vpred (⌘])"><svg viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg></button>
+    <button id="reload" title="Obnoviť (⌘R)">
+      <svg class="r" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+      <svg class="s" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+    <button id="home" title="Domov (⌘⇧H)"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></button>
+    <div class="urlwrap">
+      <input id="url" spellcheck="false" autocomplete="off" placeholder="Hľadať alebo zadať adresu">
+      <button id="star" title="Obľúbené (⌘D)"><svg viewBox="0 0 24 24"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg></button>
+    </div>
+    <button id="shield" title="Blokovanie reklám"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></button>
+    <button id="bms" title="Obľúbené stránky (⌘⌥B)"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
+    <button id="hist" title="História (⌘Y)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></button>
+    <button id="dl" title="Stiahnuté (⌘⌥L)"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></button>
+    <button id="settings" title="Nastavenia (⌘,)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+  </div>
+  <div id="find" class="row">
+    <input id="fq" spellcheck="false" autocomplete="off" placeholder="Hľadať na stránke">
+    <span id="fcount"></span>
+    <button id="fprev" title="Predchádzajúci (⌘⇧G)"><svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6"/></svg></button>
+    <button id="fnext" title="Ďalší (⌘G)"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+    <div class="spacer"></div>
+    <button id="fclose" title="Zavrieť (Esc)"><svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+  </div>
   <div id="bar"></div>
+  <div id="toast"></div>
 <script>
+  const $ = (id) => document.getElementById(id);
   const send = (m) => window.ipc.postMessage(m);
-  const url = document.getElementById('url');
-  home.onclick = () => send('home');
-  settings.onclick = () => send('settings');
-  window.setSettingsOpen = (on) => settings.classList.toggle('on', on);
-  back.onclick = () => send('back');
-  forward.onclick = () => send('forward');
-  reload.onclick = () => send(document.body.classList.contains('loading') ? 'stop' : 'reload');
+  const url = $('url'), fq = $('fq');
+  let S = { tabs: [], active: 0 };
+
+  const click = { newtab: 'new-tab', back: 'back', forward: 'forward', home: 'home', star: 'bookmark',
+                  bms: 'panel:bookmarks', hist: 'panel:history', dl: 'panel:downloads',
+                  settings: 'panel:settings', shield: 'panel:settings', fclose: 'find-close' };
+  for (const [id, cmd] of Object.entries(click)) $(id).onclick = () => send(cmd);
+  $('reload').onclick = () => send(S.loading ? 'stop' : 'reload');
+  $('fnext').onclick = () => findStep(false);
+  $('fprev').onclick = () => findStep(true);
+
   url.onkeydown = (e) => {
     if (e.key === 'Enter') { send('go:' + url.value); url.blur(); }
-    if (e.key === 'Escape') { url.blur(); }
+    if (e.key === 'Escape') { url.value = S.url || ''; url.blur(); }
   };
   url.onfocus = () => setTimeout(() => url.select(), 0);
-  document.body.onmousedown = (e) => { if (e.target === document.body) send('drag'); };
-  window.setUrl = (u) => { if (document.activeElement !== url) url.value = u; };
-  window.setLoading = (on) => document.body.classList.toggle('loading', on);
-  window.focusUrl = () => { url.focus(); url.select(); };
+
+  $('tabrow').onmousedown = (e) => { if (e.target.id === 'tabrow' || e.target.id === 'tabs') send('drag'); };
+  $('tabrow').ondblclick = (e) => { if (e.target.id === 'tabrow' || e.target.id === 'tabs') send('new-tab'); };
+
+  function render(st) {
+    S = st;
+    const tabs = $('tabs');
+    tabs.replaceChildren(...st.tabs.map((t, i) => {
+      const el = document.createElement('div');
+      el.className = 'tab' + (i === st.active ? ' on' : '') + (t.loading ? ' loading' : '') + (t.asleep ? ' asleep' : '');
+      el.title = t.title;
+      const dot = document.createElement('span'); dot.className = 'dot';
+      const title = document.createElement('span'); title.className = 't'; title.textContent = t.title;
+      const x = document.createElement('span'); x.className = 'x'; x.textContent = '×';
+      x.onclick = (e) => { e.stopPropagation(); send('close-tab:' + t.id); };
+      el.onmousedown = (e) => { if (e.button === 0 && e.target !== x) send('select:' + t.id); };
+      el.onauxclick = (e) => { if (e.button === 1) send('close-tab:' + t.id); };
+      el.append(dot, title, x);
+      return el;
+    }));
+    if (document.activeElement !== url) url.value = st.url;
+    document.body.classList.toggle('loading', st.loading);
+    $('star').classList.toggle('on', st.bookmarked);
+    $('shield').classList.toggle('off', !st.adblock);
+    $('shield').title = st.adblock ? 'Blokovanie reklám: zapnuté' : 'Blokovanie reklám: vypnuté';
+    $('dl').classList.toggle('busy', st.downloads > 0);
+    for (const [id, sec] of [['bms', 'bookmarks'], ['hist', 'history'], ['dl', 'downloads'], ['settings', 'settings']])
+      $(id).classList.toggle('on', st.panel === sec);
+  }
+
+  function focusUrl() { url.focus(); url.select(); }
+
+  function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2200);
+  }
+
+  // Find in page
+  const findSend = (dir) => send('find:' + JSON.stringify({ q: fq.value, dir }));
+  function findStep(back) { findSend(back ? 'prev' : 'next'); }
+  function openFind() { document.body.classList.add('finding'); fq.focus(); fq.select(); if (fq.value) findSend('new'); }
+  function closeFind() { document.body.classList.remove('finding'); $('fcount').textContent = ''; }
+  function findCount(n) {
+    const w = n === 1 ? 'výsledok' : n >= 2 && n <= 4 ? 'výsledky' : 'výsledkov';
+    $('fcount').textContent = fq.value ? (n ? n + ' ' + w : 'Žiadne výsledky') : '';
+  }
+  fq.oninput = () => findSend('new');
+  fq.onkeydown = (e) => {
+    if (e.key === 'Enter') findStep(e.shiftKey);
+    if (e.key === 'Escape') send('find-close');
+  };
 </script>
 </body>
 </html>
