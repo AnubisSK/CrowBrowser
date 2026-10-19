@@ -1,0 +1,14 @@
+/Users/anubissvk/Documents/CrowBrowserMac/target/release/deps/serde-d7fc573a2d7159ef.d: /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/anubissvk/Documents/CrowBrowserMac/target/release/build/serde-a5d7449d7a3d9f09/out/private.rs
+
+/Users/anubissvk/Documents/CrowBrowserMac/target/release/deps/libserde-d7fc573a2d7159ef.rlib: /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/anubissvk/Documents/CrowBrowserMac/target/release/build/serde-a5d7449d7a3d9f09/out/private.rs
+
+/Users/anubissvk/Documents/CrowBrowserMac/target/release/deps/libserde-d7fc573a2d7159ef.rmeta: /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/anubissvk/Documents/CrowBrowserMac/target/release/build/serde-a5d7449d7a3d9f09/out/private.rs
+
+/Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/Users/anubissvk/Documents/CrowBrowserMac/target/release/build/serde-a5d7449d7a3d9f09/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/anubissvk/Documents/CrowBrowserMac/target/release/build/serde-a5d7449d7a3d9f09/out

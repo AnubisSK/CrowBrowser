@@ -1,0 +1,14 @@
+/Users/anubissvk/Documents/CrowBrowserMac/target/release/deps/thiserror-0a4b41f973738abe.d: /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/lib.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/aserror.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/display.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/var.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/private.rs /Users/anubissvk/Documents/CrowBrowserMac/target/release/build/thiserror-5ff29bfcea6f1442/out/private.rs
+
+/Users/anubissvk/Documents/CrowBrowserMac/target/release/deps/libthiserror-0a4b41f973738abe.rlib: /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/lib.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/aserror.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/display.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/var.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/private.rs /Users/anubissvk/Documents/CrowBrowserMac/target/release/build/thiserror-5ff29bfcea6f1442/out/private.rs
+
+/Users/anubissvk/Documents/CrowBrowserMac/target/release/deps/libthiserror-0a4b41f973738abe.rmeta: /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/lib.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/aserror.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/display.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/var.rs /Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/private.rs /Users/anubissvk/Documents/CrowBrowserMac/target/release/build/thiserror-5ff29bfcea6f1442/out/private.rs
+
+/Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/lib.rs:
+/Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/aserror.rs:
+/Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/display.rs:
+/Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/var.rs:
+/Users/anubissvk/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/thiserror-2.0.21/src/private.rs:
+/Users/anubissvk/Documents/CrowBrowserMac/target/release/build/thiserror-5ff29bfcea6f1442/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/anubissvk/Documents/CrowBrowserMac/target/release/build/thiserror-5ff29bfcea6f1442/out
