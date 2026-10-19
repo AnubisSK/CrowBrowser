@@ -1,0 +1,281 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #18181b; --side: #1d1d21; --card: #222226; --line: #2f2f35; --fg: #e6e6e9; --mute: #9a9aa3;
+    --input: #2a2a2f; --hover: #2a2a30; --accent: #5b8def; --danger: #e5534b; --ok: #3fb950;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      color-scheme: light;
+      --bg: #f4f4f6; --side: #ececf0; --card: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76;
+      --input: #f0f0f3; --hover: #f0f0f4;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body { display: flex; background: var(--bg); color: var(--fg); font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+  nav { width: 200px; flex: none; background: var(--side); border-right: 1px solid var(--line); padding: 20px 10px; user-select: none; -webkit-user-select: none; }
+  nav button {
+    display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 12px; margin-bottom: 2px;
+    border: 0; border-radius: 8px; background: transparent; color: var(--fg); font: inherit; text-align: left;
+  }
+  nav button:hover { background: var(--hover); }
+  nav button.on { background: var(--accent); color: #fff; }
+  nav svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  main { flex: 1; overflow-y: auto; padding: 28px 32px 48px; }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+  h1 { font-size: 22px; font-weight: 600; flex: 1; }
+  h2 { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--mute); margin: 24px 4px 8px; }
+  h3 { font-size: 12px; font-weight: 600; color: var(--mute); margin: 18px 4px 6px; }
+  section, .list { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 16px; min-height: 52px; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row small { display: block; color: var(--mute); margin-top: 2px; }
+  select, input[type=text], input[type=password], input[type=search] {
+    background: var(--input); color: var(--fg); font: inherit;
+    border: 1px solid transparent; border-radius: 8px; height: 30px; padding: 0 10px; outline: none;
+  }
+  input[type=text] { width: 280px; }
+  input[type=search] { width: 260px; }
+  select:focus, input:focus { border-color: var(--accent); }
+  .seg { display: flex; background: var(--input); border-radius: 8px; padding: 2px; flex: none; }
+  .seg button { border: 0; background: transparent; color: var(--fg); font: inherit; padding: 5px 12px; border-radius: 6px; }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .btn { border: 1px solid var(--line); background: var(--input); color: var(--fg); font: inherit; padding: 6px 14px; border-radius: 8px; white-space: nowrap; }
+  .btn:hover { border-color: var(--mute); }
+  .btn.danger { color: var(--danger); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  .pw { display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
+  .pw input { width: 100%; }
+  .pw .btn { align-self: flex-start; }
+  #close { width: 32px; height: 32px; border-radius: 16px; border: 0; background: var(--input); color: var(--fg); font-size: 16px; }
+
+  .item { display: flex; align-items: center; gap: 12px; padding: 8px 12px 8px 16px; min-height: 44px; }
+  .item + .item { border-top: 1px solid var(--line); }
+  .item:hover { background: var(--hover); }
+  .item .main { flex: 1; min-width: 0; cursor: pointer; }
+  .item .title, .item .sub { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .item .sub { color: var(--mute); font-size: 12px; margin-top: 1px; }
+  .item .time { color: var(--mute); font-size: 12px; width: 44px; flex: none; }
+  .item .del { width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: var(--mute); font-size: 16px; opacity: 0; }
+  .item:hover .del { opacity: 1; }
+  .item .del:hover { background: var(--input); color: var(--fg); }
+  .state { font-size: 12px; flex: none; }
+  .state.active { color: var(--accent); } .state.failed { color: var(--danger); } .state.done { color: var(--ok); }
+  .empty { padding: 32px; text-align: center; color: var(--mute); }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px);
+    background: var(--accent); color: #fff; padding: 8px 16px; border-radius: 8px;
+    opacity: 0; transition: .2s; pointer-events: none;
+  }
+  #toast.err { background: var(--danger); }
+  #toast.show { opacity: 1; transform: translate(-50%, 0); }
+</style>
+</head>
+<body>
+<nav>
+  <button data-s="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg>Nastavenia</button>
+  <button data-s="history"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>História</button>
+  <button data-s="bookmarks"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>Obľúbené</button>
+  <button data-s="downloads"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Stiahnuté</button>
+</nav>
+<main><div class="wrap" id="root"></div></main>
+<div id="toast"></div>
+<script>
+  let D = /*DATA*/;
+  let section = D.section || 'settings';
+  let query = '';
+  const send = (m) => window.ipc.postMessage(m);
+  const set = (k, v) => { send('set:' + k + '=' + v); D.settings[k] = v; toast('Uložené'); };
+  const root = document.getElementById('root');
+
+  function h(tag, props = {}, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k.startsWith('on')) el[k] = v; else if (k === 'class') el.className = v; else el.setAttribute(k, v);
+    }
+    for (const k of kids.flat()) if (k != null) el.append(k);
+    return el;
+  }
+
+  function toast(t, err) {
+    const el = document.getElementById('toast');
+    el.textContent = t; el.classList.toggle('err', !!err); el.classList.add('show');
+    clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('show'), 1800);
+  }
+
+  function confirmBtn(label, onConfirm) {
+    const b = h('button', { class: 'btn danger' }, label);
+    b.onclick = () => {
+      if (!b._armed) {
+        b._armed = true; b.textContent = 'Naozaj?';
+        setTimeout(() => { b._armed = false; b.textContent = label; }, 3000);
+        return;
+      }
+      b._armed = false; b.textContent = label; onConfirm();
+    };
+    return b;
+  }
+
+  function seg(key, opts) {
+    const el = h('div', { class: 'seg' });
+    const mark = () => el.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === String(D.settings[key] === true ? 'on' : D.settings[key] === false ? 'off' : D.settings[key])));
+    for (const [v, label] of opts) {
+      const b = h('button', { 'data-v': v }, label);
+      b.onclick = () => { set(key, v); D.settings[key] = v === 'on' ? true : v === 'off' ? false : v; mark(); };
+      el.append(b);
+    }
+    mark();
+    return el;
+  }
+
+  function select(key, opts) {
+    const s = h('select');
+    for (const [v, label] of opts) s.add(new Option(label, v, false, String(v) === String(D.settings[key])));
+    s.onchange = () => set(key, s.value);
+    return s;
+  }
+
+  const row = (label, sub, control) => h('div', { class: 'row' }, h('div', {}, label, sub ? h('small', {}, sub) : null), control);
+  const header = (title, ...extra) => h('header', {}, h('h1', {}, title), ...extra, h('button', { id: 'close', title: 'Zavrieť (Esc)', onclick: () => send('panel-close') }, '✕'));
+
+  function host(u) { try { return new URL(u).host; } catch { return u; } }
+  function fmtTime(t) { return new Date(t).toLocaleTimeString('sk', { hour: '2-digit', minute: '2-digit' }); }
+  function fmtDay(t) {
+    const d = new Date(t), today = new Date();
+    const y = new Date(); y.setDate(today.getDate() - 1);
+    if (d.toDateString() === today.toDateString()) return 'Dnes';
+    if (d.toDateString() === y.toDateString()) return 'Včera';
+    return d.toLocaleDateString('sk', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  }
+  const openUrl = (u, e) => send((e && e.metaKey ? 'open-new:' : 'open:') + u);
+
+  const views = {
+    settings() {
+      const home = h('input', { type: 'text', spellcheck: 'false' });
+      home.value = D.settings.homepage;
+      home.onchange = () => set('homepage', home.value);
+      home.onkeydown = (e) => { if (e.key === 'Enter') home.blur(); };
+
+      const pw = ['Aktuálne heslo', 'Nové heslo (min. 8 znakov)', 'Zopakuj nové heslo'].map(p => h('input', { type: 'password', placeholder: p }));
+      const pwBtn = h('button', { class: 'btn primary' }, 'Zmeniť heslo');
+      pwBtn.onclick = () => {
+        if (pw[1].value !== pw[2].value) return toast('Nové heslá sa nezhodujú', true);
+        if ([...pw[1].value].length < 8) return toast('Nové heslo musí mať aspoň 8 znakov', true);
+        pwBtn.disabled = true; pwBtn.textContent = 'Mením…';
+        setTimeout(() => send('change-pw:' + JSON.stringify({ old: pw[0].value, new: pw[1].value })), 60);
+      };
+      window.pwResult = (ok, msg) => {
+        pwBtn.disabled = false; pwBtn.textContent = 'Zmeniť heslo';
+        toast(msg, !ok);
+        if (ok) pw.forEach(i => i.value = '');
+      };
+
+      return [
+        header('Nastavenia'),
+        h('h2', {}, 'Vyhľadávanie'),
+        h('section', {}, row('Predvolený vyhľadávač', 'Použije sa pri písaní do adresného riadku', select('search', D.engines))),
+        h('h2', {}, 'Spustenie'),
+        h('section', {},
+          row('Domovská stránka', 'Tlačidlo Domov (⌘⇧H) a nové karty', home),
+          row('Pri spustení otvoriť', null, seg('startup', [['home', 'Domovskú stránku'], ['last', 'Posledné karty']]))),
+        h('h2', {}, 'Vzhľad'),
+        h('section', {},
+          row('Motív', null, seg('theme', [['dark', 'Tmavý'], ['light', 'Svetlý'], ['system', 'Systém']])),
+          row('Predvolené priblíženie', '⌘+ / ⌘− / ⌘0', select('zoom', [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2].map(z => [z, Math.round(z * 100) + ' %'])))),
+        h('h2', {}, 'Výkon'),
+        h('section', {},
+          row('Uspávať neaktívne karty po', 'Uvoľní pamäť skrytých kariet; po kliknutí sa znova načítajú',
+            select('unload', [[1, '1 minúte'], [5, '5 minútach'], [15, '15 minútach'], [30, '30 minútach'], [60, '1 hodine'], [0, 'Nikdy']]))),
+        h('h2', {}, 'Ochrana súkromia'),
+        h('section', {},
+          row('Blokovanie reklám a sledovačov', 'Blokuje sa priamo v sieťovej vrstve WebKitu. Vlastný zoznam: ~/Library/Application Support/Crow/blocklist.txt',
+            seg('adblock', [['on', 'Zapnuté'], ['off', 'Vypnuté']])),
+          row('Vymazať históriu', null, confirmBtn('Vymazať', () => { send('clear:history'); toast('História vymazaná'); })),
+          row('Vymazať cookies a prihlásenia', 'Odhlási ťa zo všetkých webov', confirmBtn('Vymazať', () => { send('clear:cookies'); toast('Cookies vymazané'); })),
+          row('Vymazať zoznam stiahnutých', 'Súbory na disku zostanú', confirmBtn('Vymazať', () => { send('clear:downloads'); toast('Zoznam vymazaný'); }))),
+        h('h2', {}, 'Šifrovanie'),
+        h('section', {},
+          row('Šifrovaný trezor', 'História, obľúbené, cookies, prihlásenia a karty sú šifrované heslom (Argon2id + XChaCha20-Poly1305)',
+            h('button', { class: 'btn', onclick: () => send('lock') }, 'Zamknúť teraz (⌃⌘L)')),
+          h('div', { class: 'pw' }, ...pw, pwBtn)),
+        h('h2', {}, 'O aplikácii'),
+        h('section', {}, row('Crow Browser', 'WebKit · Rust · tao + wry', null)),
+      ];
+    },
+
+    history() {
+      const search = h('input', { type: 'search', placeholder: 'Hľadať v histórii' });
+      search.value = query;
+      search.oninput = () => { query = search.value; renderList(); };
+      const listWrap = h('div');
+      function renderList() {
+        const q = query.toLowerCase();
+        const items = D.history.filter(e => !q || e.url.toLowerCase().includes(q) || (e.title || '').toLowerCase().includes(q));
+        if (!items.length) return listWrap.replaceChildren(h('div', { class: 'list' }, h('div', { class: 'empty' }, q ? 'Nič sa nenašlo' : 'História je prázdna')));
+        const out = []; let day = null, list = null;
+        for (const e of items.slice(0, 1000)) {
+          const d = fmtDay(e.time);
+          if (d !== day) { day = d; out.push(h('h3', {}, d)); list = h('div', { class: 'list' }); out.push(list); }
+          list.append(h('div', { class: 'item' },
+            h('span', { class: 'time' }, fmtTime(e.time)),
+            h('div', { class: 'main', onclick: (ev) => openUrl(e.url, ev), title: e.url },
+              h('div', { class: 'title' }, e.title || host(e.url)), h('div', { class: 'sub' }, e.url)),
+            h('button', { class: 'del', title: 'Odstrániť', onclick: () => send('hist-del:' + e.time) }, '×')));
+        }
+        listWrap.replaceChildren(...out);
+      }
+      renderList();
+      setTimeout(() => search.focus(), 0);
+      return [header('História', search, confirmBtn('Vymazať všetko', () => send('clear:history'))), listWrap];
+    },
+
+    bookmarks() {
+      const list = h('div', { class: 'list' });
+      if (!D.bookmarks.length) list.append(h('div', { class: 'empty' }, 'Zatiaľ žiadne obľúbené. Pridáš ich hviezdičkou v adresnom riadku alebo ⌘D.'));
+      for (const b of D.bookmarks) list.append(h('div', { class: 'item' },
+        h('div', { class: 'main', onclick: (ev) => openUrl(b.url, ev), title: b.url },
+          h('div', { class: 'title' }, b.title || host(b.url)), h('div', { class: 'sub' }, b.url)),
+        h('button', { class: 'del', title: 'Odstrániť', onclick: () => send('bm-del:' + b.url) }, '×')));
+      return [header('Obľúbené'), list];
+    },
+
+    downloads() {
+      const label = { active: 'Sťahuje sa…', done: 'Hotovo', failed: 'Zlyhalo' };
+      const list = h('div', { class: 'list' });
+      if (!D.downloads.length) list.append(h('div', { class: 'empty' }, 'Žiadne stiahnuté súbory'));
+      for (const d of D.downloads) {
+        const name = d.path.split('/').pop();
+        list.append(h('div', { class: 'item' },
+          h('div', { class: 'main', onclick: () => d.state === 'done' && send('open-file:' + d.path), title: d.path },
+            h('div', { class: 'title' }, name), h('div', { class: 'sub' }, host(d.url) + ' · ' + fmtDay(d.time) + ' ' + fmtTime(d.time))),
+          h('span', { class: 'state ' + d.state }, label[d.state] || d.state),
+          d.state === 'done' ? h('button', { class: 'btn', onclick: () => send('reveal:' + d.path) }, 'Zobraziť vo Finderi') : null));
+      }
+      return [header('Stiahnuté', confirmBtn('Vymazať zoznam', () => send('clear:downloads'))), list];
+    },
+  };
+
+  function render() {
+    document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.s === section));
+    root.replaceChildren(...views[section]());
+  }
+  function show(s) { if (views[s]) { section = s; render(); } }
+  function setData(d) {
+    const keep = D.settings;
+    D = d; D.settings = keep;
+    if (section !== 'settings') render();
+  }
+
+  document.querySelectorAll('nav button').forEach(b => b.onclick = () => { show(b.dataset.s); send('panel-section:' + b.dataset.s); });
+  document.onkeydown = (e) => { if (e.key === 'Escape' && !['INPUT', 'SELECT'].includes(document.activeElement.tagName)) send('panel-close'); };
+  render();
+</script>
+</body>
+</html>

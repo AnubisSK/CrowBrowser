@@ -1,0 +1,104 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: dark; --bg: #18181b; --card: #222226; --line: #2f2f35; --fg: #e6e6e9; --mute: #9a9aa3; --input: #2a2a2f; --accent: #5b8def; --danger: #e5534b; }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; --bg: #f4f4f6; --card: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76; --input: #f0f0f3; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    display: grid; place-items: center; background: var(--bg); color: var(--fg);
+    font: 13px -apple-system, BlinkMacSystemFont, sans-serif; user-select: none; -webkit-user-select: none;
+  }
+  .card { width: 360px; padding: 32px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; text-align: center; }
+  .logo { width: 56px; height: 56px; margin: 0 auto 16px; border-radius: 16px; background: var(--accent); display: grid; place-items: center; }
+  .logo svg { width: 28px; height: 28px; stroke: #fff; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 6px; }
+  p { color: var(--mute); line-height: 1.45; margin-bottom: 20px; }
+  input {
+    width: 100%; height: 36px; padding: 0 12px; margin-bottom: 10px; border-radius: 9px; outline: none;
+    border: 1px solid transparent; background: var(--input); color: var(--fg); font: inherit;
+  }
+  input:focus { border-color: var(--accent); }
+  button.primary {
+    width: 100%; height: 36px; margin-top: 4px; border: 0; border-radius: 9px;
+    background: var(--accent); color: #fff; font: inherit; font-weight: 600;
+  }
+  button.primary:disabled { opacity: .6; }
+  .err { color: var(--danger); min-height: 18px; margin-top: 10px; }
+  .warn { font-size: 12px; margin: 14px 0 0; }
+  .link { background: none; border: 0; color: var(--mute); font: inherit; font-size: 12px; margin-top: 14px; text-decoration: underline; }
+  .link.armed { color: var(--danger); }
+  .shake { animation: shake .35s; }
+  @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
+</style>
+</head>
+<body>
+  <form class="card" id="card" autocomplete="off">
+    <div class="logo"><svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+    <h1 id="h"></h1>
+    <p id="d"></p>
+    <input type="password" id="pw" autofocus>
+    <input type="password" id="pw2" placeholder="Zopakuj heslo">
+    <button class="primary" id="go" type="submit"></button>
+    <div class="err" id="err"></div>
+    <p class="warn" id="warn">Heslo sa nikam neukladá. Ak ho zabudneš, dáta sa nedajú obnoviť.</p>
+    <button class="link" id="reset" type="button">Zabudol som heslo – vymazať všetky dáta</button>
+  </form>
+<script>
+  const MODE = /*MODE*/;
+  const $ = (id) => document.getElementById(id);
+  const send = (m) => window.ipc.postMessage(m);
+  const create = MODE === 'create';
+
+  $('h').textContent = create ? 'Vitaj v Crow' : 'Crow je zamknutý';
+  $('d').textContent = create
+    ? 'Nastav heslo. Šifruje históriu, obľúbené, cookies a prihlásenia (Argon2id + XChaCha20-Poly1305).'
+    : 'Zadaj heslo na odomknutie histórie, cookies a prihlásení.';
+  $('pw').placeholder = create ? 'Nové heslo (min. 8 znakov)' : 'Heslo';
+  $('go').textContent = create ? 'Vytvoriť trezor' : 'Odomknúť';
+  $('pw2').style.display = create ? '' : 'none';
+  $('warn').style.display = create ? '' : 'none';
+  $('reset').style.display = create ? 'none' : '';
+
+  document.body.onmousedown = (e) => { if (e.target === document.body) send('drag'); };
+
+  $('card').onsubmit = (e) => {
+    e.preventDefault();
+    const pw = $('pw').value;
+    if (create) {
+      if ([...pw].length < 8) return fail('Heslo musí mať aspoň 8 znakov');
+      if (pw !== $('pw2').value) return fail('Heslá sa nezhodujú');
+    }
+    if (!pw) return;
+    $('err').textContent = '';
+    $('go').disabled = true;
+    $('go').textContent = create ? 'Vytváram…' : 'Odomykám…';
+    // let the label repaint before key derivation blocks the UI thread
+    setTimeout(() => send((create ? 'create:' : 'unlock:') + pw), 60);
+  };
+
+  function fail(msg) {
+    $('err').textContent = msg;
+    $('go').disabled = false;
+    $('go').textContent = create ? 'Vytvoriť trezor' : 'Odomknúť';
+    $('pw').value = ''; $('pw2').value = ''; $('pw').focus();
+    const c = $('card'); c.classList.remove('shake'); void c.offsetWidth; c.classList.add('shake');
+  }
+
+  const reset = $('reset');
+  reset.onclick = () => {
+    if (!reset.classList.contains('armed')) {
+      reset.classList.add('armed');
+      reset.textContent = 'Naozaj? Klikni znova – história, cookies aj prihlásenia sa vymažú';
+      setTimeout(() => { reset.classList.remove('armed'); reset.textContent = 'Zabudol som heslo – vymazať všetky dáta'; }, 4000);
+      return;
+    }
+    send('reset');
+  };
+</script>
+</body>
+</html>
