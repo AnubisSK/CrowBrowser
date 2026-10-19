@@ -1,7 +1,7 @@
 //! Encrypted on-disk store: Argon2id (64 MiB) -> XChaCha20-Poly1305.
 //! Layout: MAGIC | salt(16) | nonce(24) | ciphertext+tag. Header is authenticated as AAD.
 
-use crate::settings::data_dir;
+use crate::settings::{Settings, data_dir};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
@@ -64,6 +64,7 @@ pub struct VaultData {
     pub cookies: Vec<CookieRec>,
     pub session: Vec<String>,
     pub active: usize,
+    pub settings: Option<Settings>,
 }
 
 pub struct Vault {

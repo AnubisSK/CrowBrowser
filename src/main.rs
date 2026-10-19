@@ -10,7 +10,9 @@ use muda::{
     Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
 };
-use settings::Settings;
+use objc2::{AllocAnyThread, MainThreadMarker};
+use objc2_app_kit::{NSApplication, NSImage};
+use objc2_foundation::NSData;
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
@@ -23,7 +25,6 @@ use tao::{
 static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = Settings::load();
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
     let proxy = event_loop.create_proxy();
@@ -36,13 +37,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_title("Crow")
         .with_inner_size(LogicalSize::new(1200.0, 800.0))
         .with_min_inner_size(LogicalSize::new(480.0, 320.0))
-        .with_theme(app::theme_of(&cfg.theme))
         .with_titlebar_transparent(true)
         .with_title_hidden(true)
         .with_fullsize_content_view(true)
         .build(&event_loop)?;
+    set_dock_icon();
 
-    let mut app = App::new(window, event_loop.create_proxy(), cfg);
+    let mut app = App::new(window, event_loop.create_proxy());
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -61,6 +62,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ControlFlow::WaitUntil(app.wake())
         };
     });
+}
+
+/// Icon for `cargo run` (unbundled binary); the .app bundle uses Crow.icns.
+fn set_dock_icon() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let data = NSData::with_bytes(include_bytes!("../assets/icon-256.png"));
+    if let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) {
+        unsafe { NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&img)) };
+    }
 }
 
 fn build_menu() -> Result<Menu, muda::Error> {

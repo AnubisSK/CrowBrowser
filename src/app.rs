@@ -250,8 +250,9 @@ impl Session {
         }
     }
 
-    fn save_now(&mut self) {
+    fn save_now(&mut self, cfg: &Settings) {
         self.snapshot();
+        self.data.settings = Some(cfg.clone());
         if let Err(e) = self.vault.save(&self.data) {
             eprintln!("vault save failed: {e}");
         }
@@ -312,7 +313,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(window: Window, proxy: EventLoopProxy<UserEvent>, cfg: Settings) -> Self {
+    pub fn new(window: Window, proxy: EventLoopProxy<UserEvent>) -> Self {
         let p = proxy.clone();
         wk::compile_rules(adblock::rules_json(), move || {
             let _ = p.send_event(UserEvent::RulesReady);
@@ -320,7 +321,7 @@ impl App {
         let ctx = TabCtx { window: Rc::new(window), proxy, next_id: Rc::new(Cell::new(1)) };
         let mut app = Self {
             ctx,
-            cfg,
+            cfg: Settings::default(), // real settings live in the vault
             lock: None,
             s: None,
             exit: false,
@@ -333,7 +334,9 @@ impl App {
 
     fn show_lock(&mut self) {
         let mode = if Vault::exists() { "unlock" } else { "create" };
-        let html = include_str!("lock.html").replace("/*MODE*/", &js(mode));
+        let html = include_str!("lock.html")
+            .replace("/*MODE*/", &js(mode))
+            .replace("/*LOGO*/", include_str!("../assets/logo.svg"));
         self.lock = self.ctx.ui_view(html, full_rect(&self.ctx.window));
     }
 
@@ -399,7 +402,7 @@ impl App {
         if self.quit_at.is_some_and(|q| now >= q) {
             // Cookie export never answered; save what we have.
             if let Some(s) = &mut self.s {
-                s.save_now();
+                s.save_now(&self.cfg);
             }
             self.exit = true;
             return;
@@ -431,7 +434,7 @@ impl App {
     /// NSApp terminated from outside (Dock, logout): synchronous save with last known cookies.
     pub fn shutdown(&mut self) {
         if let Some(s) = &mut self.s {
-            s.save_now();
+            s.save_now(&self.cfg);
         }
     }
 
@@ -473,8 +476,11 @@ impl App {
         }
     }
 
-    fn start(&mut self, vault: Vault, data: VaultData) {
+    fn start(&mut self, vault: Vault, mut data: VaultData) {
+        let legacy = data.settings.is_none();
+        self.cfg = data.settings.take().or_else(Settings::take_legacy).unwrap_or_default();
         let w = &self.ctx.window;
+        w.set_theme(theme_of(&self.cfg.theme));
         let html = include_str!("toolbar.html").to_string();
         let Some(toolbar) = self.ctx.ui_view(html, toolbar_rect(w, TABS_H + NAV_H)) else {
             return self.lock_fail("Nepodarilo sa vytvoriť okno");
@@ -496,7 +502,7 @@ impl App {
             panel_section: String::new(),
             find_open: false,
             zoom: self.cfg.zoom,
-            dirty: false,
+            dirty: legacy,
             saving: false,
             ready: false,
             closed: Vec::new(),
@@ -685,7 +691,7 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         if !s.ready {
             // Cookies not restored yet: don't overwrite them with a partial set.
-            s.save_now();
+            s.save_now(&self.cfg);
             return self.after_save(after);
         }
         if s.saving && after == After::Nothing {
@@ -701,7 +707,7 @@ impl App {
     fn saved(&mut self, cookies: Vec<CookieRec>, after: After) {
         let Some(s) = self.s.as_mut() else { return };
         s.data.cookies = cookies;
-        s.save_now();
+        s.save_now(&self.cfg);
         s.saving = false;
         self.after_save(after);
     }
@@ -714,6 +720,9 @@ impl App {
                 if let Some(s) = self.s.take() {
                     wk::clear_store(&s.store);
                 }
+                // Don't reveal the chosen theme (or anything else) while locked.
+                self.cfg = Settings::default();
+                self.ctx.window.set_theme(None);
                 self.show_lock();
             }
         }
@@ -881,7 +890,7 @@ impl App {
                 if !self.cfg.set(k, v) {
                     return;
                 }
-                self.cfg.save();
+                s.dirty = true;
                 let w = &self.ctx.window;
                 match k {
                     "theme" => {
@@ -906,6 +915,7 @@ impl App {
                     _ => {}
                 }
                 s.sync(&self.cfg);
+                self.persist(After::Nothing);
             }
             "clear" => {
                 match arg {

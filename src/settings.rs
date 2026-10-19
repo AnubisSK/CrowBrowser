@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
 pub const ENGINES: &[(&str, &str, &str)] = &[
@@ -10,7 +10,9 @@ pub const ENGINES: &[(&str, &str, &str)] = &[
     ("ecosia", "Ecosia", "https://www.ecosia.org/search?q="),
 ];
 
-#[derive(Serialize)]
+/// Stored encrypted inside the vault (see `VaultData::settings`).
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct Settings {
     pub search: String,
     pub homepage: String,
@@ -40,38 +42,19 @@ pub fn data_dir() -> PathBuf {
     PathBuf::from(home).join("Library/Application Support/Crow")
 }
 
-fn path() -> PathBuf {
-    data_dir().join("settings.conf")
-}
-
 impl Settings {
-    pub fn load() -> Self {
+    /// Migrates the old plaintext settings.conf (if any) and deletes it.
+    pub fn take_legacy() -> Option<Self> {
+        let path = data_dir().join("settings.conf");
+        let text = fs::read_to_string(&path).ok()?;
         let mut s = Self::default();
-        if let Ok(text) = fs::read_to_string(path()) {
-            for line in text.lines() {
-                if let Some((k, v)) = line.split_once('=') {
-                    s.set(k, v);
-                }
+        for line in text.lines() {
+            if let Some((k, v)) = line.split_once('=') {
+                s.set(k, v);
             }
         }
-        s
-    }
-
-    pub fn save(&self) {
-        let _ = fs::create_dir_all(data_dir());
-        let _ = fs::write(
-            path(),
-            format!(
-                "search={}\nhomepage={}\nstartup={}\ntheme={}\nzoom={}\nadblock={}\nunload={}\n",
-                self.search,
-                self.homepage,
-                self.startup,
-                self.theme,
-                self.zoom,
-                if self.adblock { "on" } else { "off" },
-                self.unload
-            ),
-        );
+        let _ = fs::remove_file(path);
+        Some(s)
     }
 
     /// Returns true if the key was recognized and the value valid.
