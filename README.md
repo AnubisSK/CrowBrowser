@@ -5,8 +5,8 @@
 <h1 align="center">Crow</h1>
 
 <p align="center">
-  Ľahký, súkromný a šifrovaný webový prehliadač pre macOS, napísaný v Ruste.<br>
-  Postavený na systémovom WebKite, žiadny Chromium ani Electron.
+  Ľahký, súkromný a šifrovaný webový prehliadač pre macOS a Linux, napísaný v Ruste.<br>
+  Postavený na systémovom WebKite (na Linuxe WebKitGTK), žiadny Chromium ani Electron.
 </p>
 
 ---
@@ -19,7 +19,7 @@
 - **Kompatibilný**: používa WebKit z macOS, rovnaký engine ako Safari, takže moderné weby fungujú.
 - **Natívny**: priehľadná lišta okna, tmavý a svetlý motív, klávesové skratky ako v Safari či Chrome.
 
-Cieľový hardvér: MacBook Air 2015 (Intel Core i5 Broadwell, 4 GB RAM), macOS 12 Monterey a novší.
+Cieľový hardvér: MacBook Air 2015 (Intel Core i5 Broadwell, 4 GB RAM), macOS 12 Monterey a novší. Linux: Arch, Debian/Ubuntu, Fedora s WebKitGTK 4.1, Wayland aj X11.
 
 ## Inštalácia
 
@@ -40,6 +40,8 @@ cargo build --release           # optimalizovaný build
 ```
 
 Požiadavky: Rust (stable, edícia 2024), Xcode Command Line Tools.
+
+Linux: `./scripts/install_linux.sh` (balíky a podrobnosti v [docs/BUILD.md](docs/BUILD.md#linux-webkitgtk)).
 
 ## Dokumentácia
 

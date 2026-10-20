@@ -137,18 +137,28 @@ impl Vault {
         out.extend_from_slice(&nonce);
         out.extend_from_slice(&ct);
 
-        let p = path();
-        fs::create_dir_all(data_dir())?;
-        let tmp = p.with_extension("tmp");
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(&out)?;
-        f.sync_all()?;
-        fs::rename(tmp, p)
+        // Transactional: full write + fsync to .vault.tmp, then atomic rename over vault.bin.
+        // On any error the previous vault.bin stays intact.
+        let dir = data_dir();
+        fs::create_dir_all(&dir)?;
+        let tmp = dir.join(".vault.tmp");
+        let res = (|| {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(&out)?;
+            f.sync_all()?;
+            fs::rename(&tmp, path())?;
+            // Persist the rename itself.
+            fs::File::open(&dir)?.sync_all()
+        })();
+        if res.is_err() {
+            let _ = fs::remove_file(&tmp);
+        }
+        res
     }
 
     pub fn destroy() {

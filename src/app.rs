@@ -1,11 +1,9 @@
 use crate::{
-    adblock,
+    adblock, cert,
     settings::{ENGINES, Settings},
     vault::{self, Bookmark, CookieRec, Download, HistoryEntry, MAX_HISTORY, Vault, VaultData},
     wk,
 };
-use objc2::rc::Retained;
-use objc2_web_kit::{WKWebViewConfiguration, WKWebsiteDataStore};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
@@ -16,22 +14,23 @@ use std::{
 };
 use tao::{
     event_loop::EventLoopProxy,
-    window::{Theme, Window},
+    window::{Fullscreen, Theme, Window},
 };
-use wry::{
-    NewWindowFeatures, NewWindowResponse, PageLoadEvent, RGBA, Rect, WebView, WebViewBuilder,
-    WebViewBuilderExtMacos, WebViewExtMacOS, dpi,
-};
+use wry::{NewWindowFeatures, NewWindowResponse, PageLoadEvent, RGBA, Rect, WebView, dpi};
 use zeroize::Zeroize;
 
 const TABS_H: f64 = 36.0;
 const NAV_H: f64 = 40.0;
 const FIND_H: f64 = 36.0;
+const ASK_H: f64 = 36.0;
+const SITE_W: f64 = 360.0;
 const BG_DARK: RGBA = (0x1f, 0x1f, 0x23, 0xff);
 const BG_LIGHT: RGBA = (0xf4, 0xf4, 0xf6, 0xff);
 const ZOOM_STEPS: &[f64] = &[0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
 const TICK: Duration = Duration::from_secs(30);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Max wait for WebKit to confirm the cookie import before the session starts anyway.
+const RESTORE_TIMEOUT: Duration = Duration::from_secs(3);
 
 const FIND_JS: &str = r#"(function (q, dir) {
   const sel = getSelection();
@@ -51,10 +50,15 @@ pub enum UserEvent {
     Title { tab: u32, title: String },
     NewTab(String),
     AdoptTab(u32),
+    /// A download wants to write to disk; held until the user answers the toolbar prompt.
+    /// `key` identifies the pending download inside `wk`, `tab` the requesting tab (if known).
+    DownloadAsk { key: u32, tab: Option<u32>, url: String, name: String },
     DownloadStarted { url: String, path: PathBuf },
     DownloadDone { url: String, ok: bool },
     FindResult(String),
     Cookies(Vec<CookieRec>, After),
+    /// Fresh cookie list for the site-info popover; `clear` = delete the site's cookies first.
+    SiteCookies { cookies: Vec<CookieRec>, clear: bool },
     CookiesRestored,
     RulesReady,
 }
@@ -94,15 +98,13 @@ impl TabCtx {
         &self,
         id: u32,
         url: Option<&str>,
-        config: Retained<WKWebViewConfiguration>,
+        config: wk::Config,
         rect: Rect,
     ) -> wry::Result<WebView> {
-        let (p1, p2, p3, p4) = (self.proxy.clone(), self.proxy.clone(), self.proxy.clone(), self.proxy.clone());
+        let (p1, p2) = (self.proxy.clone(), self.proxy.clone());
         let ctx = self.clone();
-        let mut b = WebViewBuilder::new()
-            .with_webview_configuration(config)
+        let mut b = wk::builder(config)
             .with_background_color(bg_of(&self.window))
-            .with_bounds(rect)
             .with_on_page_load_handler(move |ev, url| {
                 let started = matches!(ev, PageLoadEvent::Started);
                 let _ = p1.send_event(UserEvent::PageLoad { tab: id, started, url });
@@ -110,18 +112,30 @@ impl TabCtx {
             .with_document_title_changed_handler(move |title| {
                 let _ = p2.send_event(UserEvent::Title { tab: id, title });
             })
-            .with_download_started_handler(move |url, path| {
-                let _ = p3.send_event(UserEvent::DownloadStarted { url, path: path.clone() });
-                true
-            })
-            .with_download_completed_handler(move |url, _, ok| {
-                let _ = p4.send_event(UserEvent::DownloadDone { url, ok });
-            })
             .with_new_window_req_handler(move |url, features| ctx.popup(url, features));
+        // Linux: downloads are watched once on the shared context (wk::watch_downloads).
+        #[cfg(target_os = "macos")]
+        {
+            let (p3, p4) = (self.proxy.clone(), self.proxy.clone());
+            b = b
+                .with_download_started_handler(move |url, path| {
+                    if wk::take_approved(&url) {
+                        let _ = p3.send_event(UserEvent::DownloadStarted { url, path: path.clone() });
+                        return true;
+                    }
+                    // No drive-by downloads: cancel, ask the user, retry on approval.
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let _ = p3.send_event(UserEvent::DownloadAsk { key: 0, tab: Some(id), url, name });
+                    false
+                })
+                .with_download_completed_handler(move |url, _, ok| {
+                    let _ = p4.send_event(UserEvent::DownloadDone { url, ok });
+                });
+        }
         if let Some(url) = url {
             b = b.with_url(url);
         }
-        b.build_as_child(&*self.window)
+        wk::attach(b, rect, &self.window)
     }
 
     /// window.open / target=_blank: a real WKWebView keeping `window.opener`
@@ -129,12 +143,12 @@ impl TabCtx {
     fn popup(&self, url: String, features: NewWindowFeatures) -> NewWindowResponse {
         let id = self.next();
         let rect = content_rect(&self.window, TABS_H + NAV_H);
-        match self.build(id, None, features.opener.target_configuration, rect) {
+        match self.build(id, None, wk::popup_config(features), rect) {
             Ok(view) => {
-                let webview = Retained::into_super(view.webview());
+                let response = wk::popup_response(&view);
                 PENDING.with(|p| p.borrow_mut().push((id, view)));
                 self.send(UserEvent::AdoptTab(id));
-                NewWindowResponse::Create { webview }
+                response
             }
             Err(_) => {
                 self.send(UserEvent::NewTab(url));
@@ -145,17 +159,23 @@ impl TabCtx {
 
     fn ui_view(&self, html: String, rect: Rect) -> Option<WebView> {
         let p = self.proxy.clone();
-        WebViewBuilder::new()
-            .with_html(html)
+        let b = wk::ui_builder()
+            .with_html(wk::ui_html(html))
             .with_background_color(bg_of(&self.window))
-            .with_bounds(rect)
             .with_focused(true)
             .with_ipc_handler(move |req| {
                 let _ = p.send_event(UserEvent::Ipc(req.into_body()));
-            })
-            .build_as_child(&*self.window)
-            .ok()
+            });
+        wk::attach(b, rect, &self.window).ok()
     }
+}
+
+struct Ask {
+    id: u32,
+    key: u32,
+    tab: Option<u32>,
+    url: String,
+    name: String,
 }
 
 struct Tab {
@@ -184,7 +204,7 @@ impl Tab {
 struct Session {
     vault: Vault,
     data: VaultData,
-    store: Retained<WKWebsiteDataStore>,
+    store: wk::Store,
     toolbar: WebView,
     tabs: Vec<Tab>,
     active: usize,
@@ -195,12 +215,23 @@ struct Session {
     dirty: bool,
     saving: bool,
     ready: bool,
+    /// WebKit confirmed the cookie import (false if the session started on timeout).
+    cookies_ok: bool,
     closed: Vec<String>,
+    asks: Vec<Ask>,
+    /// Site-info popover (lock icon), its left edge and content height.
+    site: Option<WebView>,
+    site_x: f64,
+    site_h: f64,
+    site_closed: Instant,
 }
 
 impl Session {
     fn top(&self) -> f64 {
-        TABS_H + NAV_H + if self.find_open { FIND_H } else { 0.0 }
+        TABS_H
+            + NAV_H
+            + if self.find_open { FIND_H } else { 0.0 }
+            + if self.asks.is_empty() { 0.0 } else { ASK_H }
     }
 
     fn cur(&self) -> Option<&Tab> {
@@ -228,6 +259,7 @@ impl Session {
     }
 
     fn close_panel(&mut self) -> bool {
+        self.site = None;
         if self.panel.take().is_none() {
             return false;
         }
@@ -276,6 +308,9 @@ impl Session {
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
             "panel": if self.panel.is_some() { self.panel_section.as_str() } else { "" },
             "adblock": cfg.adblock,
+            "ask": self.asks.first().map(|a| json!({
+                "id": a.id, "name": a.name, "url": a.url, "more": self.asks.len() - 1,
+            })),
         });
         self.eval(&format!("render({state})"));
     }
@@ -310,6 +345,7 @@ pub struct App {
     pub exit: bool,
     next_tick: Instant,
     quit_at: Option<Instant>,
+    restore_by: Option<Instant>,
 }
 
 impl App {
@@ -318,6 +354,22 @@ impl App {
         wk::compile_rules(adblock::rules_json(), move || {
             let _ = p.send_event(UserEvent::RulesReady);
         });
+        #[cfg(target_os = "linux")]
+        {
+            let (p0, p1, p2) = (proxy.clone(), proxy.clone(), proxy.clone());
+            wk::watch_downloads(
+                &wk::new_store(),
+                move |key, url, name| {
+                    let _ = p0.send_event(UserEvent::DownloadAsk { key, tab: None, url, name });
+                },
+                move |url, path| {
+                    let _ = p1.send_event(UserEvent::DownloadStarted { url, path });
+                },
+                move |url, ok| {
+                    let _ = p2.send_event(UserEvent::DownloadDone { url, ok });
+                },
+            );
+        }
         let ctx = TabCtx { window: Rc::new(window), proxy, next_id: Rc::new(Cell::new(1)) };
         let mut app = Self {
             ctx,
@@ -327,6 +379,7 @@ impl App {
             exit: false,
             next_tick: Instant::now() + TICK,
             quit_at: None,
+            restore_by: None,
         };
         app.show_lock();
         app
@@ -347,23 +400,31 @@ impl App {
     }
 
     pub fn wake(&self) -> Instant {
-        self.quit_at.map_or(self.next_tick, |q| q.min(self.next_tick))
+        [self.quit_at, self.restore_by].into_iter().flatten().fold(self.next_tick, Instant::min)
     }
 
     pub fn resize(&self) {
         let w = &self.ctx.window;
         if let Some(l) = &self.lock {
-            let _ = l.set_bounds(full_rect(w));
+            wk::set_bounds(l, full_rect(w));
         }
         if let Some(s) = &self.s {
-            let _ = s.toolbar.set_bounds(toolbar_rect(w, s.top()));
+            wk::set_bounds(&s.toolbar, toolbar_rect(w, s.top()));
             let c = content_rect(w, s.top());
-            for v in s.loaded() {
-                let _ = v.set_bounds(c);
+            for v in s.loaded().chain(s.panel.as_ref()) {
+                wk::set_bounds(v, c);
             }
-            if let Some(p) = &s.panel {
-                let _ = p.set_bounds(c);
+            if let Some(v) = &s.site {
+                wk::set_bounds(v, site_rect(w, s.site_x, s.site_h));
             }
+        }
+    }
+
+    /// Greys out the drawn window controls (Linux) like macOS does for inactive windows.
+    pub fn focused(&self, on: bool) {
+        let js = format!("setFocus({on})");
+        for v in self.lock.iter().chain(self.s.as_ref().map(|s| &s.toolbar)) {
+            let _ = v.evaluate_script(&js);
         }
     }
 
@@ -378,6 +439,7 @@ impl App {
             UserEvent::Title { tab, title } => self.title(tab, title),
             UserEvent::NewTab(url) => self.open_tab(url),
             UserEvent::AdoptTab(id) => self.adopt(id),
+            UserEvent::DownloadAsk { key, tab, url, name } => self.download_ask(key, tab, url, name),
             UserEvent::DownloadStarted { url, path } => self.download_started(url, path),
             UserEvent::DownloadDone { url, ok } => self.download_done(url, ok),
             UserEvent::FindResult(r) => {
@@ -386,11 +448,12 @@ impl App {
                 }
             }
             UserEvent::Cookies(c, after) => self.saved(c, after),
-            UserEvent::CookiesRestored => self.restored(),
+            UserEvent::CookiesRestored => self.restored(true),
+            UserEvent::SiteCookies { cookies, clear } => self.site_cookies(cookies, clear),
             UserEvent::RulesReady => {
                 if let (Some(s), true) = (&self.s, self.cfg.adblock) {
                     for v in s.loaded() {
-                        wk::set_rules(&v.manager(), true);
+                        wk::set_rules(v, true);
                     }
                 }
             }
@@ -406,6 +469,10 @@ impl App {
             }
             self.exit = true;
             return;
+        }
+        if self.restore_by.is_some_and(|r| now >= r) {
+            eprintln!("cookie restore timed out; starting session without waiting");
+            self.restored(false);
         }
         if now < self.next_tick {
             return;
@@ -444,7 +511,16 @@ impl App {
             "drag" => {
                 let _ = self.ctx.window.drag_window();
             }
-            "quit" => self.quit(),
+            "quit" | "win-close" => self.quit(),
+            "win-min" => self.ctx.window.set_minimized(true),
+            "win-max" => {
+                let w = &self.ctx.window;
+                w.set_maximized(!w.is_maximized());
+            }
+            "fullscreen" => {
+                let w = &self.ctx.window;
+                w.set_fullscreen(if w.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
+            }
             "unlock" | "create" | "reset" if self.s.is_none() => self.lock_cmd(name, arg),
             _ if self.s.as_ref().is_some_and(|s| s.ready) => self.session_cmd(name, arg),
             _ => {}
@@ -480,7 +556,7 @@ impl App {
         let legacy = data.settings.is_none();
         self.cfg = data.settings.take().or_else(Settings::take_legacy).unwrap_or_default();
         let w = &self.ctx.window;
-        w.set_theme(theme_of(&self.cfg.theme));
+        wk::set_theme(w, theme_of(&self.cfg.theme));
         let html = include_str!("toolbar.html").to_string();
         let Some(toolbar) = self.ctx.ui_view(html, toolbar_rect(w, TABS_H + NAV_H)) else {
             return self.lock_fail("Nepodarilo sa vytvoriť okno");
@@ -491,6 +567,8 @@ impl App {
         wk::import_cookies(&store, &data.cookies, move || {
             let _ = p.send_event(UserEvent::CookiesRestored);
         });
+        // If WebKit never answers, the session still opens (see `timer`).
+        self.restore_by = Some(Instant::now() + RESTORE_TIMEOUT);
         self.s = Some(Session {
             vault,
             data,
@@ -505,12 +583,21 @@ impl App {
             dirty: legacy,
             saving: false,
             ready: false,
+            cookies_ok: false,
             closed: Vec::new(),
+            asks: Vec::new(),
+            site: None,
+            site_x: 0.0,
+            site_h: 0.0,
+            site_closed: Instant::now(),
         });
     }
 
-    fn restored(&mut self) {
+    /// `confirmed`: WebKit finished the import; false = forced by `RESTORE_TIMEOUT`.
+    fn restored(&mut self, confirmed: bool) {
+        self.restore_by = None;
         let Some(s) = self.s.as_mut() else { return };
+        s.cookies_ok |= confirmed;
         if s.ready {
             return;
         }
@@ -547,11 +634,12 @@ impl App {
             let config = wk::config(&s.store, self.cfg.adblock);
             tab.view = self.ctx.build(tab.id, Some(&tab.url), config, rect).ok();
             if let Some(v) = &tab.view {
+                wk::set_rules(v, self.cfg.adblock);
                 let _ = v.zoom(s.zoom);
             }
         }
         if let Some(v) = &tab.view {
-            let _ = v.set_bounds(rect);
+            wk::set_bounds(v, rect);
             let _ = v.set_visible(true);
             let _ = v.focus();
         }
@@ -573,6 +661,7 @@ impl App {
             Some(p.remove(i).1)
         });
         let (Some(view), Some(s)) = (view, self.s.as_mut()) else { return };
+        wk::set_rules(&view, self.cfg.adblock);
         let _ = view.zoom(s.zoom);
         let at = (s.active + 1).min(s.tabs.len());
         s.tabs.insert(at, Tab::new(id, String::new(), Some(view)));
@@ -607,10 +696,13 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         s.close_panel();
         if let Some(t) = s.tabs.get_mut(s.active) {
-            t.url = url;
-            if let Some(v) = &t.view {
-                let _ = v.load_url(&t.url);
-                let _ = v.focus();
+            match &t.view {
+                // Address bar (and TLS badge) follow the finished load, not the request.
+                Some(v) => {
+                    let _ = v.load_url(&url);
+                    let _ = v.focus();
+                }
+                None => t.url = url,
             }
         }
         s.sync(&self.cfg);
@@ -620,11 +712,21 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let t = &mut s.tabs[i];
-        t.loading = started;
+        if started {
+            // Anti-spoofing: the address bar keeps the last finished URL until this load
+            // completes; only the spinner changes.
+            t.loading = true;
+            if i == s.active {
+                s.site = None; // describes the page being left
+            }
+            let js = format!("setLoading({id},true)");
+            return s.eval(&js);
+        }
+        t.loading = false;
         if !url.is_empty() {
             t.url = url.clone();
         }
-        if !started && url.starts_with("http") {
+        if url.starts_with("http") {
             let title = t.title.clone();
             let h = &mut s.data.history;
             if h.last().is_none_or(|e| e.url != url) {
@@ -647,6 +749,68 @@ impl App {
             e.title = t.title.clone();
         }
         s.sync(&self.cfg);
+    }
+
+    fn request_site_cookies(&mut self, clear: bool) {
+        let Some(s) = self.s.as_ref() else { return };
+        let p = self.ctx.proxy.clone();
+        wk::export_cookies(&s.store, move |cookies| {
+            let _ = p.send_event(UserEvent::SiteCookies { cookies, clear });
+        });
+    }
+
+    /// Builds (or refreshes) the site-info popover for the active tab.
+    fn site_cookies(&mut self, cookies: Vec<CookieRec>, clear: bool) {
+        let Some(s) = self.s.as_mut() else { return };
+        let url = s.cur().map(|t| t.url.clone()).unwrap_or_default();
+        let host = host_of(&url);
+        if clear {
+            let (site, rest): (Vec<_>, Vec<_>) = cookies.into_iter().partition(|c| cookie_for(&host, &c.domain));
+            s.dirty = true;
+            let p = self.ctx.proxy.clone();
+            let rest = RefCell::new(Some(rest));
+            return wk::delete_cookies(&s.store, &site, move || {
+                if let Some(cookies) = rest.take() {
+                    let _ = p.send_event(UserEvent::SiteCookies { cookies, clear: false });
+                }
+            });
+        }
+        let (certs, errors) = s
+            .view()
+            .filter(|_| url.starts_with("https:"))
+            .and_then(wk::cert_chain)
+            .map(|(chain, errors)| (chain.iter().filter_map(|d| cert::summarize(d)).collect(), errors))
+            .unwrap_or((Vec::new(), Vec::new()));
+        let data = json!({
+            "url": url,
+            "host": host,
+            "scheme": url.split(':').next().unwrap_or(""),
+            "certs": certs,
+            "errors": errors,
+            "cookies": cookies.iter().filter(|c| cookie_for(&host, &c.domain)).count(),
+            "adblock": self.cfg.adblock,
+        });
+        if let Some(v) = &s.site {
+            let _ = v.evaluate_script(&format!("update({data})"));
+            return;
+        }
+        let html = include_str!("siteinfo.html").replace("/*DATA*/", &data.to_string().replace("</", "<\\/"));
+        let h = if s.site_h > 0.0 { s.site_h } else { 260.0 };
+        s.site = self.ctx.ui_view(html, site_rect(&self.ctx.window, s.site_x, h));
+    }
+
+    fn download_ask(&mut self, key: u32, tab: Option<u32>, url: String, name: String) {
+        let Some(s) = self.s.as_mut() else {
+            return wk::decide_download(key, false, &url, None);
+        };
+        let id = self.ctx.next();
+        s.asks.push(Ask { id, key, tab, url, name });
+        if s.asks.len() == 1 {
+            self.resize();
+        }
+        if let Some(s) = &self.s {
+            s.sync(&self.cfg);
+        }
     }
 
     fn download_started(&mut self, url: String, path: PathBuf) {
@@ -706,7 +870,20 @@ impl App {
 
     fn saved(&mut self, cookies: Vec<CookieRec>, after: After) {
         let Some(s) = self.s.as_mut() else { return };
-        s.data.cookies = cookies;
+        if !s.cookies_ok {
+            // Import was never confirmed: keep vault cookies WebKit may not have received yet.
+            let mut cookies = cookies;
+            let missing: Vec<CookieRec> = s
+                .data
+                .cookies
+                .drain(..)
+                .filter(|o| !cookies.iter().any(|c| c.name == o.name && c.domain == o.domain && c.path == o.path))
+                .collect();
+            cookies.extend(missing);
+            s.data.cookies = cookies;
+        } else {
+            s.data.cookies = cookies;
+        }
         s.save_now(&self.cfg);
         s.saving = false;
         self.after_save(after);
@@ -717,12 +894,16 @@ impl App {
             After::Nothing => {}
             After::Quit => self.exit = true,
             After::Lock => {
+                self.restore_by = None;
                 if let Some(s) = self.s.take() {
+                    for a in &s.asks {
+                        wk::decide_download(a.key, false, &a.url, None);
+                    }
                     wk::clear_store(&s.store);
                 }
                 // Don't reveal the chosen theme (or anything else) while locked.
                 self.cfg = Settings::default();
-                self.ctx.window.set_theme(None);
+                wk::set_theme(&self.ctx.window, None);
                 self.show_lock();
             }
         }
@@ -864,6 +1045,7 @@ impl App {
                 }
             }
             "panel" => {
+                s.site = None;
                 if s.panel.is_some() && s.panel_section == arg {
                     s.close_panel();
                 } else if let Some(p) = &s.panel {
@@ -894,7 +1076,7 @@ impl App {
                 let w = &self.ctx.window;
                 match k {
                     "theme" => {
-                        w.set_theme(theme_of(&self.cfg.theme));
+                        wk::set_theme(w, theme_of(&self.cfg.theme));
                         let bg = bg_of(w);
                         let _ = s.toolbar.set_background_color(bg);
                         for v in s.loaded().chain(s.panel.as_ref()) {
@@ -909,7 +1091,7 @@ impl App {
                     }
                     "adblock" => {
                         for v in s.loaded() {
-                            wk::set_rules(&v.manager(), self.cfg.adblock);
+                            wk::set_rules(v, self.cfg.adblock);
                         }
                     }
                     _ => {}
@@ -930,13 +1112,24 @@ impl App {
                 s.dirty = true;
                 s.refresh_panel(&self.cfg);
             }
-            "open-file" | "reveal" => {
-                if s.data.downloads.iter().any(|d| d.path == arg) {
-                    let mut cmd = std::process::Command::new("open");
-                    if name == "reveal" {
-                        cmd.arg("-R");
-                    }
-                    let _ = cmd.arg(arg).spawn();
+            // Downloads are never opened/executed, only shown in the file manager.
+            "reveal-file" => {
+                if s.data.downloads.iter().any(|d| d.path == arg && d.state == "done") {
+                    wk::reveal(arg);
+                }
+            }
+            "dl-allow" | "dl-deny" => {
+                let Some(i) = arg.parse().ok().and_then(|id: u32| s.asks.iter().position(|a| a.id == id)) else {
+                    return;
+                };
+                let a = s.asks.remove(i);
+                let view = a.tab.and_then(|t| s.tab_idx(t)).and_then(|i| s.tabs[i].view.as_ref());
+                wk::decide_download(a.key, name == "dl-allow", &a.url, view);
+                if s.asks.is_empty() {
+                    self.resize();
+                }
+                if let Some(s) = &self.s {
+                    s.sync(&self.cfg);
                 }
             }
             "change-pw" => {
@@ -951,18 +1144,52 @@ impl App {
                 } else if r.new.chars().count() < 8 {
                     (false, "Nové heslo musí mať aspoň 8 znakov")
                 } else {
-                    s.vault = Vault::create(&r.new);
-                    (true, "Heslo bolo zmenené")
+                    // Transactional: the new vault must be on disk (tmp + fsync + rename)
+                    // before it replaces the in-memory key or the UI reports success.
+                    let vault = Vault::create(&r.new);
+                    s.snapshot();
+                    s.data.settings = Some(self.cfg.clone());
+                    match vault.save(&s.data) {
+                        Ok(()) => {
+                            s.vault = vault;
+                            s.dirty = false;
+                            (true, "Heslo bolo zmenené")
+                        }
+                        Err(e) => {
+                            eprintln!("password change: vault save failed: {e}");
+                            (false, "Heslo sa nepodarilo uložiť, platí pôvodné")
+                        }
+                    }
                 };
                 r.old.zeroize();
                 r.new.zeroize();
                 if let Some(p) = &s.panel {
                     let _ = p.evaluate_script(&format!("pwResult({ok},{})", js(msg)));
                 }
-                if ok {
-                    s.dirty = true;
-                    self.persist(After::Nothing);
+            }
+            "site-info" => {
+                // A click on the lock first blurs (closes) an open popover: treat as toggle.
+                if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
+                    return;
                 }
+                s.site_x = arg.parse().unwrap_or(150.0);
+                self.request_site_cookies(false);
+            }
+            "site-clear" => self.request_site_cookies(true),
+            "site-close" => {
+                if s.site.take().is_some() {
+                    s.site_closed = Instant::now();
+                }
+            }
+            "site-size" => {
+                s.site_h = arg.parse::<f64>().unwrap_or(0.0).clamp(80.0, 640.0);
+                if let Some(v) = &s.site {
+                    wk::set_bounds(v, site_rect(&self.ctx.window, s.site_x, s.site_h));
+                }
+            }
+            "site-settings" => {
+                s.site = None;
+                self.session_cmd("panel", "settings");
             }
             "lock" => self.persist(After::Lock),
             _ => {}
@@ -983,7 +1210,7 @@ pub fn theme_of(name: &str) -> Option<Theme> {
 }
 
 fn bg_of(window: &Window) -> RGBA {
-    if window.theme() == Theme::Light { BG_LIGHT } else { BG_DARK }
+    if wk::is_light(window) { BG_LIGHT } else { BG_DARK }
 }
 
 fn rect(window: &Window, y: f64, h: Option<f64>) -> Rect {
@@ -993,6 +1220,37 @@ fn rect(window: &Window, y: f64, h: Option<f64>) -> Rect {
         position: dpi::LogicalPosition::new(0.0, y).into(),
         size: dpi::LogicalSize::new(size.width, h).into(),
     }
+}
+
+/// Popover under the address bar's lock icon, kept inside the window.
+fn site_rect(window: &Window, x: f64, h: f64) -> Rect {
+    let size = window.inner_size().to_logical::<f64>(window.scale_factor());
+    let w = SITE_W.min(size.width - 16.0).max(0.0);
+    let x = (x - 6.0).clamp(8.0, (size.width - w - 8.0).max(8.0));
+    let y = TABS_H + NAV_H - 4.0;
+    Rect {
+        position: dpi::LogicalPosition::new(x, y).into(),
+        size: dpi::LogicalSize::new(w, h.min(size.height - y - 8.0).max(0.0)).into(),
+    }
+}
+
+/// Host part of a URL (no userinfo/port), lowercase.
+fn host_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or("", |(_, r)| r);
+    let auth = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let auth = auth.rsplit_once('@').map_or(auth, |(_, h)| h);
+    let host = if auth.starts_with('[') {
+        auth.split_inclusive(']').next().unwrap_or(auth)
+    } else {
+        auth.split(':').next().unwrap_or(auth)
+    };
+    host.to_ascii_lowercase()
+}
+
+/// Cookie `domain` applies to `host` (exact or parent domain).
+fn cookie_for(host: &str, domain: &str) -> bool {
+    let d = domain.trim_start_matches('.').to_ascii_lowercase();
+    !d.is_empty() && (host == d || host.ends_with(&format!(".{d}")))
 }
 
 fn full_rect(window: &Window) -> Rect {
@@ -1008,12 +1266,23 @@ fn content_rect(window: &Window, top: f64) -> Rect {
 }
 
 fn to_url(input: &str, search_prefix: &str) -> String {
-    let has_scheme = ["http://", "https://", "file://", "about:"]
-        .iter()
-        .any(|s| input.starts_with(s));
-    if has_scheme {
-        input.to_string()
-    } else if !input.contains(' ') && (input.contains('.') || input.starts_with("localhost")) {
+    // Explicit schemes are navigated as typed, never sent to the search engine.
+    const SCHEMES: &[&str] = &["http://", "https://", "file:", "about:", "data:", "blob:", "mailto:"];
+    let lower = input.to_ascii_lowercase();
+    if SCHEMES.iter().any(|s| lower.starts_with(s)) {
+        return input.to_string();
+    }
+    let host = input.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match host.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+        _ => host,
+    }
+    .to_ascii_lowercase();
+    // Local dev servers and mDNS hosts usually have no TLS.
+    let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]") || host.ends_with(".local");
+    if !input.contains(' ') && local {
+        format!("http://{input}")
+    } else if !input.contains(' ') && input.contains('.') {
         format!("https://{input}")
     } else {
         let mut q = String::from(search_prefix);

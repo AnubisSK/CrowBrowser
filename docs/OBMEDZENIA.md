@@ -49,3 +49,13 @@
 - Presúvanie kariet ťahaním a ikony webov (favicony)
 - Automatické zamknutie po nečinnosti
 - Univerzálny build a notarizácia
+
+## Linux
+
+- Sťahovanie po potvrdení urobí novú GET požiadavku na rovnakú adresu. Súbory vytvorené odoslaním formulára (POST) sa preto nemusia stiahnuť správne. Na macOS to isté platí pre `blob:` odkazy.
+- Informácie o stránke na Linuxe neukazujú zmiešaný obsah (HTTP prvky na HTTPS stránke), na macOS áno.
+
+- Okno bez rámu sa nedá zväčšovať ťahaním za okraj (v tiling WM ako Hyprland to nevadí; inak Super+pravé tlačidlo alebo `CROW_DECORATIONS=1`).
+- „Semafory“ sú nakreslené v HTML. Zelené tlačidlo okno maximalizuje (na macOS prepína celú obrazovku), celá obrazovka je F11.
+- Motív Svetlý/Tmavý sa nastavuje cez GTK (`gtk-application-prefer-dark-theme` a názov témy). Podľa neho sa riadi aj `prefers-color-scheme` stránok.
+- Neexistuje systémový panel menu, všetky príkazy sú dostupné cez tlačidlá a skratky.

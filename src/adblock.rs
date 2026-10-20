@@ -1,5 +1,6 @@
 //! Builds a WebKit content-blocker list. Requests are blocked inside WebKit's network layer,
-//! before any connection is made. Extra domains: Application Support/Crow/blocklist.txt
+//! before any connection is made (WKContentRuleList on macOS, WebKitUserContentFilter on Linux;
+//! same JSON format). Extra domains: `data_dir()/blocklist.txt`
 //! (plain domains, hosts-file or `||domain^` lines).
 
 use crate::settings::data_dir;

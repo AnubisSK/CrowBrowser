@@ -1,0 +1,135 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #222226; --line: #33333a; --fg: #e6e6e9; --mute: #9a9aa3; --hover: #2c2c32; --input: #2a2a2f;
+    --accent: #5b8def; --ok: #3fb950; --danger: #e5534b; --warn: #d29922;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; --bg: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76; --hover: #f2f2f5; --input: #f0f0f3; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font: 13px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; color: var(--fg);
+    user-select: none; -webkit-user-select: none; cursor: default;
+  }
+  #card { background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+  header { display: flex; align-items: center; gap: 8px; padding: 12px 10px 10px 16px; border-bottom: 1px solid var(--line); }
+  header .host { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button { font: inherit; color: var(--fg); }
+  #x { width: 26px; height: 26px; border: 0; border-radius: 13px; background: transparent; font-size: 15px; color: var(--mute); }
+  #x:hover { background: var(--hover); color: var(--fg); }
+  .sec { padding: 6px 0; }
+  .sec + .sec { border-top: 1px solid var(--line); }
+  .row { display: flex; align-items: flex-start; gap: 12px; padding: 8px 16px; }
+  .row.click:hover { background: var(--hover); }
+  .row svg { width: 18px; height: 18px; flex: none; margin-top: 1px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .row .body { flex: 1; min-width: 0; }
+  .row .title { font-weight: 600; }
+  .row .sub { color: var(--mute); font-size: 12px; margin-top: 2px; line-height: 1.4; }
+  .row .chev { color: var(--mute); margin-left: auto; transition: transform .15s; }
+  .row.open .chev { transform: rotate(90deg); }
+  .ok { color: var(--ok); } .bad { color: var(--danger); } .warn { color: var(--warn); }
+  .btn { border: 1px solid var(--line); background: var(--input); padding: 4px 10px; border-radius: 7px; white-space: nowrap; flex: none; align-self: center; }
+  .btn:hover { border-color: var(--mute); }
+  .btn.danger { color: var(--danger); }
+  #cert { display: none; margin: 0 16px 8px 46px; padding: 10px 12px; border-radius: 8px; background: var(--input); }
+  #cert.show { display: block; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 12px; }
+  dt { color: var(--mute); }
+  dd { margin: 0; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+  .fp { font: 11px ui-monospace, "SF Mono", Menlo, "DejaVu Sans Mono", monospace; }
+  .chain { margin-top: 8px; font-size: 12px; color: var(--mute); }
+  .chain div::before { content: '↳ '; }
+</style>
+</head>
+<body>
+<div id="card"></div>
+<script>
+  let D = /*DATA*/;
+  const send = (m) => window.ipc.postMessage(m);
+  const card = document.getElementById('card');
+
+  function h(tag, props = {}, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k.startsWith('on')) el[k] = v; else if (k === 'class') el.className = v; else el.setAttribute(k, v);
+    }
+    for (const k of kids.flat()) if (k != null) el.append(k);
+    return el;
+  }
+  function icon(d) {
+    const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    s.setAttribute('viewBox', '0 0 24 24');
+    for (const p of d) { const e = document.createElementNS('http://www.w3.org/2000/svg', 'path'); e.setAttribute('d', p); s.append(e); }
+    return s;
+  }
+  const I = {
+    lock: ['M7 11V7a5 5 0 0 1 10 0v4', 'M5 11h14v10H5z'],
+    warn: ['M12 3l10 18H2z', 'M12 10v4', 'M12 17.5v.01'],
+    cert: ['M4 4h16v12H4z', 'M8 20l4-3 4 3v-6', 'M8 8h8M8 11h5'],
+    cookie: ['M12 3a9 9 0 1 0 9 9 4 4 0 0 1-5-5 4 4 0 0 1-4-4z', 'M8.5 12.5v.01M12 16v.01M15.5 14v.01'],
+    shield: ['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z'],
+    chev: ['M9 6l6 6-6 6'],
+  };
+  const rowEl = (ic, cls, title, sub, extra) =>
+    h('div', { class: 'row' }, h('span', { class: cls }, icon(ic)), h('div', { class: 'body' }, h('div', { class: 'title' }, title), sub ? h('div', { class: 'sub' }, sub) : null), extra || null);
+  const who = (cn, o) => cn && o && cn !== o ? cn + ' (' + o + ')' : cn || o || '—';
+
+  function render() {
+    const https = D.scheme === 'https', http = D.scheme === 'http';
+    const leaf = D.certs[0];
+    const bad = D.errors.length > 0 || (leaf && leaf.expired);
+    const out = [h('header', {}, h('div', { class: 'host', title: D.url }, D.host || D.url), h('button', { id: 'x', title: 'Zavrieť (Esc)', onclick: () => send('site-close') }, '✕'))];
+
+    const conn = h('div', { class: 'sec' });
+    if (https && !bad) {
+      conn.append(rowEl(I.lock, 'ok', 'Pripojenie je zabezpečené', 'Údaje, ktoré na tento web odošleš (napríklad heslá alebo čísla kariet), sú počas prenosu šifrované.'));
+    } else if (https) {
+      conn.append(rowEl(I.warn, 'warn', 'Pripojenie nie je úplne zabezpečené', D.errors.join(' · ') || 'Certifikát nie je platný.'));
+    } else if (http) {
+      conn.append(rowEl(I.warn, 'bad', 'Pripojenie nie je zabezpečené', 'Stránka nepoužíva HTTPS. Nezadávaj sem heslá ani platobné údaje, ktokoľvek v sieti ich môže vidieť alebo zmeniť.'));
+    } else {
+      conn.append(rowEl(I.shield, '', 'Interná alebo lokálna stránka', D.url));
+    }
+    if (leaf) {
+      const det = h('div', { id: 'cert' },
+        h('dl', {},
+          h('dt', {}, 'Vydaný pre'), h('dd', {}, who(leaf.subject_cn, leaf.subject_o)),
+          h('dt', {}, 'Vydal'), h('dd', {}, who(leaf.issuer_cn, leaf.issuer_o)),
+          h('dt', {}, 'Platný od'), h('dd', {}, leaf.not_before),
+          h('dt', {}, 'Platný do'), h('dd', { class: leaf.expired ? 'bad' : '' }, leaf.not_after + (leaf.expired ? ' (neplatný)' : '')),
+          h('dt', {}, 'SHA-256'), h('dd', { class: 'fp' }, leaf.sha256)),
+        D.certs.length > 1 ? h('div', { class: 'chain' }, 'Reťazec certifikátov:', ...D.certs.slice(1).map(c => h('div', {}, who(c.subject_cn, c.subject_o)))) : null);
+      const r = rowEl(I.cert, '', bad ? 'Certifikát nie je platný' : 'Certifikát je platný', 'Vydal: ' + who(leaf.issuer_cn, leaf.issuer_o), h('span', { class: 'chev' }, icon(I.chev)));
+      r.classList.add('click');
+      r.onclick = () => { r.classList.toggle('open'); det.classList.toggle('show'); size(); };
+      conn.append(r, det);
+    }
+    out.push(conn);
+
+    const site = h('div', { class: 'sec' });
+    if (http || https) {
+      site.append(rowEl(I.cookie, '', 'Cookies a údaje stránky',
+        D.cookies ? 'Počet cookies: ' + D.cookies + ' (' + D.host + ')' : 'Žiadne cookies pre ' + D.host,
+        D.cookies ? h('button', { class: 'btn danger', onclick: () => send('site-clear') }, 'Vymazať') : null));
+    }
+    site.append(rowEl(I.shield, D.adblock ? 'ok' : '', 'Blokovanie reklám a sledovačov', D.adblock ? 'Zapnuté' : 'Vypnuté',
+      h('button', { class: 'btn', onclick: () => send('site-settings') }, 'Nastavenia')));
+    out.push(site);
+    card.replaceChildren(...out);
+    size();
+  }
+
+  function size() { requestAnimationFrame(() => send('site-size:' + Math.ceil(document.body.scrollHeight))); }
+  function update(d) { D = d; render(); }
+
+  document.onkeydown = (e) => { if (e.key === 'Escape') send('site-close'); };
+  window.onblur = () => send('site-close');
+  render();
+</script>
+</body>
+</html>

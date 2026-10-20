@@ -81,3 +81,41 @@ lipo -create -output Crow \
   target/x86_64-apple-darwin/release/crow-browser \
   target/aarch64-apple-darwin/release/crow-browser
 ```
+
+## Linux (WebKitGTK)
+
+Rovnaký kód, platformovo závislá vrstva je v `src/wk.rs` (macOS) a `src/wk_gtk.rs` (Linux, rovnaké API). Vyberá sa cez `#[cfg_attr(target_os = "linux", path = "wk_gtk.rs")]` v `main.rs`.
+
+Balíky:
+
+```sh
+sudo pacman -S webkit2gtk-4.1 gtk3 pkg-config libsoup3                                  # Arch / CachyOS
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev pkg-config libsoup-3.0-dev build-essential  # Debian / Ubuntu
+sudo dnf install webkit2gtk4.1-devel gtk3-devel pkgconf libsoup3-devel                  # Fedora
+```
+
+| Príkaz | Výsledok |
+|---|---|
+| `cargo run` | debug spustenie (Wayland aj X11, `GDK_BACKEND=x11` vynúti X11) |
+| `./scripts/install_linux.sh` | release build do `~/.local/bin/crow-browser`, `.desktop` súbor a ikona (`com.crow.browser`) |
+| `./scripts/install_linux.sh --uninstall` | odstráni binárku, `.desktop` aj ikonu (trezor zostane) |
+| `CROW_DECORATIONS=1 crow-browser` | natívny titulok okna namiesto kreslených „semaforov“ |
+| `CROW_DEV=1 cargo run` | samostatná vývojová inštancia (`app_id` `com.crow.browser.dev`). GTK inak pustí len jednu inštanciu a druhé spustenie iba aktivuje prvé okno |
+
+Rozdiely oproti macOS:
+
+| | macOS | Linux |
+|---|---|---|
+| WebKit | WKWebView | WebKitGTK 4.1 (wry `build_gtk` do `GtkLayout`) |
+| Úložisko | `WKWebsiteDataStore.nonPersistent` | ephemeral `WebKitWebContext` (nič sa nezapisuje na disk), `CacheModel::DocumentViewer` |
+| Adblock | `WKContentRuleList` | `WebKitUserContentFilter`, rovnaký JSON; skompilované pravidlá v `~/.cache/crow/filters` |
+| Okno | priehľadný titulok, systémové semafory | bez rámu, semafory kreslí `toolbar.html` / `lock.html` |
+| Menu a skratky | `muda` (systémové menu) | `key-press-event` na GTK okne (`wk_gtk::shortcut`) |
+| Dáta | `~/Library/Application Support/Crow` | `$XDG_DATA_HOME/crow` (`~/.local/share/crow`) |
+| Stiahnuté | wry handler; po potvrdení sa URL znova vyžiada (wry handler je synchrónny) | `decide-policy` spustí sťahovanie cez `download_uri` (WebKitGTK inak nevyšle `download-started`), cieľ sa nastaví až po potvrdení, `$XDG_DOWNLOAD_DIR` |
+| Certifikát (info o stránke) | `WKWebView.serverTrust` → Security.framework | `webkit_web_view_get_tls_info` → `GTlsCertificate`; DER parsuje `src/cert.rs` |
+| Zobraziť súbor | `open -R` | D-Bus `org.freedesktop.FileManager1.ShowItems`, inak `xdg-open` priečinka |
+
+Trezor má rovnaký formát na oboch systémoch, `vault.bin` sa dá preniesť.
+
+Kontrola macOS kódu z Linuxu (bez SDK, len typová kontrola): `rustup target add x86_64-apple-darwin` a `cargo check --target x86_64-apple-darwin` s `CC_x86_64_apple_darwin` nastaveným na prázdny kompilátor (objc2 kompiluje malý `.m` súbor).

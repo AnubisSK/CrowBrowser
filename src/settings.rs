@@ -37,9 +37,20 @@ impl Default for Settings {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").unwrap_or_default();
     PathBuf::from(home).join("Library/Application Support/Crow")
+}
+
+/// `$XDG_DATA_HOME/crow`, default `~/.local/share/crow`.
+#[cfg(target_os = "linux")]
+pub fn data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"))
+        .join("crow")
 }
 
 impl Settings {

@@ -48,7 +48,8 @@ Okno má priehľadnú macOS lištu, takže semafor (zavrieť/minimalizovať/zvä
 | › | Vpred |
 | ⟳ / ✕ | Obnoviť stránku; počas načítavania sa zmení na Zastaviť |
 | ⌂ | Domovská stránka |
-| Adresný riadok | URL alebo vyhľadávanie |
+| Adresný riadok | URL alebo vyhľadávanie. Adresa sa zmení až po dokončení načítania (ochrana pred podvrhnutím adresy) |
+| 🔒 / ⚠ Nezabezpečené (v adresnom riadku) | HTTPS / nešifrované HTTP. Klik otvorí **Informácie o stránke**: stav pripojenia, certifikát (vydaný pre, vydavateľ, platnosť, SHA-256, reťazec), cookies stránky s tlačidlom **Vymazať**, stav blokovania reklám |
 | ☆ (v adresnom riadku) | Pridať / odobrať z obľúbených (žltá = uložené) |
 | 🛡 | Stav blokovania reklám (vyblednutý = vypnuté), klik otvorí nastavenia |
 | 🔖 | Obľúbené |
@@ -80,9 +81,9 @@ Okno má priehľadnú macOS lištu, takže semafor (zavrieť/minimalizovať/zvä
 
 | Zadáš | Výsledok |
 |---|---|
-| `https://…`, `http://…`, `file://…`, `about:…` | Otvorí sa presne táto adresa |
+| `https://…`, `http://…`, `file:…`, `about:…`, `data:…`, `blob:…`, `mailto:…` | Otvorí sa presne táto adresa |
 | `example.sk`, `sub.domena.com/cesta` | Doplní sa `https://` |
-| `localhost`, `localhost:3000` | Doplní sa `https://` |
+| `localhost:3000`, `127.0.0.1`, `[::1]`, `tlaciaren.local` | Doplní sa `http://` (lokálne servery bez TLS) |
 | Text s medzerou alebo bez bodky | Vyhľadá sa predvoleným vyhľadávačom |
 
 - **⌘L** skočí do adresného riadku a označí text.
@@ -120,10 +121,11 @@ Podporované vyhľadávače: **DuckDuckGo** (predvolený), **Google**, **Bing**,
 
 ## Sťahovanie súborov
 
+- Pred každým sťahovaním sa pod adresným riadkom zobrazí výzva **„Stiahnuť „súbor“ z domény?“** s tlačidlami **Uložiť / Zrušiť**. Bez potvrdenia sa nič nezapíše na disk.
 - Súbory sa ukladajú do **~/Downloads**. Ak už súbor s rovnakým názvom existuje, pridá sa číslo, napr. `dokument (1).pdf`.
 - Pri štarte a dokončení sa zobrazí hlásenie, tlačidlo ↓ má počas sťahovania modrú bodku.
 - **⌘⌥L** alebo tlačidlo ↓ otvorí zoznam so stavmi *Sťahuje sa… / Hotovo / Zlyhalo*.
-- Klik na hotový súbor ho otvorí, **Zobraziť vo Finderi** ho ukáže v priečinku.
+- Stiahnuté súbory sa nikdy nespúšťajú. Klik na hotový súbor alebo **Zobraziť vo Finderi** ho iba ukáže v priečinku.
 - **Vymazať zoznam** odstráni len záznamy, súbory na disku zostanú.
 - Zoznam stiahnutých je v trezore, **samotné súbory šifrované nie sú**.
 

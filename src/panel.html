@@ -17,7 +17,7 @@
   }
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; }
-  body { display: flex; background: var(--bg); color: var(--fg); font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+  body { display: flex; background: var(--bg); color: var(--fg); font: 13px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; }
   nav { width: 200px; flex: none; background: var(--side); border-right: 1px solid var(--line); padding: 20px 10px; user-select: none; -webkit-user-select: none; }
   nav button {
     display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 12px; margin-bottom: 2px;
@@ -154,7 +154,7 @@
     if (d.toDateString() === y.toDateString()) return 'Včera';
     return d.toLocaleDateString('sk', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   }
-  const openUrl = (u, e) => send((e && e.metaKey ? 'open-new:' : 'open:') + u);
+  const openUrl = (u, e) => send((e && (e.metaKey || e.ctrlKey) ? 'open-new:' : 'open:') + u);
 
   const views = {
     settings() {
@@ -253,10 +253,10 @@
       for (const d of D.downloads) {
         const name = d.path.split('/').pop();
         list.append(h('div', { class: 'item' },
-          h('div', { class: 'main', onclick: () => d.state === 'done' && send('open-file:' + d.path), title: d.path },
+          h('div', { class: 'main', onclick: () => d.state === 'done' && send('reveal-file:' + d.path), title: d.path },
             h('div', { class: 'title' }, name), h('div', { class: 'sub' }, host(d.url) + ' · ' + fmtDay(d.time) + ' ' + fmtTime(d.time))),
           h('span', { class: 'state ' + d.state }, label[d.state] || d.state),
-          d.state === 'done' ? h('button', { class: 'btn', onclick: () => send('reveal:' + d.path) }, 'Zobraziť vo Finderi') : null));
+          d.state === 'done' ? h('button', { class: 'btn', onclick: () => send('reveal-file:' + d.path) }, 'Zobraziť vo Finderi') : null));
       }
       return [header('Stiahnuté', confirmBtn('Vymazať zoznam', () => send('clear:downloads'))), list];
     },

@@ -7,27 +7,34 @@
     color-scheme: dark;
     --bg: #1b1b1f; --nav: #232328; --line: #2c2c31; --fg: #e6e6e9; --mute: #8e8e96; --icon: #c9c9ce;
     --hover: #2e2e34; --active: #38383f; --input: #2a2a2f; --input-focus: #18181b; --accent: #5b8def;
-    --tab: transparent; --tab-on: #232328;
+    --tab: transparent; --tab-on: #232328; --lights-off: #4a4a50;
   }
   @media (prefers-color-scheme: light) {
     :root {
       color-scheme: light;
       --bg: #e9e9ed; --nav: #f7f7f9; --line: #d6d6dc; --fg: #1d1d1f; --mute: #6e6e76; --icon: #4a4a50;
-      --hover: #dcdce2; --active: #cfcfd6; --input: #e6e6eb; --input-focus: #fff; --tab-on: #f7f7f9;
+      --hover: #dcdce2; --active: #cfcfd6; --input: #e6e6eb; --input-focus: #fff; --tab-on: #f7f7f9; --lights-off: #d1d1d6;
     }
   }
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; overflow: hidden; }
   body {
     display: flex; flex-direction: column; background: var(--bg);
-    font: 13px -apple-system, BlinkMacSystemFont, sans-serif; color: var(--fg);
+    font: 13px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; color: var(--fg);
     user-select: none; -webkit-user-select: none; cursor: default;
   }
   .row { display: flex; align-items: center; gap: 4px; flex: none; }
   #tabrow { height: 36px; padding: 6px 8px 0 80px; align-items: stretch; }
+  body.linux:not(.chrome) #tabrow { padding-left: 8px; }
   #nav { height: 40px; padding: 0 8px; background: var(--nav); border-bottom: 1px solid var(--line); }
   #find { height: 36px; padding: 0 8px; background: var(--nav); border-bottom: 1px solid var(--line); display: none; }
   body.finding #find { display: flex; }
+  #ask { height: 36px; padding: 0 8px 0 12px; gap: 8px; background: var(--nav); border-bottom: 1px solid var(--line); display: none; }
+  body.asking #ask { display: flex; }
+  #ask > svg { color: var(--accent); flex: none; }
+  #asktext { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #ask .txt { width: auto; padding: 0 12px; font: inherit; border: 1px solid var(--line); }
+  #ask .txt.primary { background: var(--accent); color: #fff; border-color: transparent; }
 
   #tabs { display: flex; flex: 1; min-width: 0; gap: 2px; }
   .tab {
@@ -62,6 +69,21 @@
     background: var(--input); color: var(--fg); font: inherit;
   }
   #url:focus, #fq:focus { background: var(--input-focus); border-color: var(--accent); }
+
+  /* Connection security of the committed page: lock = HTTPS, red badge = plaintext HTTP */
+  #sec { position: absolute; left: 4px; top: 4px; height: 20px; display: none; align-items: center; gap: 4px; padding: 0 6px; border-radius: 10px; font-size: 11px; z-index: 1; }
+  #sec svg { width: 13px; height: 13px; }
+  .urlwrap.https #sec, .urlwrap.http #sec { display: flex; }
+  #sec:hover { background: var(--hover); }
+  .urlwrap.http #sec:hover { background: rgba(229, 83, 75, .25); }
+  .urlwrap.https #sec { color: var(--mute); }
+  .urlwrap.https #sec .warn, .urlwrap.https #sec .txt { display: none; }
+  .urlwrap.http #sec { color: #e5534b; background: rgba(229, 83, 75, .15); }
+  .urlwrap.http #sec .lock { display: none; }
+  .urlwrap.https #url { padding-left: 26px; }
+  .urlwrap.http #url { padding-left: 122px; }
+  .urlwrap:focus-within #sec { display: none; }
+  .urlwrap:focus-within #url { padding-left: 12px; }
   #star { position: absolute; right: 2px; top: 0; width: 28px; }
   #star.on { background: transparent; color: #f5c518; }
   #star.on svg { fill: #f5c518; }
@@ -78,6 +100,16 @@
   body.loading #reload .r { display: none; }
   body:not(.loading) #reload .s { display: none; }
 
+
+  /* Linux (frameless): drawn copy of the macOS traffic lights */
+  #lights { display: none; position: absolute; left: 13px; top: 12px; gap: 8px; z-index: 10; }
+  body.chrome #lights { display: flex; }
+  #lights span { width: 12px; height: 12px; border-radius: 50%; display: grid; place-items: center; }
+  #lights .c { background: #ff5f57; } #lights .m { background: #febc2e; } #lights .x { background: #28c840; }
+  body.blurred #lights:not(:hover) span { background: var(--lights-off, #4a4a50); }
+  #lights svg { width: 8px; height: 8px; fill: none; stroke: rgba(0,0,0,.55); stroke-width: 3; stroke-linecap: round; opacity: 0; }
+  #lights:hover svg { opacity: 1; }
+
   #toast {
     position: absolute; right: 10px; top: 7px; max-width: 45%; padding: 4px 12px; border-radius: 12px;
     background: var(--accent); color: #fff; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -87,6 +119,11 @@
 </style>
 </head>
 <body>
+  <div id="lights">
+    <span class="c" data-c="win-close"><svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2l-6 6"/></svg></span>
+    <span class="m" data-c="win-min"><svg viewBox="0 0 10 10"><path d="M1.5 5h7"/></svg></span>
+    <span class="x" data-c="win-max"><svg viewBox="0 0 10 10"><path d="M5 1.5v7M1.5 5h7"/></svg></span>
+  </div>
   <div id="tabrow" class="row">
     <div id="tabs"></div>
     <button id="newtab" title="Nová karta (⌘T)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
@@ -100,6 +137,7 @@
     </button>
     <button id="home" title="Domov (⌘⇧H)"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></button>
     <div class="urlwrap">
+      <span id="sec"><svg class="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><svg class="warn" viewBox="0 0 24 24"><path d="M12 3l10 18H2z"/><path d="M12 10v4M12 17.5v.01"/></svg><span class="txt">Nezabezpečené</span></span>
       <input id="url" spellcheck="false" autocomplete="off" placeholder="Hľadať alebo zadať adresu">
       <button id="star" title="Obľúbené (⌘D)"><svg viewBox="0 0 24 24"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg></button>
     </div>
@@ -117,6 +155,13 @@
     <div class="spacer"></div>
     <button id="fclose" title="Zavrieť (Esc)"><svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
   </div>
+  <div id="ask" class="row">
+    <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+    <span id="asktext"></span>
+    <div class="spacer"></div>
+    <button id="askno" class="txt">Zrušiť</button>
+    <button id="askyes" class="txt primary">Uložiť</button>
+  </div>
   <div id="bar"></div>
   <div id="toast"></div>
 <script>
@@ -132,6 +177,10 @@
   $('reload').onclick = () => send(S.loading ? 'stop' : 'reload');
   $('fnext').onclick = () => findStep(false);
   $('fprev').onclick = () => findStep(true);
+  // Lock / "not secure" badge opens the site-info popover under it.
+  $('sec').onclick = () => send('site-info:' + Math.round($('sec').getBoundingClientRect().left));
+  $('askyes').onclick = () => S.ask && send('dl-allow:' + S.ask.id);
+  $('askno').onclick = () => S.ask && send('dl-deny:' + S.ask.id);
 
   url.onkeydown = (e) => {
     if (e.key === 'Enter') { send('go:' + url.value); url.blur(); }
@@ -140,6 +189,9 @@
   url.onfocus = () => setTimeout(() => url.select(), 0);
 
   $('tabrow').onmousedown = (e) => { if (e.target.id === 'tabrow' || e.target.id === 'tabs') send('drag'); };
+  document.querySelectorAll('#lights span').forEach(l => l.onclick = () => send(l.dataset.c));
+  $('lights').onmousedown = (e) => { if (e.target.id === 'lights') send('drag'); };
+  function setFocus(on) { document.body.classList.toggle('blurred', !on); }
   $('tabrow').ondblclick = (e) => { if (e.target.id === 'tabrow' || e.target.id === 'tabs') send('new-tab'); };
 
   function render(st) {
@@ -148,6 +200,7 @@
     tabs.replaceChildren(...st.tabs.map((t, i) => {
       const el = document.createElement('div');
       el.className = 'tab' + (i === st.active ? ' on' : '') + (t.loading ? ' loading' : '') + (t.asleep ? ' asleep' : '');
+      el.dataset.id = t.id;
       el.title = t.title;
       const dot = document.createElement('span'); dot.className = 'dot';
       const title = document.createElement('span'); title.className = 't'; title.textContent = t.title;
@@ -159,6 +212,17 @@
       return el;
     }));
     if (document.activeElement !== url) url.value = st.url;
+    const proto = /^https:/i.test(st.url) ? 'https' : /^http:/i.test(st.url) ? 'http' : '';
+    const wrap = url.parentElement;
+    wrap.classList.toggle('https', proto === 'https');
+    wrap.classList.toggle('http', proto === 'http');
+    $('sec').title = proto ? 'Zobraziť informácie o stránke' : '';
+    const a = st.ask;
+    document.body.classList.toggle('asking', !!a);
+    if (a) {
+      let from = a.url; try { from = new URL(a.url).host || a.url.split(':')[0] + ':'; } catch {}
+      $('asktext').textContent = 'Stiahnuť „' + a.name + '“ z ' + from + '?' + (a.more ? ' (+' + a.more + ' ďalšie)' : '');
+    }
     document.body.classList.toggle('loading', st.loading);
     $('star').classList.toggle('on', st.bookmarked);
     $('shield').classList.toggle('off', !st.adblock);
@@ -166,6 +230,16 @@
     $('dl').classList.toggle('busy', st.downloads > 0);
     for (const [id, sec] of [['bms', 'bookmarks'], ['hist', 'history'], ['dl', 'downloads'], ['settings', 'settings']])
       $(id).classList.toggle('on', st.panel === sec);
+  }
+
+  // Load started: spinner only, the address bar keeps the last finished URL (anti-spoofing).
+  function setLoading(id, on) {
+    const i = S.tabs.findIndex(t => t.id === id);
+    if (i < 0) return;
+    S.tabs[i].loading = on;
+    const el = document.querySelector('.tab[data-id="' + id + '"]');
+    if (el) el.classList.toggle('loading', on);
+    if (i === S.active) { S.loading = on; document.body.classList.toggle('loading', on); }
   }
 
   function focusUrl() { url.focus(); url.select(); }

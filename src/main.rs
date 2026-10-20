@@ -1,47 +1,83 @@
 mod adblock;
 mod app;
+mod cert;
 mod settings;
 mod vault;
+#[cfg_attr(target_os = "linux", path = "wk_gtk.rs")]
 mod wk;
 
 use app::{App, UserEvent};
 use mimalloc::MiMalloc;
+#[cfg(target_os = "macos")]
 use muda::{
     Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu,
     accelerator::{Accelerator, Code, Modifiers},
 };
+#[cfg(target_os = "macos")]
 use objc2::{AllocAnyThread, MainThreadMarker};
+#[cfg(target_os = "macos")]
 use objc2_app_kit::{NSApplication, NSImage};
+#[cfg(target_os = "macos")]
 use objc2_foundation::NSData;
 use tao::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder},
-    platform::macos::WindowBuilderExtMacOS,
-    window::WindowBuilder,
+    window::{Window, WindowBuilder},
 };
+#[cfg(target_os = "macos")]
+use tao::platform::macos::WindowBuilderExtMacOS;
+#[cfg(target_os = "linux")]
+use tao::platform::unix::EventLoopBuilderExtUnix;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    #[allow(unused_mut)]
+    let mut builder = EventLoopBuilder::<UserEvent>::with_user_event();
+    #[cfg(target_os = "linux")]
+    {
+        // Wayland app_id / X11 WM_CLASS; matches com.crow.browser.desktop (icon, name).
+        // GTK keeps one instance per app id; CROW_DEV=1 runs a separate dev instance.
+        let id = if std::env::var_os("CROW_DEV").is_some() { "com.crow.browser.dev" } else { "com.crow.browser" };
+        gtk::glib::set_prgname(Some(id));
+        builder.with_app_id(id);
+    }
+    let event_loop = builder.build();
 
-    let proxy = event_loop.create_proxy();
-    MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
-        let _ = proxy.send_event(UserEvent::Menu(e.id.0));
-    }));
-    let _menu = build_menu()?;
+    #[cfg(target_os = "macos")]
+    let _menu = {
+        let proxy = event_loop.create_proxy();
+        MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
+            let _ = proxy.send_event(UserEvent::Menu(e.id.0));
+        }));
+        build_menu()?
+    };
 
     let window = WindowBuilder::new()
         .with_title("Crow")
         .with_inner_size(LogicalSize::new(1200.0, 800.0))
-        .with_min_inner_size(LogicalSize::new(480.0, 320.0))
+        .with_min_inner_size(LogicalSize::new(480.0, 320.0));
+    // macOS: transparent title bar, traffic lights over the tab row.
+    #[cfg(target_os = "macos")]
+    let window = window
         .with_titlebar_transparent(true)
         .with_title_hidden(true)
-        .with_fullsize_content_view(true)
-        .build(&event_loop)?;
-    set_dock_icon();
+        .with_fullsize_content_view(true);
+    // Linux: frameless, the toolbar draws the same traffic lights.
+    #[cfg(target_os = "linux")]
+    let window = window.with_decorations(wk::native_decorations());
+    let window = window.build(&event_loop)?;
+    set_app_icon(&window);
+    #[cfg(target_os = "linux")]
+    {
+        // Menu shortcuts: there is no global menu bar, so they are handled on the GTK window.
+        let proxy = event_loop.create_proxy();
+        wk::init_window(&window, move |cmd| {
+            let _ = proxy.send_event(UserEvent::Menu(cmd));
+        });
+    }
 
     let mut app = App::new(window, event_loop.create_proxy());
 
@@ -51,6 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.handle(UserEvent::Menu("quit".into()))
             }
             Event::WindowEvent { event: WindowEvent::Resized(_), .. } => app.resize(),
+            Event::WindowEvent { event: WindowEvent::Focused(on), .. } => app.focused(on),
             Event::UserEvent(e) => app.handle(e),
             Event::LoopDestroyed => app.shutdown(),
             _ => {}
@@ -65,7 +102,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Icon for `cargo run` (unbundled binary); the .app bundle uses Crow.icns.
-fn set_dock_icon() {
+#[cfg(target_os = "macos")]
+fn set_app_icon(_: &Window) {
     let Some(mtm) = MainThreadMarker::new() else { return };
     let data = NSData::with_bytes(include_bytes!("../assets/icon-256.png"));
     if let Some(img) = NSImage::initWithData(NSImage::alloc(), &data) {
@@ -73,6 +111,23 @@ fn set_dock_icon() {
     }
 }
 
+/// X11 window icon; Wayland takes it from com.crow.browser.desktop (scripts/install_linux.sh).
+#[cfg(target_os = "linux")]
+fn set_app_icon(window: &Window) {
+    let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!("../assets/icon-256.png")));
+    let Ok(mut reader) = decoder.read_info() else { return };
+    let Some(size) = reader.output_buffer_size() else { return };
+    let mut buf = vec![0; size];
+    let Ok(info) = reader.next_frame(&mut buf) else { return };
+    if info.color_type == png::ColorType::Rgba && info.bit_depth == png::BitDepth::Eight {
+        buf.truncate(info.buffer_size());
+        if let Ok(icon) = tao::window::Icon::from_rgba(buf, info.width, info.height) {
+            window.set_window_icon(Some(icon));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn build_menu() -> Result<Menu, muda::Error> {
     let cmd = Modifiers::META;
     let shift = Modifiers::META | Modifiers::SHIFT;

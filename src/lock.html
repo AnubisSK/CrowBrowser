@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8">
 <style>
-  :root { color-scheme: dark; --bg: #18181b; --card: #222226; --line: #2f2f35; --fg: #e6e6e9; --mute: #9a9aa3; --input: #2a2a2f; --accent: #5b8def; --danger: #e5534b; }
+  :root { color-scheme: dark; --bg: #18181b; --card: #222226; --line: #2f2f35; --fg: #e6e6e9; --mute: #9a9aa3; --input: #2a2a2f; --accent: #5b8def; --danger: #e5534b; --lights-off: #4a4a50; }
   @media (prefers-color-scheme: light) {
-    :root { color-scheme: light; --bg: #f4f4f6; --card: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76; --input: #f0f0f3; }
+    :root { color-scheme: light; --bg: #f4f4f6; --card: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76; --input: #f0f0f3; --lights-off: #d1d1d6; }
   }
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; }
   body {
     display: grid; place-items: center; background: var(--bg); color: var(--fg);
-    font: 13px -apple-system, BlinkMacSystemFont, sans-serif; user-select: none; -webkit-user-select: none;
+    font: 13px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; user-select: none; -webkit-user-select: none;
   }
   .card { width: 360px; padding: 32px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; text-align: center; }
   .logo { width: 96px; height: 96px; margin: -8px auto 8px; filter: drop-shadow(0 6px 14px rgba(0,0,0,.3)); }
@@ -32,11 +32,24 @@
   .warn { font-size: 12px; margin: 14px 0 0; }
   .link { background: none; border: 0; color: var(--mute); font: inherit; font-size: 12px; margin-top: 14px; text-decoration: underline; }
   .link.armed { color: var(--danger); }
+  /* Linux (frameless): drawn copy of the macOS traffic lights */
+  #lights { display: none; position: fixed; left: 13px; top: 12px; gap: 8px; z-index: 10; }
+  body.chrome #lights { display: flex; }
+  #lights span { width: 12px; height: 12px; border-radius: 50%; display: grid; place-items: center; }
+  #lights .c { background: #ff5f57; } #lights .m { background: #febc2e; } #lights .x { background: #28c840; }
+  body.blurred #lights:not(:hover) span { background: var(--lights-off, #4a4a50); }
+  #lights svg { width: 8px; height: 8px; fill: none; stroke: rgba(0,0,0,.55); stroke-width: 3; stroke-linecap: round; opacity: 0; }
+  #lights:hover svg { opacity: 1; }
   .shake { animation: shake .35s; }
   @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
 </style>
 </head>
 <body>
+  <div id="lights">
+    <span class="c" data-c="win-close"><svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2l-6 6"/></svg></span>
+    <span class="m" data-c="win-min"><svg viewBox="0 0 10 10"><path d="M1.5 5h7"/></svg></span>
+    <span class="x" data-c="win-max"><svg viewBox="0 0 10 10"><path d="M5 1.5v7M1.5 5h7"/></svg></span>
+  </div>
   <form class="card" id="card" autocomplete="off">
     <div class="logo">/*LOGO*/</div>
     <h1 id="h"></h1>
@@ -65,6 +78,10 @@
   $('reset').style.display = create ? 'none' : '';
 
   document.body.onmousedown = (e) => { if (e.target === document.body) send('drag'); };
+
+  document.querySelectorAll('#lights span').forEach(l => l.onclick = () => send(l.dataset.c));
+  $('lights').onmousedown = (e) => { if (e.target.id === 'lights') send('drag'); };
+  function setFocus(on) { document.body.classList.toggle('blurred', !on); }
 
   $('card').onsubmit = (e) => {
     e.preventDefault();

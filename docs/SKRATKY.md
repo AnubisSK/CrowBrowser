@@ -75,3 +75,26 @@
 | ⌘⌥H | Skryť ostatné |
 | ⌘M | Minimalizovať |
 | ⌘Q | Ukončiť (uloží a zašifruje všetko) |
+
+## Linux
+
+Rovnaké akcie, ⌘ sa mení na Ctrl. Navyše platia bežné linuxové aliasy. Číslice a interpunkcia sa rozpoznávajú podľa fyzickej klávesy, takže fungujú aj na slovenskej klávesnici.
+
+| macOS | Linux |
+|---|---|
+| ⌘T / ⌘W / ⌘⇧T | Ctrl+T / Ctrl+W (Ctrl+F4) / Ctrl+Shift+T |
+| ⌘⇧] / ⌘⇧[ | Ctrl+Tab, Ctrl+PgDn, Ctrl+Shift+] / Ctrl+Shift+Tab, Ctrl+PgUp, Ctrl+Shift+[ |
+| ⌘1 … ⌘9 | Ctrl+1 … Ctrl+9 |
+| ⌘L | Ctrl+L, Alt+D, F6 |
+| ⌘R | Ctrl+R, F5 |
+| ⌘[ / ⌘] | Alt+← / Alt+→ (aj Ctrl+[ / Ctrl+]) |
+| ⌘⇧H | Alt+Home, Ctrl+Shift+H |
+| ⌘F / ⌘G / ⌘⇧G | Ctrl+F / Ctrl+G, F3 / Ctrl+Shift+G, Shift+F3 |
+| ⌘+ / ⌘− / ⌘0 | Ctrl++ / Ctrl+− / Ctrl+0 |
+| ⌃⌘F | F11 |
+| ⌘, / ⌘Y | Ctrl+, / Ctrl+H, Ctrl+Y |
+| ⌘⌥B / ⌘⌥L | Ctrl+Shift+B / Ctrl+Shift+Y |
+| ⌘D | Ctrl+D |
+| ⌃⌘L | Ctrl+Shift+L |
+| ⌘Q | Ctrl+Q |
+| ⌘+klik | Ctrl+klik |
