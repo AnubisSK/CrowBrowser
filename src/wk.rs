@@ -69,7 +69,7 @@ pub fn popup_config(features: NewWindowFeatures) -> Config {
 /// `customUserAgent` covers the request header and `navigator.userAgent` alike.
 #[cfg(target_os = "macos")]
 const USER_AGENT: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
 
 /// Tab views (including adopted popups); the browser UI uses `ui_builder`.
 pub fn builder<'a>(config: Config) -> WebViewBuilder<'a> {

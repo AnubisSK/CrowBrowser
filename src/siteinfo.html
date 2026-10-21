@@ -117,8 +117,12 @@
         D.cookies ? 'Počet cookies: ' + D.cookies + ' (' + D.host + ')' : 'Žiadne cookies pre ' + D.host,
         D.cookies ? h('button', { class: 'btn danger', onclick: () => send('site-clear') }, 'Vymazať') : null));
     }
-    site.append(rowEl(I.shield, D.adblock ? 'ok' : '', 'Blokovanie reklám a sledovačov', D.adblock ? 'Zapnuté' : 'Vypnuté',
-      h('button', { class: 'btn', onclick: () => send('site-settings') }, 'Nastavenia')));
+    const on = D.adblock && !D.allowed;
+    site.append(rowEl(I.shield, on ? 'ok' : '', 'Blokovanie reklám a sledovačov',
+      !D.adblock ? 'Vypnuté všade' : D.allowed ? 'Vypnuté pre ' + D.host : 'Zapnuté',
+      D.adblock && (http || https)
+        ? h('button', { class: 'btn', onclick: () => send('adblock-allow:' + D.host) }, D.allowed ? 'Zapnúť tu' : 'Vypnúť tu')
+        : h('button', { class: 'btn', onclick: () => send('site-settings') }, 'Nastavenia')));
     out.push(site);
     card.replaceChildren(...out);
     size();

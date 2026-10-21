@@ -198,6 +198,12 @@
         h('section', {},
           row('Blokovanie reklám a sledovačov', 'Blokuje sa priamo v sieťovej vrstve WebKitu. Vlastný zoznam: ~/Library/Application Support/Crow/blocklist.txt',
             seg('adblock', [['on', 'Zapnuté'], ['off', 'Vypnuté']])),
+          row('Výnimky blokovania', D.allow.length ? null : 'Žiadne. Pre aktuálny web ich pridáš kliknutím na štít v paneli',
+            D.allow.length ? h('div', {}, ...D.allow.map(d => {
+              const b = h('button', { class: 'btn', title: 'Odstrániť výnimku' }, d + ' ×');
+              b.onclick = () => { send('adblock-allow:' + d); b.remove(); };
+              return b;
+            })) : null),
           row('Vymazať históriu', null, confirmBtn('Vymazať', () => { send('clear:history'); toast('História vymazaná'); })),
           row('Vymazať cookies a prihlásenia', 'Odhlási ťa zo všetkých webov', confirmBtn('Vymazať', () => { send('clear:cookies'); toast('Cookies vymazané'); })),
           row('Vymazať zoznam stiahnutých', 'Súbory na disku zostanú', confirmBtn('Vymazať', () => { send('clear:downloads'); toast('Zoznam vymazaný'); }))),

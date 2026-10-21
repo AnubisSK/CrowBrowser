@@ -97,6 +97,7 @@
   #star { position: absolute; right: 2px; top: 0; width: 28px; }
   #star.on { background: transparent; color: #f5c518; }
   #star.on svg { fill: #f5c518; }
+  #shield.blocking { color: var(--accent); }
   #shield.off { opacity: .35; }
   #dl.busy { color: var(--accent); }
   #dl.busy::after { content: ''; position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
@@ -190,9 +191,11 @@
 
   const click = { newtab: 'new-tab', back: 'back', forward: 'forward', home: 'home', star: 'bookmark',
                   bms: 'panel:bookmarks', hist: 'panel:history', dl: 'panel:downloads',
-                  settings: 'panel:settings', shield: 'panel:settings', fclose: 'find-close' };
+                  settings: 'panel:settings', fclose: 'find-close' };
   for (const [id, cmd] of Object.entries(click)) $(id).onclick = () => send(cmd);
   $('reload').onclick = () => send(S.loading ? 'stop' : 'reload');
+  // Shield: click = this site on/off, ⌥/Alt+click (or no site) = global switch. State comes back via render().
+  $('shield').onclick = (e) => send(e.altKey || !S.host || !S.adblock ? 'toggle-adblock' : 'adblock-allow:' + S.host);
   $('fnext').onclick = () => findStep(false);
   $('fprev').onclick = () => findStep(true);
   // Lock / "not secure" badge opens the site-info popover under it.
@@ -291,8 +294,13 @@
     }
     document.body.classList.toggle('loading', st.loading);
     $('star').classList.toggle('on', st.bookmarked);
-    $('shield').classList.toggle('off', !st.adblock);
-    $('shield').title = st.adblock ? 'Blokovanie reklám: zapnuté' : 'Blokovanie reklám: vypnuté';
+    const blocking = st.adblock && !st.siteAllowed;
+    $('shield').classList.toggle('blocking', blocking);
+    $('shield').classList.toggle('off', !blocking);
+    $('shield').title = !st.adblock ? 'Blokovanie reklám: vypnuté všade (klik zapne)'
+      : st.siteAllowed ? 'Blokovanie reklám: vypnuté pre ' + st.host + ' (klik zapne, ⌥klik vypne všade)'
+      : st.host ? 'Blokovanie reklám: zapnuté (klik vypne pre ' + st.host + ', ⌥klik vypne všade)'
+      : 'Blokovanie reklám: zapnuté (⌥klik vypne všade)';
     $('dl').classList.toggle('busy', st.downloads > 0);
     for (const [id, sec] of [['bms', 'bookmarks'], ['hist', 'history'], ['dl', 'downloads'], ['settings', 'settings']])
       $(id).classList.toggle('on', st.panel === sec);

@@ -28,7 +28,6 @@
 
 - Vstavaný zoznam má 105 domén, nie desaťtisíce ako EasyList. Väčší zoznam si môžeš pridať do `blocklist.txt` (najviac 50 000 pravidiel).
 - Pravidlá v `blocklist.txt` podporujú len celé domény. Filtre na cesty, výnimky (`@@`) ani kozmetické filtre v štýle uBlock nie sú podporované.
-- Nedá sa vypnúť pre jeden web, iba globálne.
 - Nepočíta sa, koľko požiadaviek bolo zablokovaných.
 
 ## Distribúcia

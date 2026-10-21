@@ -22,6 +22,9 @@ pub struct Settings {
     pub adblock: bool,
     pub unload: u32, // minutes before hidden tabs are unloaded, 0 = never
     pub updates: bool, // check GitHub Releases after unlocking
+    /// Sites (and their subdomains) where the ad blocker is off. Lives in the encrypted vault;
+    /// applied per tab, so it never ends up in WebKit's on-disk rule store.
+    pub adblock_allow: Vec<String>,
 }
 
 impl Default for Settings {
@@ -35,6 +38,7 @@ impl Default for Settings {
             adblock: true,
             unload: 5,
             updates: true,
+            adblock_allow: Vec::new(),
         }
     }
 }
@@ -94,6 +98,11 @@ impl Settings {
             _ => return false,
         }
         true
+    }
+
+    /// `host` is on the ad-block allowlist (exact or subdomain).
+    pub fn allowed(&self, host: &str) -> bool {
+        !host.is_empty() && self.adblock_allow.iter().any(|d| host == d || host.ends_with(&format!(".{d}")))
     }
 
     pub fn search_prefix(&self) -> &'static str {

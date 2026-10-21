@@ -136,7 +136,7 @@ pub fn popup_config(features: NewWindowFeatures) -> Config {
 /// WebKitSettings UA covers the request header and `navigator.userAgent` alike.
 #[cfg(target_os = "linux")]
 const USER_AGENT: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
 
 /// Tab views (including adopted popups); the browser UI uses `ui_builder`.
 /// `incognito` only stops wry from creating a throwaway *persistent* context (which would write

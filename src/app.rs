@@ -38,6 +38,7 @@ const FAV_POLL: Duration = Duration::from_millis(500);
 const FAV_TRIES: u8 = 8;
 const FAV_MAX: usize = 48 * 1024;
 const FAV_READ: &str = "window.__crowIcon || ''";
+const MAX_ALLOW: usize = 1000;
 
 const FIND_JS: &str = r#"(function (q, dir) {
   const sel = getSelection();
@@ -222,11 +223,13 @@ struct Tab {
     loading: bool,
     icon: String,
     fav_tries: u8,
+    /// Content blocker state last applied to `view` (None = unknown, apply on next check).
+    blocking: Option<bool>,
 }
 
 impl Tab {
     fn new(id: u32, url: String, view: Option<WebView>) -> Self {
-        Self { id, url, title: String::new(), view, hidden_since: Instant::now(), loading: false, icon: String::new(), fav_tries: 0 }
+        Self { id, url, title: String::new(), view, hidden_since: Instant::now(), loading: false, icon: String::new(), fav_tries: 0, blocking: None }
     }
 
     fn label(&self) -> String {
@@ -305,6 +308,15 @@ impl Session {
         self.cur().and_then(|t| t.view.as_ref())
     }
 
+    /// Re-evaluates the content blocker of every loaded tab (global toggle, allowlist, new rules).
+    fn apply_rules_all(&mut self, cfg: &Settings) {
+        for t in &mut self.tabs {
+            t.blocking = None;
+            let url = t.url.clone();
+            apply_rules(cfg, t, &url);
+        }
+    }
+
     fn tab_idx(&self, id: u32) -> Option<usize> {
         self.tabs.iter().position(|t| t.id == id)
     }
@@ -371,6 +383,8 @@ impl Session {
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
             "panel": if self.panel.is_some() { self.panel_section.as_str() } else { "" },
             "adblock": cfg.adblock,
+            "host": if url.starts_with("http") { host_of(url) } else { String::new() },
+            "siteAllowed": cfg.allowed(&host_of(url)),
             "ask": self.asks.first().map(|a| json!({
                 "id": a.id, "name": a.name, "url": a.url, "more": self.asks.len() - 1,
             })),
@@ -392,6 +406,7 @@ impl Session {
             "history": history,
             "bookmarks": self.data.bookmarks,
             "downloads": downloads,
+            "allow": cfg.adblock_allow,
             "version": update::CURRENT,
             "update": self.update,
             "updateBusy": self.update_busy,
@@ -523,10 +538,8 @@ impl App {
             UserEvent::CookiesRestored => self.restored(true),
             UserEvent::SiteCookies { cookies, clear } => self.site_cookies(cookies, clear),
             UserEvent::RulesReady => {
-                if let (Some(s), true) = (&self.s, self.cfg.adblock) {
-                    for v in s.loaded() {
-                        wk::set_rules(v, true);
-                    }
+                if let Some(s) = self.s.as_mut() {
+                    s.apply_rules_all(&self.cfg);
                 }
             }
             UserEvent::Icon { tab, data } => self.icon(tab, data),
@@ -735,10 +748,12 @@ impl App {
         let rect = content_rect(&self.ctx.window, s.top());
         let tab = &mut s.tabs[idx];
         if tab.view.is_none() {
-            let config = wk::config(&s.store, self.cfg.adblock);
+            let config = wk::config(&s.store, blocks(&self.cfg, &tab.url));
             tab.view = self.ctx.build(tab.id, Some(&tab.url), config, rect).ok();
+            tab.blocking = None;
+            let url = tab.url.clone();
+            apply_rules(&self.cfg, tab, &url);
             if let Some(v) = &tab.view {
-                wk::set_rules(v, self.cfg.adblock);
                 let _ = v.zoom(s.zoom);
             }
         }
@@ -765,10 +780,11 @@ impl App {
             Some(p.remove(i).1)
         });
         let (Some(view), Some(s)) = (view, self.s.as_mut()) else { return };
-        wk::set_rules(&view, self.cfg.adblock);
         let _ = view.zoom(s.zoom);
+        let mut tab = Tab::new(id, String::new(), Some(view));
+        apply_rules(&self.cfg, &mut tab, "");
         let at = (s.active + 1).min(s.tabs.len());
-        s.tabs.insert(at, Tab::new(id, String::new(), Some(view)));
+        s.tabs.insert(at, tab);
         self.activate(at);
     }
 
@@ -816,6 +832,10 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let t = &mut s.tabs[i];
+        // Allowlist follows the page being loaded: switched before its subresources are requested.
+        if !url.is_empty() {
+            apply_rules(&self.cfg, t, &url);
+        }
         if started {
             // Anti-spoofing: the address bar keeps the last finished URL until this load
             // completes; only the spinner changes.
@@ -902,6 +922,17 @@ impl App {
         }
     }
 
+    /// UI confirmation after an ad-block change: toolbar, panel, site popover; saved to the vault.
+    fn adblock_changed(&mut self) {
+        let Some(s) = self.s.as_ref() else { return };
+        s.sync(&self.cfg);
+        s.refresh_panel(&self.cfg);
+        if s.site.is_some() {
+            self.request_site_cookies(false);
+        }
+        self.persist(After::Nothing);
+    }
+
     fn request_site_cookies(&mut self, clear: bool) {
         let Some(s) = self.s.as_ref() else { return };
         let p = self.ctx.proxy.clone();
@@ -940,6 +971,7 @@ impl App {
             "errors": errors,
             "cookies": cookies.iter().filter(|c| cookie_for(&host, &c.domain)).count(),
             "adblock": self.cfg.adblock,
+            "allowed": self.cfg.allowed(&host),
         });
         if let Some(v) = &s.site {
             let _ = v.evaluate_script(&format!("update({data})"));
@@ -1278,15 +1310,49 @@ impl App {
                             let _ = v.zoom(s.zoom);
                         }
                     }
-                    "adblock" => {
-                        for v in s.loaded() {
-                            wk::set_rules(v, self.cfg.adblock);
-                        }
-                    }
+                    "adblock" => s.apply_rules_all(&self.cfg),
                     _ => {}
                 }
                 s.sync(&self.cfg);
                 self.persist(After::Nothing);
+            }
+            // Global switch; takes effect immediately on all loaded tabs.
+            "toggle-adblock" => {
+                self.cfg.adblock = !self.cfg.adblock;
+                s.apply_rules_all(&self.cfg);
+                s.toast(if self.cfg.adblock { "Blokovanie reklám zapnuté" } else { "Blokovanie reklám vypnuté" });
+                s.dirty = true;
+                self.adblock_changed();
+            }
+            // Toggles a site on the allowlist (empty arg = current tab's site), then reloads its tabs.
+            "adblock-allow" => {
+                let host = if arg.is_empty() { s.cur().map(|t| host_of(&t.url)).unwrap_or_default() } else { arg.to_ascii_lowercase() };
+                let host = host.trim_start_matches("www.").to_string();
+                let valid = host.contains('.') || host == "localhost";
+                if !valid || !host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')) {
+                    return;
+                }
+                let list = &mut self.cfg.adblock_allow;
+                let allowed = match list.iter().position(|d| *d == host) {
+                    Some(i) => {
+                        list.remove(i);
+                        false
+                    }
+                    None if list.len() < MAX_ALLOW => {
+                        list.push(host.clone());
+                        true
+                    }
+                    None => return s.toast("Zoznam výnimiek je plný"),
+                };
+                s.apply_rules_all(&self.cfg);
+                for t in s.tabs.iter().filter(|t| t.view.is_some() && (host_of(&t.url) == host || host_of(&t.url).ends_with(&format!(".{host}")))) {
+                    if let Some(v) = &t.view {
+                        let _ = v.reload();
+                    }
+                }
+                s.toast(&if allowed { format!("Blokovanie vypnuté pre {host}") } else { format!("Blokovanie zapnuté pre {host}") });
+                s.dirty = true;
+                self.adblock_changed();
             }
             "clear" => {
                 match arg {
@@ -1383,6 +1449,22 @@ impl App {
             "lock" => self.persist(After::Lock),
             _ => {}
         }
+    }
+}
+
+/// Ad blocker wanted for `url`: globally on and the site not allowlisted.
+fn blocks(cfg: &Settings, url: &str) -> bool {
+    cfg.adblock && !cfg.allowed(&host_of(url))
+}
+
+/// Applies the content blocker for `url` to the tab's view; skips no-op updates.
+fn apply_rules(cfg: &Settings, t: &mut Tab, url: &str) {
+    let on = blocks(cfg, url);
+    if let Some(v) = &t.view
+        && t.blocking != Some(on)
+    {
+        wk::set_rules(v, on);
+        t.blocking = Some(on);
     }
 }
 

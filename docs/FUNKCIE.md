@@ -147,7 +147,9 @@ Podporované vyhľadávače: **DuckDuckGo** (predvolený), **Google**, **Bing**,
   ||ads.example.org^
   ```
   Podporuje teda bežné hosts súbory aj zjednodušený AdBlock formát. Zoznam môže mať najviac 50 000 pravidiel a načíta sa pri štarte.
-- Blokovanie sa zapína a vypína v **Nastavenia → Ochrana súkromia** a platí okamžite pre všetky karty. Stav ukazuje ikona štítu v paneli.
+- Blokovanie sa zapína a vypína v **Nastavenia → Ochrana súkromia** a platí okamžite pre všetky karty.
+- **Štít v paneli:** modrý = blokuje sa, sivý = vypnuté. Klik vypne alebo zapne blokovanie pre aktuálny web (výnimka platí aj pre subdomény a karty tohto webu sa znova načítajú), **⌥+klik** (Linux **Alt+klik**) ho prepne všade. To isté je v informáciách o stránke (zámok).
+- Výnimky sú uložené v šifrovanom trezore a dajú sa odstrániť v Nastaveniach.
 
 ## Priblíženie
 
