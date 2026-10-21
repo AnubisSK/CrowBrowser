@@ -142,6 +142,8 @@ pub enum UserEvent {
         cookies: Vec<CookieRec>,
         revoke: Option<String>,
     },
+    /// A tab's page entered/left element fullscreen (Linux; macOS uses WebKit's own window).
+    Fullscreen { tab: u32, on: bool },
     /// Navigation refused by WebKit because of the server certificate.
     TlsError {
         tab: u32,
@@ -410,6 +412,8 @@ struct Session {
     /// Popover under the address bar: site info (lock icon) or ad-block shield; left edge, height.
     site: Option<WebView>,
     shield_open: bool,
+    /// Tab whose page is in element fullscreen (video): its view fills the window, toolbar hidden.
+    video_fullscreen: Option<u32>,
     site_x: f64,
     site_h: f64,
     site_closed: Instant,
@@ -624,6 +628,10 @@ impl App {
             let _ = p.send_event(UserEvent::Blocked);
         });
         let p = proxy.clone();
+        wk::on_fullscreen(move |tab, on| {
+            let _ = p.send_event(UserEvent::Fullscreen { tab, on });
+        });
+        let p = proxy.clone();
         wk::on_tls_error(move |tab, url, reasons| {
             let _ = p.send_event(UserEvent::TlsError { tab, url, reasons });
         });
@@ -697,10 +705,15 @@ impl App {
             wk::set_bounds(l, full_rect(w));
         }
         if let Some(s) = &self.s {
+            let full = s.video_fullscreen.and_then(|id| s.tab_idx(id)).and_then(|i| s.tabs[i].view.as_ref());
+            let _ = s.toolbar.set_visible(full.is_none());
             wk::set_bounds(&s.toolbar, toolbar_rect(w, s.top()));
             let c = content_rect(w, s.top());
             for v in s.loaded().chain(s.panel.as_ref()) {
                 wk::set_bounds(v, c);
+            }
+            if let Some(v) = full {
+                wk::set_bounds(v, full_rect(w));
             }
             if let Some(v) = &s.site {
                 wk::set_bounds(v, site_rect(w, s.site_x, s.site_h));
@@ -809,6 +822,15 @@ impl App {
                 s.push_shield(&self.cfg);
             }
             UserEvent::TlsError { tab, url, reasons } => self.tls_error(tab, url, reasons),
+            UserEvent::Fullscreen { tab, on } => {
+                let Some(s) = self.s.as_mut() else { return };
+                s.video_fullscreen = if on { Some(tab) } else { s.video_fullscreen.filter(|t| *t != tab) };
+                if on {
+                    s.site = None;
+                }
+                // WebKit fullscreens the window itself; this makes the view fill it.
+                self.resize();
+            }
             UserEvent::RulesNote(msg) => {
                 if let Some(s) = &self.s {
                     s.toast(&msg);
@@ -986,6 +1008,7 @@ impl App {
             asks: Vec::new(),
             site: None,
             shield_open: false,
+            video_fullscreen: None,
             site_x: 0.0,
             site_h: 0.0,
             site_closed: Instant::now(),
@@ -1038,6 +1061,10 @@ impl App {
             return;
         }
         s.close_panel();
+        // Switching away from a fullscreen video ends it (WebKit then restores the window).
+        if let Some(v) = s.video_fullscreen.take().and_then(|id| s.tab_idx(id)).and_then(|i| s.tabs[i].view.as_ref()) {
+            let _ = v.evaluate_script("document.webkitExitFullscreen && document.webkitExitFullscreen()");
+        }
         if s.active != idx {
             if let Some(t) = s.tabs.get_mut(s.active) {
                 t.hidden_since = Instant::now();

@@ -73,13 +73,30 @@ pub fn new_store() -> Store {
 /// media type gated behind a user gesture (`WKAudiovisualMediaTypeNone` = 0), so a started video
 /// can be sent to an AirPlay device. Both are WebKit's macOS defaults; set explicitly so a changed
 /// default cannot silently disable them. Storage settings are untouched.
+///
+/// Element fullscreen (`requestFullscreen` / `webkitRequestFullscreen`, e.g. YouTube): public
+/// `elementFullscreenEnabled` (macOS 12.3+), private `fullScreenEnabled` key before that. wry sets
+/// it too; explicit here because tab configurations are built by Crow. WebKit then shows the
+/// element in its own fullscreen window and puts the view back afterwards.
 #[cfg(target_os = "macos")]
 fn media_prefs(c: &WKWebViewConfiguration) {
     unsafe {
         let _: () = msg_send![c, setAllowsAirPlayForMediaPlayback: true];
         let _: () = msg_send![c, setMediaTypesRequiringUserActionForPlayback: 0usize];
+        let prefs: *mut AnyObject = msg_send![c, preferences];
+        let Some(prefs) = prefs.as_ref() else { return };
+        let public: Bool = msg_send![prefs, respondsToSelector: sel!(setElementFullscreenEnabled:)];
+        if public.as_bool() {
+            let _: () = msg_send![prefs, setElementFullscreenEnabled: true];
+        } else {
+            let yes = objc2_foundation::NSNumber::new_bool(true);
+            let _: () = msg_send![prefs, setValue: &*yes, forKey: ns_string!("fullScreenEnabled")];
+        }
     }
 }
+
+/// WebKit runs element fullscreen in its own window on macOS: nothing for the app to resize.
+pub fn on_fullscreen(_f: impl Fn(u32, bool) + 'static) {}
 
 pub fn config(store: &Store, adblock: bool) -> Config {
     unsafe {

@@ -168,6 +168,10 @@ Podporované vyhľadávače: **DuckDuckGo** (predvolený), **Google**, **Bing**,
 - Do panela sa neposielajú hodnoty ani názvy cookies. Crow neukladá heslá ani mená, preto je stĺpec používateľa prázdny.
 - Ak si na aktuálnom webe prihlásený, v adresnom riadku je ikona kľúča. Klik na ňu otvorí tento panel.
 
+## Video na celú obrazovku
+
+- Tlačidlo celej obrazovky vo videách (YouTube a iné prehrávače, Fullscreen API) funguje. Na macOS WebKit zobrazí video vo vlastnom okne na celú obrazovku, na Linuxe sa okno Crow prepne na celú obrazovku a video ho vyplní (panel sa skryje). **Esc** alebo tlačidlo v prehrávači to ukončí, rovnako prepnutie na inú kartu.
+
 ## Priblíženie
 
 - **⌘+** priblížiť, **⌘−** oddialiť, **⌘0** vrátiť na predvolené.

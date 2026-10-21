@@ -20,7 +20,7 @@ use tao::{
 };
 use webkit2gtk::{
     CacheModel, CookieManagerExt, TLSErrorsPolicy, DownloadExt, PolicyDecisionExt, PolicyDecisionType,
-    ResponsePolicyDecisionExt, URIRequestExt, URIResponseExt, UserContentManagerExt, WebContext,
+    ResponsePolicyDecisionExt, SettingsExt, URIRequestExt, URIResponseExt, UserContentManagerExt, WebContext,
     WebContextExt, WebViewExt, WebsiteDataManagerExt, WebsiteDataTypes,
 };
 use wry::{
@@ -138,6 +138,7 @@ thread_local! {
     static ASKING: RefCell<Vec<(u32, webkit2gtk::Download, String)>> = const { RefCell::new(Vec::new()) };
     static STARTED: RefCell<Option<Rc<Started>>> = const { RefCell::new(None) };
     static ON_TLS: RefCell<Option<Rc<TlsHandler>>> = const { RefCell::new(None) };
+    static ON_FULLSCREEN: RefCell<Option<Rc<dyn Fn(u32, bool)>>> = const { RefCell::new(None) };
 }
 
 /// Hidden, never-loaded view owning an ephemeral context; views created related to it share
@@ -418,12 +419,36 @@ fn tls_reasons(flags: gio::TlsCertificateFlags) -> Vec<&'static str> {
 /// `root_of`), so the load is already refused; returning true suppresses WebKit's own error page
 /// in favor of Crow's interstitial.
 pub fn watch(v: &WebView, tab: u32) {
+    watch_fullscreen(v, tab);
     v.webview().connect_load_failed_with_tls_errors(move |_, uri, _cert, flags| {
         if let Some(f) = ON_TLS.with(|o| o.borrow().clone()) {
             f(tab, uri.to_string(), tls_reasons(flags));
         }
         true
     });
+}
+
+/// Element fullscreen (video players): the app is told so it can give the tab view the whole
+/// window (it otherwise stays under the toolbar inside the layout).
+pub fn on_fullscreen(f: impl Fn(u32, bool) + 'static) {
+    ON_FULLSCREEN.with(|o| *o.borrow_mut() = Some(Rc::new(f)));
+}
+
+/// Enables the Fullscreen API on the view; returning false keeps WebKit's default handler,
+/// which fullscreens the toplevel GTK (tao) window.
+fn watch_fullscreen(v: &WebView, tab: u32) {
+    let wv = v.webview();
+    if let Some(s) = WebViewExt::settings(&wv) {
+        s.set_enable_fullscreen(true);
+    }
+    let notify = move |on: bool| {
+        if let Some(f) = ON_FULLSCREEN.with(|o| o.borrow().clone()) {
+            f(tab, on);
+        }
+        false
+    };
+    wv.connect_enter_fullscreen(move |_| notify(true));
+    wv.connect_leave_fullscreen(move |_| notify(false));
 }
 
 /// Tab is closing/unloading: detach the view from the layout before wry destroys it, so no
