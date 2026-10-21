@@ -34,7 +34,8 @@ pub type Store = Retained<WKWebsiteDataStore>;
 pub struct Config(Retained<WKWebViewConfiguration>);
 
 thread_local! {
-    static RULES: RefCell<Option<Retained<WKContentRuleList>>> = const { RefCell::new(None) };
+    /// Compiled content-blocker lists by id (see `adblock::LISTS`).
+    static RULES: RefCell<Vec<(&'static str, Retained<WKContentRuleList>)>> = const { RefCell::new(Vec::new()) };
     /// URLs the user confirmed in the download prompt; consumed by the next download of that URL.
     static APPROVED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
@@ -101,7 +102,7 @@ fn set_manager_rules(manager: &WKUserContentController, on: bool) {
         manager.removeAllContentRuleLists();
         if on {
             RULES.with(|r| {
-                if let Some(list) = &*r.borrow() {
+                for (_, list) in &*r.borrow() {
                     manager.addContentRuleList(list);
                 }
             });
@@ -109,45 +110,59 @@ fn set_manager_rules(manager: &WKUserContentController, on: bool) {
     }
 }
 
-/// `cached`: WebKit's store already holds these exact rules (see `adblock::is_compiled`);
-/// look them up instead of recompiling ~100k rules, compile only if the lookup fails.
-pub fn compile_rules(json: String, cached: bool, done: impl Fn() + 'static) {
-    let Some(store) = (unsafe { WKContentRuleListStore::defaultStore(mtm()) }) else {
-        return;
-    };
-    let done = Rc::new(done);
-    let d = done.clone();
-    let compile = move |store: &WKContentRuleListStore, json: &str| {
-        let d = d.clone();
-        let block = RcBlock::new(move |list: *mut WKContentRuleList, err: *mut NSError| {
-            if let Some(list) = unsafe { Retained::retain(list) } {
-                RULES.with(|r| *r.borrow_mut() = Some(list));
-                d();
-            } else if let Some(err) = unsafe { err.as_ref() } {
-                eprintln!("adblock: {}", err.localizedDescription());
-            }
-        });
-        unsafe {
-            store.compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
-                Some(ns_string!("crow-adblock")),
-                Some(&NSString::from_str(json)),
-                Some(&block),
-            );
-        }
-    };
-    if !cached {
-        return compile(&store, &json);
-    }
-    let pending = RefCell::new(Some((store.clone(), json)));
-    let block = RcBlock::new(move |list: *mut WKContentRuleList, _err: *mut NSError| {
+fn store() -> Option<Retained<WKContentRuleListStore>> {
+    unsafe { WKContentRuleListStore::defaultStore(mtm()) }
+}
+
+fn keep_rules(id: &'static str, list: Retained<WKContentRuleList>) {
+    RULES.with(|r| {
+        let mut r = r.borrow_mut();
+        r.retain(|(i, _)| *i != id);
+        r.push((id, list));
+    });
+}
+
+/// Compiles rule list `id` (stored by WebKit, reused via `load_rules`).
+pub fn compile_rules(id: &'static str, json: String, done: impl Fn() + 'static) {
+    let Some(store) = store() else { return };
+    let block = RcBlock::new(move |list: *mut WKContentRuleList, err: *mut NSError| {
         if let Some(list) = unsafe { Retained::retain(list) } {
-            RULES.with(|r| *r.borrow_mut() = Some(list));
+            keep_rules(id, list);
             done();
-        } else if let Some((store, json)) = pending.take() {
-            compile(&store, &json);
+        } else if let Some(err) = unsafe { err.as_ref() } {
+            eprintln!("adblock: {}", err.localizedDescription());
         }
     });
-    unsafe { store.lookUpContentRuleListForIdentifier_completionHandler(Some(ns_string!("crow-adblock")), Some(&block)) };
+    unsafe {
+        store.compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
+            Some(&NSString::from_str(id)),
+            Some(&NSString::from_str(&json)),
+            Some(&block),
+        );
+    }
+}
+
+/// Loads the previously compiled list `id`; `fail` if WebKit no longer has it.
+pub fn load_rules(id: &'static str, ok: impl Fn() + 'static, fail: impl Fn() + 'static) {
+    let Some(store) = store() else { return };
+    let block = RcBlock::new(move |list: *mut WKContentRuleList, _err: *mut NSError| {
+        match unsafe { Retained::retain(list) } {
+            Some(list) => {
+                keep_rules(id, list);
+                ok();
+            }
+            None => fail(),
+        }
+    });
+    unsafe { store.lookUpContentRuleListForIdentifier_completionHandler(Some(&NSString::from_str(id)), Some(&block)) };
+}
+
+/// Disabled list: forgotten here and removed from WebKit's store.
+pub fn drop_rules(id: &'static str) {
+    RULES.with(|r| r.borrow_mut().retain(|(i, _)| *i != id));
+    if let Some(store) = store() {
+        unsafe { store.removeContentRuleListForIdentifier_completionHandler(Some(&NSString::from_str(id)), Some(&RcBlock::new(|_: *mut NSError| {}))) };
+    }
 }
 
 pub fn export_cookies(store: &Store, done: impl Fn(Vec<CookieRec>) + 'static) {

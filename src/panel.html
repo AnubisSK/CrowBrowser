@@ -157,23 +157,26 @@
   }
   const openUrl = (u, e) => send((e && (e.metaKey || e.ctrlKey) ? 'open-new:' : 'open:') + u);
 
-  // Sources of the ad-block rules with counts; the hosts list can be refreshed or turned off.
+  // Ad-block filter lists: sources (downloaded when), rule counts per WebKit list, toggles.
   function adblockLists() {
-    const s = D.adblockStats || {};
+    const L = D.adblockLists || { sources: [] };
     const n = (x) => (x || 0).toLocaleString('sk');
-    const when = s.hosts_time ? ' · stiahnutý ' + fmtDay(s.hosts_time) + ' ' + fmtTime(s.hosts_time) : '';
-    const list = h('div', { class: 'item' }, h('div', { class: 'main' },
-      h('div', { class: 'title' }, 'Vstavaný zoznam: ' + n(s.builtin) + ' domén'),
-      h('div', { class: 'sub' }, 'Vlastný blocklist.txt: ' + n(s.custom) + ' domén')));
-    const hosts = h('div', { class: 'item' },
-      h('div', { class: 'main', onclick: () => send('open-new:https://github.com/StevenBlack/hosts'), title: 'github.com/StevenBlack/hosts' },
-        h('div', { class: 'title' }, 'StevenBlack hosts: ' + (D.settings.adblock_hosts ? n(s.hosts) + ' domén' : 'vypnutý')),
-        h('div', { class: 'sub' }, 'Reklamy a malvér, aktualizuje sa raz týždenne' + when)),
-      D.settings.adblock_hosts ? h('button', { class: 'btn', onclick: () => send('adblock-update') }, 'Aktualizovať') : null,
-      seg('adblock_hosts', [['on', 'Zapnutý'], ['off', 'Vypnutý']]));
+    const src = (file) => L.sources.find(s => s.file === file) || {};
+    const when = (s) => s.time ? 'stiahnutý ' + fmtDay(s.time) + ' ' + fmtTime(s.time) : 'nestiahnutý';
+    const count = (l) => l ? n(l.rules) + ' pravidiel' + (l.truncated ? ' (orezané na limit WebKitu)' : '') : 'pripravuje sa…';
+    const item = (title, sub, ...controls) => h('div', { class: 'item' },
+      h('div', { class: 'main' }, h('div', { class: 'title' }, title), h('div', { class: 'sub' }, sub)), ...controls);
     return h('div', { class: 'row', style: 'display:block' },
-      h('div', {}, 'Zoznamy blokovania', h('small', {}, 'Spolu ' + n(s.rules) + ' pravidiel' + (s.truncated ? ' (dosiahnutý limit WebKitu 150 000)' : ''))),
-      h('div', { class: 'list', style: 'margin-top:10px' }, list, hosts));
+      h('div', {}, 'Zoznamy blokovania', h('small', {}, 'Filtre v syntaxi Adblock Plus (EasyList), aktualizujú sa raz týždenne')),
+      h('div', { class: 'list', style: 'margin-top:10px' },
+        item('Hlavný zoznam: ' + count(L.main),
+          'Vstavaný (' + n(L.builtin) + ' domén) + blocklist.txt' + (D.settings.adblock_easylist ? ' + EasyList (' + when(src('easylist.txt')) + ') + EasyPrivacy (' + when(src('easyprivacy.txt')) + ')' : '')),
+        item('EasyList a EasyPrivacy', 'easylist.to: reklamy a sledovače', seg('adblock_easylist', [['on', 'Zapnuté'], ['off', 'Vypnuté']])),
+        item('StevenBlack hosts: ' + (D.settings.adblock_hosts ? count(L.hosts) : 'vypnutý'),
+          D.settings.adblock_hosts ? 'Reklamy a malvér, ' + when(src('hosts-stevenblack.txt')) : 'github.com/StevenBlack/hosts',
+          seg('adblock_hosts', [['on', 'Zapnutý'], ['off', 'Vypnutý']])),
+        item('Aktualizovať zoznamy teraz', 'Stiahne zapnuté zoznamy znova a prekompiluje pravidlá na pozadí',
+          h('button', { class: 'btn', onclick: () => send('adblock-update') }, 'Aktualizovať'))));
   }
 
   const views = {
@@ -348,9 +351,9 @@
   function show(s) { if (views[s]) { section = s; render(); } }
   function setData(d) {
     const keep = D.settings;
-    const stats = JSON.stringify(D.adblockStats);
+    const lists = JSON.stringify(D.adblockLists);
     D = d; D.settings = keep;
-    if (section !== 'settings' || JSON.stringify(D.adblockStats) !== stats) render();
+    if (section !== 'settings' || JSON.stringify(D.adblockLists) !== lists) render();
   }
 
   document.querySelectorAll('nav button').forEach(b => b.onclick = () => { show(b.dataset.s); send('panel-section:' + b.dataset.s); });

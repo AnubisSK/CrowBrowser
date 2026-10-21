@@ -26,8 +26,8 @@
 
 ## Blokovanie reklám
 
-- Blokuje sa podľa domén (vstavaný zoznam, StevenBlack hosts, `blocklist.txt`), nie podľa EasyList filtrov. Reklamy podávané z rovnakej domény ako obsah (napr. YouTube) sa tak nezablokujú. Spolu najviac 150 000 pravidiel.
-- Pravidlá v `blocklist.txt` podporujú len celé domény. Filtre na cesty, výnimky (`@@`) ani kozmetické filtre v štýle uBlock nie sú podporované.
+- Filtre sa prevádzajú na pravidlá WebKitu, takže fungujú len tie, ktoré sa dajú vyjadriť v jeho formáte. Procedurálne kozmetické filtre uBlock (`:has-text`, scriptlety) nie sú podporované a reklamy vložené priamo do videa (YouTube) sa nezablokujú.
+- Výnimky (`@@`) z EasyListu neplatia pre StevenBlack hosts (sú v inom zozname pravidiel). Každý zoznam najviac 150 000 pravidiel.
 - Nepočíta sa, koľko požiadaviek bolo zablokovaných.
 
 ## Distribúcia

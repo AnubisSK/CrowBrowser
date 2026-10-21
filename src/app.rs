@@ -92,11 +92,15 @@ pub enum UserEvent {
     /// Fresh cookie list for the site-info popover; `clear` = delete the site's cookies first.
     SiteCookies { cookies: Vec<CookieRec>, clear: bool },
     CookiesRestored,
-    /// Rule JSON built off-thread; `msg` = toast for the user (hosts list refreshed).
-    RulesBuilt(adblock::Rules, Option<String>),
+    /// Content-blocker list `id` is unchanged since WebKit compiled it: load, don't rebuild.
+    RulesCached { id: &'static str, hash: String },
+    /// Freshly converted filter list, to be compiled by WebKit.
+    RulesBuilt { id: &'static str, hash: String, json: String },
+    /// List has no sources (disabled).
+    RulesOff(&'static str),
     RulesReady,
-    /// Hosts list download failed: shown only when the user asked for it.
-    HostsFailed(String),
+    /// Result of a filter-list download the user asked for.
+    RulesNote(String),
     /// Result of `FAV_READ` in a tab (JSON string).
     Icon { tab: u32, data: String },
     Update { result: Result<Option<update::Info>, String>, manual: bool },
@@ -411,7 +415,7 @@ impl Session {
             "bookmarks": self.data.bookmarks,
             "downloads": downloads,
             "allow": cfg.adblock_allow,
-            "adblockStats": adblock::stats(),
+            "adblockLists": adblock::status(),
             "version": update::CURRENT,
             "update": self.update,
             "updateBusy": self.update_busy,
@@ -440,7 +444,7 @@ pub struct App {
 
 impl App {
     pub fn new(window: Window, proxy: EventLoopProxy<UserEvent>) -> Self {
-        build_rules(proxy.clone(), false, false);
+        refresh_rules(proxy.clone(), Vec::new(), false);
         #[cfg(target_os = "linux")]
         {
             let (p0, p1, p2) = (proxy.clone(), proxy.clone(), proxy.clone());
@@ -539,29 +543,43 @@ impl App {
             UserEvent::Cookies(c, after) => self.saved(c, after),
             UserEvent::CookiesRestored => self.restored(true),
             UserEvent::SiteCookies { cookies, clear } => self.site_cookies(cookies, clear),
-            UserEvent::RulesBuilt(rules, msg) => {
+            UserEvent::RulesCached { id, hash } => {
+                let (p, p2) = (self.ctx.proxy.clone(), self.ctx.proxy.clone());
+                let ok = move || {
+                    let _ = p.send_event(UserEvent::RulesReady);
+                };
+                // WebKit lost its compiled copy: convert again.
+                let fail = move || {
+                    let (p, hash) = (p2.clone(), hash.clone());
+                    std::thread::spawn(move || {
+                        if let Some(json) = adblock::build(id) {
+                            let _ = p.send_event(UserEvent::RulesBuilt { id, hash, json });
+                        }
+                    });
+                };
+                wk::load_rules(id, ok, fail);
+            }
+            UserEvent::RulesBuilt { id, hash, json } => {
                 let p = self.ctx.proxy.clone();
-                let cached = adblock::is_compiled(&rules.hash);
-                let hash = rules.hash;
-                wk::compile_rules(rules.json, cached, move || {
-                    adblock::mark_compiled(&hash);
+                wk::compile_rules(id, json, move || {
+                    adblock::mark_compiled(id, &hash);
                     let _ = p.send_event(UserEvent::RulesReady);
                 });
-                if let Some(s) = &self.s {
-                    if let Some(m) = msg {
-                        s.toast(&m);
-                    }
-                    s.refresh_panel(&self.cfg);
-                }
             }
-            UserEvent::HostsFailed(e) => {
+            UserEvent::RulesOff(id) => {
+                wk::drop_rules(id);
+                adblock::forget(id);
+                self.handle(UserEvent::RulesReady);
+            }
+            UserEvent::RulesNote(msg) => {
                 if let Some(s) = &self.s {
-                    s.toast(&format!("Zoznam reklám: {e}"));
+                    s.toast(&msg);
                 }
             }
             UserEvent::RulesReady => {
                 if let Some(s) = self.s.as_mut() {
                     s.apply_rules_all(&self.cfg);
+                    s.refresh_panel(&self.cfg);
                 }
             }
             UserEvent::Icon { tab, data } => self.icon(tab, data),
@@ -749,8 +767,9 @@ impl App {
         if self.cfg.updates && !self.update_checked {
             self.update_checked = true;
             update::check(self.ctx.proxy.clone(), false);
-            if self.cfg.adblock_hosts && adblock::hosts_stale() {
-                build_rules(self.ctx.proxy.clone(), true, false);
+            let stale = adblock::stale(self.cfg.adblock_easylist, self.cfg.adblock_hosts);
+            if !stale.is_empty() {
+                refresh_rules(self.ctx.proxy.clone(), stale, false);
             }
         }
     }
@@ -1336,20 +1355,27 @@ impl App {
                         }
                     }
                     "adblock" => s.apply_rules_all(&self.cfg),
-                    "adblock_hosts" => {
-                        if !self.cfg.adblock_hosts {
-                            adblock::remove_hosts();
+                    "adblock_easylist" | "adblock_hosts" => {
+                        let (on, hosts) = match k {
+                            "adblock_hosts" => (self.cfg.adblock_hosts, true),
+                            _ => (self.cfg.adblock_easylist, false),
+                        };
+                        if !on {
+                            adblock::remove(hosts);
                         }
-                        build_rules(self.ctx.proxy.clone(), self.cfg.adblock_hosts, true);
+                        let fetch = if on { adblock::stale(!hosts, hosts) } else { Vec::new() };
+                        refresh_rules(self.ctx.proxy.clone(), fetch, true);
                     }
                     _ => {}
                 }
                 s.sync(&self.cfg);
                 self.persist(After::Nothing);
             }
-            "adblock-update" if self.cfg.adblock_hosts => {
-                s.toast("Sťahujem zoznam reklám…");
-                build_rules(self.ctx.proxy.clone(), true, true);
+            "adblock-update" => {
+                let (easylist, hosts) = (self.cfg.adblock_easylist, self.cfg.adblock_hosts);
+                let all: Vec<_> = adblock::SOURCES.iter().filter(|s| s.enabled(easylist, hosts)).collect();
+                s.toast("Sťahujem zoznamy reklám…");
+                refresh_rules(self.ctx.proxy.clone(), all, true);
             }
             // Global switch; takes effect immediately on all loaded tabs.
             "toggle-adblock" => {
@@ -1487,24 +1513,28 @@ impl App {
     }
 }
 
-/// Rebuilds the rule list off the main thread (optionally downloading the hosts list first),
-/// then hands it to WebKit via `UserEvent::RulesBuilt`.
-fn build_rules(proxy: EventLoopProxy<UserEvent>, fetch: bool, manual: bool) {
+/// Off the main thread: downloads `fetch`, then for each content-blocker list either reuses
+/// WebKit's compiled copy (inputs unchanged) or converts the filter lists again.
+fn refresh_rules(proxy: EventLoopProxy<UserEvent>, fetch: Vec<&'static adblock::Source>, manual: bool) {
     std::thread::spawn(move || {
-        let msg = if fetch {
-            match adblock::fetch_hosts() {
-                Ok(n) => Some(format!("Zoznam reklám aktualizovaný: {n} domén")),
-                Err(e) => {
-                    if manual {
-                        let _ = proxy.send_event(UserEvent::HostsFailed(e));
+        let send = |e| {
+            let _ = proxy.send_event(e);
+        };
+        let errors: Vec<String> = fetch.iter().filter_map(|s| adblock::fetch(s).err()).collect();
+        if manual && !fetch.is_empty() {
+            send(UserEvent::RulesNote(if errors.is_empty() { "Zoznamy reklám aktualizované".into() } else { errors.join(", ") }));
+        }
+        for id in adblock::LISTS {
+            match adblock::input_hash(id) {
+                None => send(UserEvent::RulesOff(id)),
+                Some(hash) if adblock::is_compiled(id, &hash) => send(UserEvent::RulesCached { id, hash }),
+                Some(hash) => {
+                    if let Some(json) = adblock::build(id) {
+                        send(UserEvent::RulesBuilt { id, hash, json });
                     }
-                    return;
                 }
             }
-        } else {
-            None
-        };
-        let _ = proxy.send_event(UserEvent::RulesBuilt(adblock::build(), msg.filter(|_| manual)));
+        }
     });
 }
 

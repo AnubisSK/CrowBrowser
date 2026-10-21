@@ -1,15 +1,18 @@
-//! Builds a WebKit content-blocker list. Requests are blocked inside WebKit's network layer,
-//! before any connection is made (WKContentRuleList on macOS, WebKitUserContentFilter on Linux;
-//! same JSON format). Sources: built-in domains, the StevenBlack hosts list (downloaded to
-//! `data_dir()`, refreshed weekly) and `data_dir()/blocklist.txt`
-//! (plain domains, hosts-file or `||domain^` lines).
+//! Ad/tracker blocking rules. Filter lists (EasyList, EasyPrivacy, StevenBlack hosts, the
+//! built-in list and `data_dir()/blocklist.txt`) are parsed with Brave's `adblock` crate and
+//! converted to WebKit content-blocker JSON, so requests are still blocked inside WebKit's network
+//! layer before any connection is made (WKContentRuleList / WebKitUserContentFilter).
+//! Two lists, because WebKit allows at most 150 000 rules per list:
+//! `crow-adblock` (EasyList + EasyPrivacy + built-in + blocklist.txt) and `crow-hosts`.
+//! Parsing runs only when an input changes (input hash); otherwise WebKit's compiled copy is reused.
 
 use crate::{settings::data_dir, update};
-use serde::Serialize;
+use adblock::lists::{FilterFormat, FilterSet, ParseOptions};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
     sync::Mutex,
@@ -45,153 +48,243 @@ const DOMAINS: &[&str] = &[
 const HIDE: &str = "ins.adsbygoogle, .adsbygoogle, [id^='google_ads_iframe'], [id^='div-gpt-ad'], \
     iframe[src*='doubleclick.net'], .ad-banner, .advertisement, .adsbox, [data-ad-slot]";
 
-/// WebKit's content-blocker limit is 150 000 rules (one is the cosmetic rule).
+/// WebKit's content-blocker limit per rule list.
 const MAX_RULES: usize = 150_000;
-pub const HOSTS_URL: &str = "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts";
-const HOSTS_FILE: &str = "hosts-stevenblack.txt";
-const HOSTS_MAX_BYTES: u64 = 16 * 1024 * 1024;
-const HOSTS_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
-/// SHA-256 of the last successfully compiled rule JSON: same hash = reuse WebKit's compiled list.
-const HASH_FILE: &str = "adblock.sha256";
+/// Bump when the conversion changes, so cached compiled lists are rebuilt.
+const FORMAT: &str = "adblock-0.13/1";
+const MAX_LIST_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 
-/// Hosts-file entries that are not ad domains.
-const NOT_DOMAINS: &[&str] = &["localhost.localdomain", "local", "broadcasthost", "ip6-localhost", "ip6-loopback"];
+pub const MAIN: &str = "crow-adblock";
+pub const HOSTS: &str = "crow-hosts";
+pub const LISTS: [&str; 2] = [MAIN, HOSTS];
 
-#[derive(Serialize, Clone, Default)]
-pub struct Stats {
-    pub builtin: usize,
-    pub hosts: usize,
-    pub custom: usize,
-    /// Block rules after dropping subdomains of already blocked domains.
+/// Downloadable filter list: (name, file in `data_dir()`, URL, format, rule list it goes into).
+pub struct Source {
+    pub name: &'static str,
+    pub file: &'static str,
+    pub url: &'static str,
+    hosts: bool,
+}
+
+impl Source {
+    pub fn enabled(&self, easylist: bool, hosts: bool) -> bool {
+        if self.hosts { hosts } else { easylist }
+    }
+}
+
+pub const SOURCES: &[Source] = &[
+    Source { name: "EasyList", file: "easylist.txt", url: "https://easylist.to/easylist/easylist.txt", hosts: false },
+    Source { name: "EasyPrivacy", file: "easyprivacy.txt", url: "https://easylist.to/easylist/easyprivacy.txt", hosts: false },
+    Source {
+        name: "StevenBlack hosts",
+        file: "hosts-stevenblack.txt",
+        url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+        hosts: true,
+    },
+];
+
+/// Result of the last conversion of one rule list, kept next to its input hash.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct ListStats {
+    pub filters: usize,
     pub rules: usize,
     pub truncated: bool,
-    /// Download time of the hosts list (ms since epoch).
-    pub hosts_time: Option<u64>,
 }
 
-pub struct Rules {
-    pub json: String,
-    pub hash: String,
+#[derive(Serialize, Deserialize)]
+struct Marker {
+    hash: String,
+    stats: ListStats,
 }
 
-static STATS: Mutex<Option<Stats>> = Mutex::new(None);
+static STATS: Mutex<Option<HashMap<String, ListStats>>> = Mutex::new(None);
 
-pub fn stats() -> Stats {
-    STATS.lock().ok().and_then(|s| s.clone()).unwrap_or_default()
+fn set_stats(id: &str, s: Option<ListStats>) {
+    if let Ok(mut m) = STATS.lock() {
+        let m = m.get_or_insert_with(HashMap::new);
+        match s {
+            Some(s) => m.insert(id.to_string(), s),
+            None => m.remove(id),
+        };
+    }
 }
 
-fn hosts_path() -> PathBuf {
-    data_dir().join(HOSTS_FILE)
+fn stats_of(id: &str) -> Option<ListStats> {
+    STATS.lock().ok()?.as_ref()?.get(id).cloned()
 }
 
-fn block_rule(domain: &str) -> Value {
+fn path(file: &str) -> PathBuf {
+    data_dir().join(file)
+}
+
+fn marker_path(id: &str) -> PathBuf {
+    data_dir().join(format!("{id}.json"))
+}
+
+fn modified_ms(p: &PathBuf) -> Option<u64> {
+    let t = fs::metadata(p).and_then(|m| m.modified()).ok()?;
+    Some(t.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64)
+}
+
+/// Panel data: sources (downloaded or not, when) and per-list rule counts.
+pub fn status() -> Value {
+    let sources: Vec<Value> = SOURCES
+        .iter()
+        .map(|s| json!({ "name": s.name, "file": s.file, "time": modified_ms(&path(s.file)) }))
+        .collect();
     json!({
-        "trigger": { "url-filter": format!(r"^[^:]+://([^/:]+\.)?{}[:/]", domain.replace('.', r"\.")) },
-        "action": { "type": "block" }
+        "builtin": DOMAINS.len(),
+        "sources": sources,
+        "main": stats_of(MAIN),
+        "hosts": stats_of(HOSTS),
     })
 }
 
-fn parse_line(line: &str) -> Option<&str> {
-    let line = line.split('#').next()?.trim();
-    if line.is_empty() || line.starts_with('!') {
-        return None;
-    }
-    let d = line.split_whitespace().last()?;
-    let d = d.trim_start_matches("||").trim_end_matches('^');
-    let valid = d.contains('.')
-        && d.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
-        && !d.bytes().all(|b| b.is_ascii_digit() || b == b'.')
-        && !NOT_DOMAINS.contains(&d);
-    valid.then_some(d)
+/// blocklist.txt: ABP rules as-is; plain domains and hosts-file lines become `||domain^`.
+fn custom_rules() -> Vec<String> {
+    let Ok(text) = fs::read_to_string(path("blocklist.txt")) else { return Vec::new() };
+    let is_domain = |d: &str| d.contains('.') && d.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with(['#', '!']))
+        .map(|l| {
+            let last = l.split_whitespace().last().unwrap_or(l);
+            let ip_line = l.split_whitespace().count() == 2 && l.starts_with(|c: char| c.is_ascii_digit() || c == ':');
+            if (ip_line || !l.contains(' ')) && is_domain(last) { format!("||{}^", last.to_ascii_lowercase()) } else { l.to_string() }
+        })
+        .collect()
 }
 
-fn read_list(path: &PathBuf) -> Vec<String> {
-    fs::read_to_string(path)
-        .map(|t| t.lines().filter_map(parse_line).map(|d| d.to_ascii_lowercase()).collect())
-        .unwrap_or_default()
-}
-
-/// Reads all sources and builds the rule JSON. Runs off the main thread (~100k domains).
-pub fn build() -> Rules {
+/// Hosts entries, with subdomains of already listed domains dropped (`||d^` covers them).
+fn hosts_rules(text: &str) -> Vec<String> {
+    const NOT: &[&str] = &["localhost.localdomain", "local", "broadcasthost", "ip6-localhost", "ip6-loopback"];
+    let domains: Vec<&str> = text
+        .lines()
+        .filter_map(|l| {
+            let l = l.split('#').next()?.trim();
+            let mut it = l.split_whitespace();
+            let (_ip, d) = (it.next()?, it.next()?);
+            let ok = d.contains('.') && !NOT.contains(&d) && d.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+            ok.then_some(d)
+        })
+        .collect();
+    let set: HashSet<&str> = domains.iter().copied().collect();
+    let covered = |d: &str| d.match_indices('.').any(|(i, _)| set.contains(&d[i + 1..]));
     let mut seen = HashSet::new();
-    let mut order: Vec<String> = Vec::new();
-    let mut add = |list: Vec<String>| {
-        let before = order.len();
-        for d in list {
-            if seen.insert(d.clone()) {
-                order.push(d);
-            }
-        }
-        order.len() - before
+    domains
+        .into_iter()
+        .filter(|d| !covered(d) && seen.insert(*d))
+        .map(|d| format!("||{}^", d.to_ascii_lowercase()))
+        .collect()
+}
+
+/// Raw inputs of a rule list (`None` = list has no sources, i.e. disabled).
+fn inputs(id: &str) -> Option<Vec<(String, FilterFormat)>> {
+    let read = |hosts: bool| -> Vec<String> {
+        SOURCES
+            .iter()
+            .filter(|s| s.hosts == hosts)
+            .filter_map(|s| fs::read_to_string(path(s.file)).ok())
+            .collect()
     };
-    // Priority on truncation: built-in, then the user's list, then the downloaded one.
-    let builtin = add(DOMAINS.iter().map(|d| d.to_string()).collect());
-    let custom = add(read_list(&data_dir().join("blocklist.txt")));
-    let hosts = add(read_list(&hosts_path()));
-    // `a.b.com` is redundant when `b.com` is blocked (rules cover subdomains).
-    let covered = |d: &str| d.match_indices('.').any(|(i, _)| seen.contains(&d[i + 1..]));
-    let mut domains: Vec<&String> = order.iter().filter(|d| !covered(d)).collect();
-    let truncated = domains.len() > MAX_RULES - 1;
-    domains.truncate(MAX_RULES - 1);
-
-    let mut rules: Vec<Value> = domains.iter().map(|d| block_rule(d)).collect();
-    rules.push(json!({
-        "trigger": { "url-filter": ".*" },
-        "action": { "type": "css-display-none", "selector": HIDE }
-    }));
-    let hosts_time = fs::metadata(hosts_path())
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64);
-    let stats = Stats { builtin, hosts, custom, rules: domains.len(), truncated, hosts_time };
-    if let Ok(mut s) = STATS.lock() {
-        *s = Some(stats);
+    if id == HOSTS {
+        let lists = read(true);
+        return (!lists.is_empty()).then(|| lists.iter().map(|t| (hosts_rules(t).join("\n"), FilterFormat::Standard)).collect());
     }
-    let json = Value::Array(rules).to_string();
-    let hash = Sha256::digest(json.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
-    Rules { json, hash }
+    let builtin: Vec<String> = DOMAINS.iter().map(|d| format!("||{d}^")).chain([format!("##{HIDE}")]).collect();
+    let mut out = vec![(builtin.join("\n"), FilterFormat::Standard), (custom_rules().join("\n"), FilterFormat::Standard)];
+    out.extend(read(false).into_iter().map(|t| (t, FilterFormat::Standard)));
+    Some(out)
 }
 
-/// WebKit already holds a compiled list for exactly these rules.
-pub fn is_compiled(hash: &str) -> bool {
-    fs::read_to_string(data_dir().join(HASH_FILE)).is_ok_and(|h| h.trim() == hash)
+/// Hash of the list's inputs; `None` = list disabled.
+pub fn input_hash(id: &str) -> Option<String> {
+    let inputs = inputs(id)?;
+    let mut h = Sha256::new();
+    h.update(FORMAT);
+    h.update(id);
+    for (text, _) in &inputs {
+        h.update((text.len() as u64).to_le_bytes());
+        h.update(text);
+    }
+    Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-pub fn mark_compiled(hash: &str) {
+/// WebKit already compiled this exact input; restores its stats for the panel.
+pub fn is_compiled(id: &str, hash: &str) -> bool {
+    let Ok(text) = fs::read_to_string(marker_path(id)) else { return false };
+    let Ok(m) = serde_json::from_str::<Marker>(&text) else { return false };
+    let ok = m.hash == hash;
+    if ok {
+        set_stats(id, Some(m.stats));
+    }
+    ok
+}
+
+pub fn mark_compiled(id: &str, hash: &str) {
+    let m = Marker { hash: hash.to_string(), stats: stats_of(id).unwrap_or_default() };
     let _ = fs::create_dir_all(data_dir());
-    let _ = fs::write(data_dir().join(HASH_FILE), hash);
+    let _ = fs::write(marker_path(id), serde_json::to_string(&m).unwrap_or_default());
 }
 
-/// Hosts list missing or older than a week.
-pub fn hosts_stale() -> bool {
-    fs::metadata(hosts_path())
-        .and_then(|m| m.modified())
-        .map_or(true, |t| SystemTime::now().duration_since(t).map_or(true, |age| age > HOSTS_MAX_AGE))
+pub fn forget(id: &str) {
+    set_stats(id, None);
+    let _ = fs::remove_file(marker_path(id));
 }
 
-pub fn remove_hosts() {
-    let _ = fs::remove_file(hosts_path());
+/// Parses the list's filters and converts them to content-blocker JSON (off the main thread;
+/// large transient allocation, freed when done).
+pub fn build(id: &str) -> Option<String> {
+    let mut set = FilterSet::new(true); // debug = keep raw lines, required by the conversion
+    for (text, format) in inputs(id)? {
+        set.add_filter_list(text, ParseOptions { format, ..Default::default() });
+    }
+    let (mut rules, used) = set.into_content_blocking().ok()?;
+    let truncated = rules.len() > MAX_RULES;
+    if truncated {
+        // Exceptions (ignore-previous-rules) are last and must stay; drop generic cosmetic
+        // rules first, then the oldest block rules.
+        rules.retain(|r| !(r.action.selector.is_some() && r.trigger.url_filter == ".*" && r.trigger.if_domain.is_none()));
+        let over = rules.len().saturating_sub(MAX_RULES);
+        rules.drain(..over);
+    }
+    set_stats(id, Some(ListStats { filters: used.len(), rules: rules.len(), truncated }));
+    serde_json::to_string(&rules).ok()
 }
 
-/// Downloads the StevenBlack list (blocking); replaces the cached copy only if it looks valid.
-pub fn fetch_hosts() -> Result<usize, String> {
-    let dir = data_dir();
-    let _ = fs::create_dir_all(&dir);
-    let part = dir.join(format!("{HOSTS_FILE}.part"));
+/// Downloadable lists for the enabled options that are missing or older than a week.
+pub fn stale(easylist: bool, hosts: bool) -> Vec<&'static Source> {
+    let old = |s: &Source| {
+        fs::metadata(path(s.file))
+            .and_then(|m| m.modified())
+            .map_or(true, |t| SystemTime::now().duration_since(t).map_or(true, |a| a > MAX_AGE))
+    };
+    SOURCES.iter().filter(|s| s.enabled(easylist, hosts) && old(s)).collect()
+}
+
+pub fn remove(hosts: bool) {
+    for s in SOURCES.iter().filter(|s| s.hosts == hosts) {
+        let _ = fs::remove_file(path(s.file));
+    }
+}
+
+/// Downloads one list (blocking); replaces the cached copy only if it looks valid.
+pub fn fetch(s: &Source) -> Result<(), String> {
+    let _ = fs::create_dir_all(data_dir());
+    let part = path(&format!("{}.part", s.file));
     let ok = update::curl()
         .args(["--max-time", "120", "--max-filesize"])
-        .arg(HOSTS_MAX_BYTES.to_string())
+        .arg(MAX_LIST_BYTES.to_string())
         .arg("-o")
         .arg(&part)
-        .arg(HOSTS_URL)
+        .arg(s.url)
         .status()
-        .is_ok_and(|s| s.success());
-    let count = if ok { read_list(&part).len() } else { 0 };
-    if count < 1000 {
+        .is_ok_and(|st| st.success());
+    let lines = if ok { fs::read_to_string(&part).map(|t| t.lines().count()).unwrap_or(0) } else { 0 };
+    if lines < 1000 {
         let _ = fs::remove_file(&part);
-        return Err(if ok { "neplatný zoznam".into() } else { "zoznam sa nepodarilo stiahnuť".into() });
+        return Err(format!("{} sa nepodarilo stiahnuť", s.name));
     }
-    fs::rename(&part, hosts_path()).map_err(|_| "zoznam sa nepodarilo uložiť".to_string())?;
-    Ok(count)
+    fs::rename(&part, path(s.file)).map_err(|_| format!("{} sa nepodarilo uložiť", s.name))
 }

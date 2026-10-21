@@ -146,9 +146,11 @@ Podporované vyhľadávače: **DuckDuckGo** (predvolený), **Google**, **Bing**,
   0.0.0.0 tracker.example.net
   ||ads.example.org^
   ```
-  Podporuje teda bežné hosts súbory aj zjednodušený AdBlock formát a načíta sa pri štarte.
-- **StevenBlack hosts:** [verejný zoznam](https://github.com/StevenBlack/hosts) reklamných a škodlivých domén (~70 000). Po odomknutí sa stiahne, ak chýba alebo je starší ako týždeň. Dá sa ručne aktualizovať alebo vypnúť v **Nastavenia → Ochrana súkromia → Zoznamy blokovania**, kde je aj počet domén z každého zdroja.
-- Subdomény už blokovaných domén sa vynechajú (pravidlo pokrýva aj ich), spolu najviac 150 000 pravidiel (limit WebKitu). Skompilované pravidlá si WebKit pamätá, takže sa kompilujú (~2–3 s na pozadí) len keď sa zoznam zmení.
+  Podporuje teda bežné hosts súbory aj plnú syntax Adblock Plus a načíta sa pri štarte.
+- **EasyList a EasyPrivacy** ([easylist.to](https://easylist.to)): filtre v syntaxi Adblock Plus vrátane ciest, výnimiek (`@@`) a kozmetických pravidiel (`##`). Spracúva ich knižnica [adblock-rust](https://github.com/brave/adblock-rust) od Brave a prevedie na pravidlá WebKitu, takže sa blokuje stále v sieťovej vrstve, pred pripojením.
+- **StevenBlack hosts:** [verejný zoznam](https://github.com/StevenBlack/hosts) reklamných a škodlivých domén (~70 000), subdomény už blokovaných domén sa vynechajú.
+- Zoznamy sa po odomknutí stiahnu, ak chýbajú alebo sú staršie ako týždeň. Zapínajú sa, aktualizujú a ich počty pravidiel sú v **Nastavenia → Ochrana súkromia → Zoznamy blokovania**. Ležia v priečinku dát Crow (`easylist.txt`, `easyprivacy.txt`, `hosts-stevenblack.txt`).
+- WebKit dovolí najviac 150 000 pravidiel v jednom zozname, preto sú dva: hlavný (vstavaný, `blocklist.txt`, EasyList, EasyPrivacy) a hosts. Prevod a kompilácia (~10 s na pozadí) bežia len keď sa niektorý zoznam zmení, inak sa načíta skompilovaná kópia.
 - Blokovanie sa zapína a vypína v **Nastavenia → Ochrana súkromia** a platí okamžite pre všetky karty.
 - **Štít v paneli:** modrý = blokuje sa, sivý = vypnuté. Klik vypne alebo zapne blokovanie pre aktuálny web (výnimka platí aj pre subdomény a karty tohto webu sa znova načítajú), **⌥+klik** (Linux **Alt+klik**) ho prepne všade. To isté je v informáciách o stránke (zámok).
 - Výnimky sú uložené v šifrovanom trezore a dajú sa odstrániť v Nastaveniach.

@@ -67,6 +67,18 @@ unsafe extern "C" {
         res: *mut gio::ffi::GAsyncResult,
         err: *mut *mut glib::ffi::GError,
     ) -> *mut c_void;
+    fn webkit_user_content_filter_store_remove(
+        store: *mut c_void,
+        id: *const c_char,
+        cancellable: *mut gio::ffi::GCancellable,
+        callback: GAsyncReadyCallback,
+        data: *mut c_void,
+    );
+    fn webkit_user_content_filter_store_remove_finish(
+        store: *mut c_void,
+        res: *mut gio::ffi::GAsyncResult,
+        err: *mut *mut glib::ffi::GError,
+    ) -> glib::ffi::gboolean;
     fn webkit_user_content_filter_unref(filter: *mut c_void);
     fn webkit_user_content_manager_add_filter(manager: *mut c_void, filter: *mut c_void);
     fn webkit_cookie_manager_get_all_cookies(
@@ -101,7 +113,8 @@ impl Drop for Filter {
 }
 
 thread_local! {
-    static RULES: RefCell<Option<Filter>> = const { RefCell::new(None) };
+    /// Compiled content filters by id (see `adblock::LISTS`).
+    static RULES: RefCell<Vec<(&'static str, Filter)>> = const { RefCell::new(Vec::new()) };
     static ROOT: RefCell<Option<webkit2gtk::WebView>> = const { RefCell::new(None) };
     static UI_ROOT: RefCell<Option<webkit2gtk::WebView>> = const { RefCell::new(None) };
     static LAYOUT: RefCell<Option<gtk::Layout>> = const { RefCell::new(None) };
@@ -217,7 +230,7 @@ pub fn set_rules(v: &WebView, on: bool) {
     manager.remove_all_filters();
     if on {
         RULES.with(|r| {
-            if let Some(f) = &*r.borrow() {
+            for (_, f) in &*r.borrow() {
                 unsafe { webkit_user_content_manager_add_filter(manager.as_ptr() as *mut c_void, f.0) };
             }
         });
@@ -249,43 +262,31 @@ fn finish_data(f: impl FnOnce(*mut glib::gobject_ffi::GObject, *mut gio::ffi::GA
     Box::into_raw(Box::new(f)) as *mut c_void
 }
 
-/// `cached`: the store already holds these exact rules (see `adblock::is_compiled`);
-/// load them instead of recompiling ~100k rules, compile only if loading fails.
-pub fn compile_rules(json: String, cached: bool, done: impl Fn() + 'static) {
+fn filter_store() -> Option<*mut c_void> {
     let dir = cache_dir().join("filters");
     let _ = std::fs::create_dir_all(&dir);
-    let Ok(path) = CString::new(dir.to_string_lossy().as_bytes()) else { return };
-    unsafe {
-        let store = webkit_user_content_filter_store_new(path.as_ptr());
-        if !cached {
-            return save_rules(store, json, done);
-        }
-        let data = finish_data(move |src, res| {
-            let mut err = ptr::null_mut();
-            let f = webkit_user_content_filter_store_load_finish(src as *mut c_void, res, &mut err);
-            if !err.is_null() {
-                glib::ffi::g_error_free(err);
-            }
-            if f.is_null() {
-                return save_rules(src as *mut c_void, json, done); // takes over the store ref
-            }
-            RULES.with(|r| *r.borrow_mut() = Some(Filter(f)));
-            done();
-            glib::gobject_ffi::g_object_unref(src);
-        });
-        webkit_user_content_filter_store_load(store, c"crow-adblock".as_ptr(), ptr::null_mut(), Some(finish_trampoline), data);
-    }
+    let path = CString::new(dir.to_string_lossy().as_bytes()).ok()?;
+    Some(unsafe { webkit_user_content_filter_store_new(path.as_ptr()) })
 }
 
-/// Compiles and stores the rules; consumes the `store` reference.
-unsafe fn save_rules(store: *mut c_void, json: String, done: impl Fn() + 'static) {
+fn keep_rules(id: &'static str, f: *mut c_void) {
+    RULES.with(|r| {
+        let mut r = r.borrow_mut();
+        r.retain(|(i, _)| *i != id);
+        r.push((id, Filter(f)));
+    });
+}
+
+/// Compiles rule list `id` (stored on disk by WebKit, reused via `load_rules`).
+pub fn compile_rules(id: &'static str, json: String, done: impl Fn() + 'static) {
+    let (Some(store), Ok(cid)) = (filter_store(), CString::new(id)) else { return };
     let bytes = glib::Bytes::from_owned(json.into_bytes());
     unsafe {
         let data = finish_data(move |src, res| {
             let mut err = ptr::null_mut();
             let f = webkit_user_content_filter_store_save_finish(src as *mut c_void, res, &mut err);
             if !f.is_null() {
-                RULES.with(|r| *r.borrow_mut() = Some(Filter(f)));
+                keep_rules(id, f);
                 done();
             } else if !err.is_null() {
                 let e: glib::Error = glib::translate::from_glib_full(err);
@@ -295,12 +296,46 @@ unsafe fn save_rules(store: *mut c_void, json: String, done: impl Fn() + 'static
         });
         webkit_user_content_filter_store_save(
             store,
-            c"crow-adblock".as_ptr(),
+            cid.as_ptr(),
             glib::translate::ToGlibPtr::to_glib_none(&bytes).0,
             ptr::null_mut(),
             Some(finish_trampoline),
             data,
         );
+    }
+}
+
+/// Loads the previously compiled list `id`; `fail` if the store no longer has it.
+pub fn load_rules(id: &'static str, ok: impl Fn() + 'static, fail: impl Fn() + 'static) {
+    let (Some(store), Ok(cid)) = (filter_store(), CString::new(id)) else { return fail() };
+    unsafe {
+        let data = finish_data(move |src, res| {
+            let mut err = ptr::null_mut();
+            let f = webkit_user_content_filter_store_load_finish(src as *mut c_void, res, &mut err);
+            if !err.is_null() {
+                glib::ffi::g_error_free(err);
+            }
+            glib::gobject_ffi::g_object_unref(src);
+            if f.is_null() {
+                return fail();
+            }
+            keep_rules(id, f);
+            ok();
+        });
+        webkit_user_content_filter_store_load(store, cid.as_ptr(), ptr::null_mut(), Some(finish_trampoline), data);
+    }
+}
+
+/// Disabled list: forgotten here and removed from the store.
+pub fn drop_rules(id: &'static str) {
+    RULES.with(|r| r.borrow_mut().retain(|(i, _)| *i != id));
+    let (Some(store), Ok(cid)) = (filter_store(), CString::new(id)) else { return };
+    unsafe {
+        let data = finish_data(|src, res| {
+            webkit_user_content_filter_store_remove_finish(src as *mut c_void, res, ptr::null_mut());
+            glib::gobject_ffi::g_object_unref(src);
+        });
+        webkit_user_content_filter_store_remove(store, cid.as_ptr(), ptr::null_mut(), Some(finish_trampoline), data);
     }
 }
 

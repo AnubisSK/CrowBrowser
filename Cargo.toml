@@ -13,6 +13,8 @@ argon2 = "0.5"
 chacha20poly1305 = "0.10"
 zeroize = "1"
 sha2 = "0.10"
+# EasyList/EasyPrivacy parsing, converted to WebKit content-blocker rules (no runtime engine)
+adblock = { version = "0.13", default-features = false, features = ["content-blocking", "embedded-domain-resolver"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.21"
