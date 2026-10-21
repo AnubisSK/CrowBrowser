@@ -68,6 +68,8 @@ Po **⌃⌘L** (alebo z Nastavení) Crow:
 - Kľúč je uložený v `Zeroizing<[u8; 32]>`, pri uvoľnení sa prepíše nulami.
 - Správa s heslom z obrazovky odomknutia sa po spracovaní prepíše nulami.
 - Pri zmene hesla sa prepíšu nulami staré aj nové heslo.
+- Dešifrovaný obsah trezora sa drží v `Zeroizing` bufferi. Cookies (názov, hodnota, doména) sa prepíšu nulami vždy, keď sa ich zoznam nahradí alebo uvoľní (po exporte z WebKitu, importe, vymazaní, zamknutí). Posledná kópia cookies zostáva v pamäti počas behu, aby sa dali uložiť aj pri nečakanom ukončení. Kópie vo WebKite Crow vymazať nevie.
+- **Zmena hesla** (`Vault::rotate_key`): nová náhodná soľ, nový kľúč Argon2id, zápis do `.vault.tmp`, `sync_all` a premenovanie. Nový kľúč sa začne používať až po úspešnom zápise, inak zostáva pôvodné heslo na disku aj v pamäti.
 
 ## Zmena a strata hesla
 
@@ -87,6 +89,8 @@ Po **⌃⌘L** (alebo z Nastavení) Crow:
 - Namiesto stránky sa v karte zobrazí upozornenie „Pripojenie nie je bezpečné“ s dôvodom (statická stránka bez IPC). Adresný riadok ukazuje odmietnutú adresu s červeným označením „Chyba certifikátu“.
 - Zámok sa zobrazí **len** keď WebKit pre načítanú stránku potvrdí overený certifikát (macOS `serverTrust`, Linux `tls_info` bez chýb), nikdy len podľa `https://` v adrese. Stránka s HTTP obsahom na HTTPS (macOS) má označenie „Čiastočne zabezpečené“.
 - Pravidlá blokovania sa pripoja k novej karte aj k oknu otvorenému cez `window.open` ešte pred prvou požiadavkou.
+- **MIME sniffing:** WebKit rešpektuje `X-Content-Type-Options: nosniff`. Na Linuxe Crow navyše nevykreslí HTTP(S) stránku bez hlavičky `Content-Type` ani stránku s `nosniff`, ktorej typ by WebKit určil inak, než deklaroval server. Hlavná stránka ide do výzvy na stiahnutie, iframe sa nevykreslí.
+- Skript proti detekcii blokovania nastavuje návnadové premenné ako nemenné (odolné voči DOM clobbering cez `<img id="canRunAds">`) a jeho náhrady funkcií sa pri `toString()` tvária ako natívny kód.
 
 ## Sťahovanie a sieť mimo WebKitu
 

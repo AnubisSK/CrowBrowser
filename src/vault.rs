@@ -15,7 +15,7 @@ use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const MAGIC: &[u8; 6] = b"CROWV1";
 const HEADER: usize = 6 + 16;
@@ -53,6 +53,16 @@ pub struct CookieRec {
     pub http_only: bool,
     pub same_site: Option<String>,
     pub expires: Option<f64>,
+}
+
+/// Session tokens live in `name`/`value`: wiped whenever a cookie list is replaced or dropped
+/// (after export, import into WebKit, deletion or locking).
+impl Drop for CookieRec {
+    fn drop(&mut self) {
+        self.name.zeroize();
+        self.value.zeroize();
+        self.domain.zeroize();
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -121,6 +131,17 @@ impl Vault {
         let plain = Zeroizing::new(plain);
         let data = serde_json::from_slice(&plain).map_err(|_| "Trezor je poškodený")?;
         Ok((Self { salt, key }, data))
+    }
+
+    /// Password change as one transaction: fresh random salt (`OsRng`) and Argon2id key, `data`
+    /// encrypted with it and persisted via `.vault.tmp` + `sync_all` + rename (`save`). Only after
+    /// that succeeds does `self` switch to the new key (the old one is zeroized on drop); on any
+    /// error the vault on disk and in memory both stay on the old password.
+    pub fn rotate_key(&mut self, new_password: &str, data: &VaultData) -> io::Result<()> {
+        let next = Self::create(new_password);
+        next.save(data)?;
+        *self = next;
+        Ok(())
     }
 
     pub fn verify(&self, password: &str) -> bool {

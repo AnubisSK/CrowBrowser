@@ -211,6 +211,21 @@ pub fn attach(b: WebViewBuilder, rect: Rect, _window: &Window) -> wry::Result<We
     Ok(v)
 }
 
+/// MIME sniffing defense for HTTP(S) documents: a response is never rendered under a type the
+/// server did not declare. No `Content-Type` at all (WebKit would sniff, e.g. an uploaded file
+/// into HTML) or, with `X-Content-Type-Options: nosniff`, a declared type different from the
+/// one WebKit would use: the response goes to the download prompt instead of being rendered.
+fn sniffed(uri: &str, declared: Option<String>, options: Option<String>, res: Option<&webkit2gtk::URIResponse>) -> bool {
+    if !(uri.starts_with("http:") || uri.starts_with("https:")) {
+        return false;
+    }
+    let declared = declared.map(|v| v.split(';').next().unwrap_or("").trim().to_string()).filter(|v| !v.is_empty());
+    let Some(declared) = declared else { return true };
+    let nosniff = options.is_some_and(|v| v.split(',').any(|t| t.trim() == "nosniff"));
+    let effective = res.and_then(|r| r.mime_type()).map(|m| m.to_ascii_lowercase());
+    nosniff && effective.is_some_and(|e| e != declared)
+}
+
 /// WebKitGTK does not emit `WebContext::download-started` for responses it turns into
 /// downloads on its own (unsupported MIME type, `Content-Disposition: attachment`), so those
 /// would vanish. Start them explicitly; the shared handler (`watch_downloads`) then asks the user.
@@ -219,16 +234,20 @@ fn start_downloads(w: &webkit2gtk::WebView, d: &webkit2gtk::PolicyDecision, t: P
         return false;
     }
     let Some(r) = d.downcast_ref::<webkit2gtk::ResponsePolicyDecision>() else { return false };
-    let attachment = r
-        .response()
-        .and_then(|res| res.http_headers())
-        .and_then(|h| h.one("Content-Disposition"))
-        .is_some_and(|v| v.trim_start().to_ascii_lowercase().starts_with("attachment"));
-    if r.is_mime_type_supported() && !attachment {
+    let Some(uri) = r.request().and_then(|q| q.uri()) else { return false };
+    let response = r.response();
+    let headers = response.as_ref().and_then(|res| res.http_headers());
+    let header = |name: &str| headers.as_ref().and_then(|h| h.one(name)).map(|v| v.trim().to_ascii_lowercase());
+    let attachment = header("Content-Disposition").is_some_and(|v| v.starts_with("attachment"));
+    let sniffed = sniffed(&uri, header("Content-Type"), header("X-Content-Type-Options"), response.as_ref());
+    if r.is_mime_type_supported() && !attachment && !sniffed {
         return false;
     }
-    let Some(uri) = r.request().and_then(|q| q.uri()) else { return false };
     d.ignore();
+    // A mistyped subframe is just not rendered (no download prompts from embedded content).
+    if sniffed && !attachment && !r.is_main_frame_main_resource() {
+        return true;
+    }
     w.download_uri(&uri);
     true
 }

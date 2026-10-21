@@ -29,6 +29,7 @@
 - Filtre sa prevádzajú na pravidlá WebKitu, takže fungujú len tie, ktoré sa dajú vyjadriť v jeho formáte. Procedurálne kozmetické filtre uBlock (`:has-text`, scriptlety) nie sú podporované a reklamy vložené priamo do videa (YouTube) sa nezablokujú.
 - Výnimky (`@@`) platia len v rámci svojho zdroja: výnimka z EasyListu nezruší blokovanie z EasyPrivacy ani zo StevenBlack hosts.
 - Karanténny atribút pre Gatekeeper existuje len na macOS. Na Linuxe sa súbory ukladajú bez práva spustenia.
+- Prísna kontrola MIME (stránka bez `Content-Type` sa nevykreslí) je len na Linuxe. Na macOS rozhoduje wry/WebKit sám (`nosniff` rešpektuje, chýbajúci typ však WebKit dourčí).
 - Počítanie zablokovaných požiadaviek používa neverejné rozhranie WebKitu na macOS (`_webView:contentRuleListWithIdentifier:performedAction:forURL:`). Ak ho budúci macOS zmení, počty zostanú na nule, blokovanie funguje ďalej. Na Linuxe WebKitGTK také rozhranie nemá, počty sa nezobrazujú.
 - Ušetrené dáta a čas sú odhad (50 kB a 50 ms na požiadavku), nie meranie.
 

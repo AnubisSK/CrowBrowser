@@ -1691,14 +1691,12 @@ impl App {
                 } else if r.new.chars().count() < 8 {
                     (false, "Nové heslo musí mať aspoň 8 znakov")
                 } else {
-                    // Transactional: the new vault must be on disk (tmp + fsync + rename)
-                    // before it replaces the in-memory key or the UI reports success.
-                    let vault = Vault::create(&r.new);
+                    // Transactional (`rotate_key`): the new vault must be on disk (tmp + fsync +
+                    // rename) before it replaces the in-memory key or the UI reports success.
                     s.snapshot();
                     s.data.settings = Some(self.cfg.clone());
-                    match vault.save(&s.data) {
+                    match s.vault.rotate_key(&r.new, &s.data) {
                         Ok(()) => {
-                            s.vault = vault;
                             s.dirty = false;
                             (true, "Heslo bolo zmenené")
                         }
