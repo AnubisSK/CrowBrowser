@@ -169,7 +169,7 @@
     const n = (x) => (x || 0).toLocaleString('sk');
     const src = (file) => L.sources.find(s => s.file === file) || {};
     const when = (s) => s.time ? 'stiahnutý ' + fmtDay(s.time) + ' ' + fmtTime(s.time) : 'nestiahnutý';
-    const count = (l) => l ? n(l.rules) + ' pravidiel' + (l.truncated ? ' (orezané na limit WebKitu)' : '') : 'pripravuje sa…';
+    const count = (l) => l ? n(l.rules) + ' pravidiel' + (l.lists > 1 ? ' v ' + l.lists + ' zoznamoch' : '') + (l.truncated ? ' (' + n(l.dropped) + ' kozmetických sa nezmestilo)' : '') : 'pripravuje sa…';
     const item = (title, sub, ...controls) => h('div', { class: 'item' },
       h('div', { class: 'main' }, h('div', { class: 'title' }, title), h('div', { class: 'sub' }, sub)), ...controls);
     return h('div', { class: 'row', style: 'display:block' },

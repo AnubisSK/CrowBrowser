@@ -88,6 +88,11 @@ Po **⌃⌘L** (alebo z Nastavení) Crow:
 - Zámok sa zobrazí **len** keď WebKit pre načítanú stránku potvrdí overený certifikát (macOS `serverTrust`, Linux `tls_info` bez chýb), nikdy len podľa `https://` v adrese. Stránka s HTTP obsahom na HTTPS (macOS) má označenie „Čiastočne zabezpečené“.
 - Pravidlá blokovania sa pripoja k novej karte aj k oknu otvorenému cez `window.open` ešte pred prvou požiadavkou.
 
+## Sťahovanie a sieť mimo WebKitu
+
+- Názov sťahovaného súboru sa pred zápisom vyčistí (cesty, neviditeľné a smer meniace znaky, maskovacie prípony ako `.pdf.exe`). Spustiteľné typy sú vo výzve na stiahnutie výrazne označené. Na macOS dostane dokončený súbor atribút `com.apple.quarantine` (Gatekeeper).
+- Aktualizácie a zoznamy blokovania sťahuje systémový `curl` s `-q` (ignoruje `~/.curlrc`), len cez HTTPS aj pri presmerovaní (`--proto =https --proto-redir =https`), bez proxy z prostredia (`--noproxy *`) a s limitom veľkosti. Rozpracované `.part` súbory majú práva `0600`.
+
 ## Model hrozieb
 
 | Hrozba | Chránené? |

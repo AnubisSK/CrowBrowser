@@ -1,5 +1,5 @@
 use crate::{
-    adblock, cert,
+    adblock, cert, download,
     settings::{ENGINES, Settings},
     update,
     vault::{self, Bookmark, CookieRec, Download, HistoryEntry, MAX_HISTORY, Vault, VaultData},
@@ -10,7 +10,7 @@ use serde_json::json;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -98,8 +98,8 @@ pub enum UserEvent {
     CookiesRestored,
     /// Content-blocker list `id` is unchanged since WebKit compiled it: load, don't rebuild.
     RulesCached { id: &'static str, hash: String },
-    /// Freshly converted filter list, to be compiled by WebKit.
-    RulesBuilt { id: &'static str, hash: String, json: String },
+    /// Freshly converted part `id` of a filter group (`parts` lists in total), for WebKit.
+    RulesBuilt { id: &'static str, hash: String, json: String, parts: usize },
     /// List has no sources (disabled).
     RulesOff(&'static str),
     RulesReady,
@@ -178,12 +178,17 @@ impl TabCtx {
             let (p3, p4) = (self.proxy.clone(), self.proxy.clone());
             b = b
                 .with_download_started_handler(move |url, path| {
+                    // WebKit's suggested name goes through the same sanitizing as on Linux.
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let name = download::sanitize(&name);
                     if wk::take_approved(&url) {
+                        if let Some(dir) = path.parent().map(Path::to_path_buf) {
+                            *path = download::unique_path(&dir, &name);
+                        }
                         let _ = p3.send_event(UserEvent::DownloadStarted { url, path: path.clone() });
                         return true;
                     }
                     // No drive-by downloads: cancel, ask the user, retry on approval.
-                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let _ = p3.send_event(UserEvent::DownloadAsk { key: 0, tab: Some(id), url, name });
                     false
                 })
@@ -239,6 +244,8 @@ struct Ask {
     tab: Option<u32>,
     url: String,
     name: String,
+    /// Executable/script type: shown as a warning in the prompt.
+    risk: Option<String>,
 }
 
 struct Tab {
@@ -430,7 +437,7 @@ impl Session {
             "host": if url.starts_with("http") { host_of(url) } else { String::new() },
             "siteAllowed": cfg.allowed(&host_of(url)),
             "ask": self.asks.first().map(|a| json!({
-                "id": a.id, "name": a.name, "url": a.url, "more": self.asks.len() - 1,
+                "id": a.id, "name": a.name, "url": a.url, "more": self.asks.len() - 1, "risk": a.risk,
             })),
             "update": self.update.as_ref().filter(|_| self.update_bar).map(|u| json!({
                 "version": u.version, "busy": self.update_busy, "asset": u.asset.is_some(),
@@ -619,21 +626,26 @@ impl App {
                 let ok = move || {
                     let _ = p.send_event(UserEvent::RulesReady);
                 };
-                // WebKit lost its compiled copy: convert again.
+                // WebKit lost its compiled copy: convert the group again, use this part.
                 let fail = move || {
                     let (p, hash) = (p2.clone(), hash.clone());
                     std::thread::spawn(move || {
-                        if let Some(json) = adblock::build(id) {
-                            let _ = p.send_event(UserEvent::RulesBuilt { id, hash, json });
-                        }
+                        let Some((g, i)) = adblock::group_of(id) else { return };
+                        let Some(jsons) = adblock::build(g) else { return };
+                        let parts = jsons.len();
+                        let e = match jsons.into_iter().nth(i) {
+                            Some(json) => UserEvent::RulesBuilt { id, hash, json, parts },
+                            None => UserEvent::RulesOff(id),
+                        };
+                        let _ = p.send_event(e);
                     });
                 };
                 wk::load_rules(id, ok, fail);
             }
-            UserEvent::RulesBuilt { id, hash, json } => {
+            UserEvent::RulesBuilt { id, hash, json, parts } => {
                 let p = self.ctx.proxy.clone();
                 wk::compile_rules(id, json, move || {
-                    adblock::mark_compiled(id, &hash);
+                    adblock::mark_compiled(id, &hash, parts);
                     let _ = p.send_event(UserEvent::RulesReady);
                 });
             }
@@ -1235,7 +1247,9 @@ impl App {
             return wk::decide_download(key, false, &url, None);
         };
         let id = self.ctx.next();
-        s.asks.push(Ask { id, key, tab, url, name });
+        let name = download::sanitize(&name);
+        let risk = download::risk(&name);
+        s.asks.push(Ask { id, key, tab, url, name, risk });
         if s.asks.len() == 1 {
             self.resize();
         }
@@ -1265,6 +1279,9 @@ impl App {
             return;
         };
         d.state = if ok { "done" } else { "failed" }.into();
+        if ok {
+            download::quarantine(Path::new(&d.path)); // Gatekeeper inspects it on first open
+        }
         let name = d.path.rsplit('/').next().unwrap_or("").to_string();
         s.dirty = true;
         s.toast(&if ok { format!("Stiahnuté: {name}") } else { format!("Sťahovanie zlyhalo: {name}") });
@@ -1759,14 +1776,26 @@ fn refresh_rules(proxy: EventLoopProxy<UserEvent>, fetch: Vec<&'static adblock::
         if manual && !fetch.is_empty() {
             send(UserEvent::RulesNote(if errors.is_empty() { "Zoznamy reklám aktualizované".into() } else { errors.join(", ") }));
         }
-        for id in adblock::LISTS {
-            match adblock::input_hash(id) {
-                None => send(UserEvent::RulesOff(id)),
-                Some(hash) if adblock::is_compiled(id, &hash) => send(UserEvent::RulesCached { id, hash }),
-                Some(hash) => {
-                    if let Some(json) = adblock::build(id) {
-                        send(UserEvent::RulesBuilt { id, hash, json });
-                    }
+        for id in adblock::LEGACY {
+            send(UserEvent::RulesOff(id));
+        }
+        for g in adblock::GROUPS {
+            let Some(hash) = adblock::input_hash(g) else {
+                g.parts.iter().for_each(|p| send(UserEvent::RulesOff(p)));
+                continue;
+            };
+            if let Some(n) = adblock::compiled_parts(g, &hash) {
+                for (i, id) in g.parts.iter().enumerate() {
+                    send(if i < n { UserEvent::RulesCached { id, hash: hash.clone() } } else { UserEvent::RulesOff(id) });
+                }
+            } else if let Some(jsons) = adblock::build(g) {
+                let parts = jsons.len();
+                let mut jsons = jsons.into_iter();
+                for id in g.parts {
+                    send(match jsons.next() {
+                        Some(json) => UserEvent::RulesBuilt { id, hash: hash.clone(), json, parts },
+                        None => UserEvent::RulesOff(id),
+                    });
                 }
             }
         }

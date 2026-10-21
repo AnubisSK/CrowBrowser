@@ -1,6 +1,7 @@
 mod adblock;
 mod app;
 mod cert;
+mod download;
 mod settings;
 mod update;
 mod vault;

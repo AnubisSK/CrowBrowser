@@ -124,6 +124,9 @@ Podporované vyhľadávače: **DuckDuckGo** (predvolený), **Google**, **Bing**,
 
 - Pred každým sťahovaním sa pod adresným riadkom zobrazí výzva **„Stiahnuť „súbor“ z domény?“** s tlačidlami **Uložiť / Zrušiť**. Bez potvrdenia sa nič nezapíše na disk.
 - Súbory sa ukladajú do **~/Downloads**. Ak už súbor s rovnakým názvom existuje, pridá sa číslo, napr. `dokument (1).pdf`.
+- **Bezpečný názov:** z názvu sa odstránia cesty, neviditeľné a smer meniace znaky (napr. U+202E, ktorý z `gpj.exe` urobí na pohľad `exe.jpg`), úvodné bodky a výplň medzerami. Maskovacia prípona pred spustiteľnou sa zneškodní: `faktura.pdf.exe` sa uloží ako `faktura_pdf.exe`.
+- **Spustiteľné súbory** (`.exe`, `.app`, `.command`, `.sh`, `.desktop`, `.deb`, `.rpm`, `.dmg`, `.pkg`, skripty…) majú vo výzve červené upozornenie „⚠ Spustiteľný súbor“.
+- **Karanténa (macOS):** dokončený súbor dostane atribút `com.apple.quarantine`, takže ho pri otvorení skontroluje Gatekeeper (rovnako ako pri Safari). Platí aj pre inštalátor aktualizácie.
 - Pri štarte a dokončení sa zobrazí hlásenie, tlačidlo ↓ má počas sťahovania modrú bodku.
 - **⌘⌥L** alebo tlačidlo ↓ otvorí zoznam so stavmi *Sťahuje sa… / Hotovo / Zlyhalo*.
 - Stiahnuté súbory sa nikdy nespúšťajú. Klik na hotový súbor alebo **Zobraziť vo Finderi** ho iba ukáže v priečinku.
@@ -150,7 +153,7 @@ Podporované vyhľadávače: **DuckDuckGo** (predvolený), **Google**, **Bing**,
 - **EasyList a EasyPrivacy** ([easylist.to](https://easylist.to)): filtre v syntaxi Adblock Plus vrátane ciest, výnimiek (`@@`) a kozmetických pravidiel (`##`). Spracúva ich knižnica [adblock-rust](https://github.com/brave/adblock-rust) od Brave a prevedie na pravidlá WebKitu, takže sa blokuje stále v sieťovej vrstve, pred pripojením.
 - **StevenBlack hosts:** [verejný zoznam](https://github.com/StevenBlack/hosts) reklamných a škodlivých domén (~70 000), subdomény už blokovaných domén sa vynechajú.
 - Zoznamy sa po odomknutí stiahnu, ak chýbajú alebo sú staršie ako týždeň. Zapínajú sa, aktualizujú a ich počty pravidiel sú v **Nastavenia → Ochrana súkromia → Zoznamy blokovania**. Ležia v priečinku dát Crow (`easylist.txt`, `easyprivacy.txt`, `hosts-stevenblack.txt`).
-- WebKit dovolí najviac 150 000 pravidiel v jednom zozname, preto sú dva: hlavný (vstavaný, `blocklist.txt`, EasyList, EasyPrivacy) a hosts. Prevod a kompilácia (~10 s na pozadí) bežia len keď sa niektorý zoznam zmení, inak sa načíta skompilovaná kópia.
+- WebKit dovolí najviac 150 000 pravidiel v jednom zozname, preto má každý zdroj vlastný zoznam (vstavaný + `blocklist.txt`, EasyList, EasyPrivacy, hosts). Ak by zdroj limit prekročil, rozdelí sa na viac zoznamov a výnimky (`@@`) sa skopírujú do každého z nich, takže sa žiadne pravidlo nestratí. Prevod a kompilácia (~10 s na pozadí) bežia len keď sa niektorý zdroj zmení, inak sa načíta skompilovaná kópia.
 - **Obchádzanie detekcie blokovania** („Blokovače reklám sú zakázané“): do stránok sa pred ich skriptami vloží malý skript. Zablokovaný reklamný skript či obrázok sa stránke javí ako načítaný, `fetch` na reklamnú adresu vráti prázdnu odpoveď 200, nastavia sa „návnadové“ premenné (`canRunAds` …) a skryté návnadové prvky (`.adsbox`, `ins.adsbygoogle` …) hlásia nenulovú veľkosť. Ak web aj tak trvá na vypnutí, pomôže výnimka cez štít.
 - Blokovanie sa zapína a vypína v **Nastavenia → Ochrana súkromia** a platí okamžite pre všetky karty.
 - **Štít v paneli:** modrý = blokuje sa, sivý = vypnuté. Číslo na ňom je počet zablokovaných požiadaviek na aktuálnej stránke (nová stránka začína od nuly). **⌥+klik** (Linux **Alt+klik**) prepne blokovanie všade.

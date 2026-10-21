@@ -559,22 +559,6 @@ pub fn download_dir() -> PathBuf {
         .unwrap_or_else(|| glib::home_dir().join("Downloads"))
 }
 
-fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let name = Path::new(name).file_name().and_then(|n| n.to_str()).filter(|n| !n.is_empty());
-    let name = name.unwrap_or("download");
-    let (stem, ext) = match name.rsplit_once('.') {
-        Some((s, e)) if !s.is_empty() => (s, format!(".{e}")),
-        _ => (name, String::new()),
-    };
-    let mut p = dir.join(name);
-    let mut n = 1;
-    while p.exists() {
-        p = dir.join(format!("{stem} ({n}){ext}"));
-        n += 1;
-    }
-    p
-}
-
 /// Registered once on the shared context (wry would add one handler per webview).
 /// Nothing is written until the user approves the prompt (`ask` → `decide_download`).
 pub fn watch_downloads(
@@ -595,8 +579,8 @@ pub fn watch_downloads(
             let Some(uri) = d.request().and_then(|r| r.uri()) else { return false };
             let key = next.get();
             next.set(key + 1);
-            let name = Path::new(name).file_name().map(|n| n.to_string_lossy().into_owned());
-            let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| "download".into());
+            // Sanitized before the prompt shows it and before any path is built from it.
+            let name = crate::download::sanitize(name);
             ASKING.with(|a| a.borrow_mut().push((key, d.clone(), name.clone())));
             ask(key, uri.to_string(), name);
             true // destination is set later, in decide_download
@@ -795,7 +779,7 @@ pub fn decide_download(key: u32, allow: bool, _url: &str, _view: Option<&WebView
     let Some(uri) = d.request().and_then(|r| r.uri()) else { return d.cancel() };
     let dir = download_dir();
     let _ = std::fs::create_dir_all(&dir);
-    let path = unique_path(&dir, &name);
+    let path = crate::download::unique_path(&dir, &name);
     d.set_destination(&path.to_string_lossy());
     if let Some(f) = STARTED.with(|s| s.borrow().clone()) {
         f(uri.to_string(), path);

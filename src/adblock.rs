@@ -2,12 +2,15 @@
 //! built-in list and `data_dir()/blocklist.txt`) are parsed with Brave's `adblock` crate and
 //! converted to WebKit content-blocker JSON, so requests are still blocked inside WebKit's network
 //! layer before any connection is made (WKContentRuleList / WebKitUserContentFilter).
-//! Two lists, because WebKit allows at most 150 000 rules per list:
-//! `crow-adblock` (EasyList + EasyPrivacy + built-in + blocklist.txt) and `crow-hosts`.
+//! One group of WebKit lists per source (built-in + blocklist.txt, EasyList, EasyPrivacy, hosts),
+//! because WebKit allows at most 150 000 rules per list (see `Group`, `pack`).
 //! Parsing runs only when an input changes (input hash); otherwise WebKit's compiled copy is reused.
 
 use crate::{settings::data_dir, update};
-use adblock::lists::{FilterFormat, FilterSet, ParseOptions};
+use adblock::{
+    content_blocking::{CbRule, CbType},
+    lists::{FilterFormat, FilterSet, ParseOptions},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -57,50 +60,67 @@ pub const DEFUSER: &str = include_str!("defuser.js");
 /// WebKit's content-blocker limit per rule list.
 const MAX_RULES: usize = 150_000;
 /// Bump when the conversion changes, so cached compiled lists are rebuilt.
-const FORMAT: &str = "adblock-0.13/1";
+const FORMAT: &str = "adblock-0.13/2";
 const MAX_LIST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 
-pub const MAIN: &str = "crow-adblock";
-pub const HOSTS: &str = "crow-hosts";
-pub const LISTS: [&str; 2] = [MAIN, HOSTS];
+/// One logical filter list. WebKit takes at most 150 000 rules per list and exceptions only
+/// cancel rules of their own list, so each source gets its own group; a group that is still too
+/// large is split into several lists (`parts`), each carrying all of the group's exceptions.
+pub struct Group {
+    key: &'static str,
+    pub parts: &'static [&'static str],
+}
 
-/// Downloadable filter list: (name, file in `data_dir()`, URL, format, rule list it goes into).
+pub const GROUPS: &[Group] = &[
+    Group { key: "custom", parts: &["crow-custom", "crow-custom-2"] },
+    Group { key: "easylist", parts: &["crow-easylist", "crow-easylist-2", "crow-easylist-3"] },
+    Group { key: "easyprivacy", parts: &["crow-easyprivacy", "crow-easyprivacy-2"] },
+    Group { key: "hosts", parts: &["crow-hosts", "crow-hosts-2"] },
+];
+
+/// Rule lists of older versions, removed from WebKit's store.
+pub const LEGACY: &[&str] = &["crow-adblock"];
+
+/// Downloadable filter list: name, file in `data_dir()`, URL, group it belongs to.
 pub struct Source {
     pub name: &'static str,
     pub file: &'static str,
     pub url: &'static str,
-    hosts: bool,
+    group: &'static str,
 }
 
 impl Source {
     pub fn enabled(&self, easylist: bool, hosts: bool) -> bool {
-        if self.hosts { hosts } else { easylist }
+        if self.group == "hosts" { hosts } else { easylist }
     }
 }
 
 pub const SOURCES: &[Source] = &[
-    Source { name: "EasyList", file: "easylist.txt", url: "https://easylist.to/easylist/easylist.txt", hosts: false },
-    Source { name: "EasyPrivacy", file: "easyprivacy.txt", url: "https://easylist.to/easylist/easyprivacy.txt", hosts: false },
+    Source { name: "EasyList", file: "easylist.txt", url: "https://easylist.to/easylist/easylist.txt", group: "easylist" },
+    Source { name: "EasyPrivacy", file: "easyprivacy.txt", url: "https://easylist.to/easylist/easyprivacy.txt", group: "easyprivacy" },
     Source {
         name: "StevenBlack hosts",
         file: "hosts-stevenblack.txt",
         url: "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-        hosts: true,
+        group: "hosts",
     },
 ];
 
-/// Result of the last conversion of one rule list, kept next to its input hash.
+/// Result of the last conversion of one group, kept next to its input hash.
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct ListStats {
     pub filters: usize,
     pub rules: usize,
-    pub truncated: bool,
+    pub parts: usize,
+    /// Rules that did not fit even into all parts (cosmetic ones go first; normally 0).
+    pub dropped: usize,
 }
 
 #[derive(Serialize, Deserialize)]
 struct Marker {
     hash: String,
+    parts: usize,
     stats: ListStats,
 }
 
@@ -133,17 +153,29 @@ fn modified_ms(p: &PathBuf) -> Option<u64> {
     Some(t.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64)
 }
 
-/// Panel data: sources (downloaded or not, when) and per-list rule counts.
+/// Panel data: sources (downloaded or not, when) and rule counts (main = all but hosts).
 pub fn status() -> Value {
     let sources: Vec<Value> = SOURCES
         .iter()
         .map(|s| json!({ "name": s.name, "file": s.file, "time": modified_ms(&path(s.file)) }))
         .collect();
+    let sum = |keys: &[&str]| {
+        let all: Vec<ListStats> = keys.iter().filter_map(|k| stats_of(k)).collect();
+        (!all.is_empty()).then(|| {
+            let dropped: usize = all.iter().map(|s| s.dropped).sum();
+            json!({
+                "rules": all.iter().map(|s| s.rules).sum::<usize>(),
+                "lists": all.iter().map(|s| s.parts).sum::<usize>(),
+                "dropped": dropped,
+                "truncated": dropped > 0,
+            })
+        })
+    };
     json!({
         "builtin": DOMAINS.len(),
         "sources": sources,
-        "main": stats_of(MAIN),
-        "hosts": stats_of(HOSTS),
+        "main": sum(&["custom", "easylist", "easyprivacy"]),
+        "hosts": sum(&["hosts"]),
     })
 }
 
@@ -185,31 +217,32 @@ fn hosts_rules(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Raw inputs of a rule list (`None` = list has no sources, i.e. disabled).
-fn inputs(id: &str) -> Option<Vec<(String, FilterFormat)>> {
-    let read = |hosts: bool| -> Vec<String> {
-        SOURCES
-            .iter()
-            .filter(|s| s.hosts == hosts)
-            .filter_map(|s| fs::read_to_string(path(s.file)).ok())
-            .collect()
-    };
-    if id == HOSTS {
-        let lists = read(true);
-        return (!lists.is_empty()).then(|| lists.iter().map(|t| (hosts_rules(t).join("\n"), FilterFormat::Standard)).collect());
+/// Raw inputs of a group (`None` = no sources, i.e. disabled or not downloaded).
+fn inputs(g: &Group) -> Option<Vec<(String, FilterFormat)>> {
+    if g.key == "custom" {
+        let builtin: Vec<String> = DOMAINS.iter().map(|d| format!("||{d}^")).chain([format!("##{HIDE}")]).collect();
+        return Some(vec![(builtin.join("\n"), FilterFormat::Standard), (custom_rules().join("\n"), FilterFormat::Standard)]);
     }
-    let builtin: Vec<String> = DOMAINS.iter().map(|d| format!("||{d}^")).chain([format!("##{HIDE}")]).collect();
-    let mut out = vec![(builtin.join("\n"), FilterFormat::Standard), (custom_rules().join("\n"), FilterFormat::Standard)];
-    out.extend(read(false).into_iter().map(|t| (t, FilterFormat::Standard)));
-    Some(out)
+    let lists: Vec<String> =
+        SOURCES.iter().filter(|s| s.group == g.key).filter_map(|s| fs::read_to_string(path(s.file)).ok()).collect();
+    if lists.is_empty() {
+        return None;
+    }
+    let hosts = g.key == "hosts";
+    Some(lists.into_iter().map(|t| (if hosts { hosts_rules(&t).join("\n") } else { t }, FilterFormat::Standard)).collect())
 }
 
-/// Hash of the list's inputs; `None` = list disabled.
-pub fn input_hash(id: &str) -> Option<String> {
-    let inputs = inputs(id)?;
+/// Group and part index of a WebKit rule-list id.
+pub fn group_of(id: &str) -> Option<(&'static Group, usize)> {
+    GROUPS.iter().find_map(|g| g.parts.iter().position(|p| *p == id).map(|i| (g, i)))
+}
+
+/// Hash of the group's inputs; `None` = group disabled.
+pub fn input_hash(g: &Group) -> Option<String> {
+    let inputs = inputs(g)?;
     let mut h = Sha256::new();
     h.update(FORMAT);
-    h.update(id);
+    h.update(g.key);
     for (text, _) in &inputs {
         h.update((text.len() as u64).to_le_bytes());
         h.update(text);
@@ -217,46 +250,84 @@ pub fn input_hash(id: &str) -> Option<String> {
     Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// WebKit already compiled this exact input; restores its stats for the panel.
-pub fn is_compiled(id: &str, hash: &str) -> bool {
-    let Ok(text) = fs::read_to_string(marker_path(id)) else { return false };
-    let Ok(m) = serde_json::from_str::<Marker>(&text) else { return false };
-    let ok = m.hash == hash;
-    if ok {
-        set_stats(id, Some(m.stats));
-    }
-    ok
+fn marker(id: &str) -> Option<Marker> {
+    serde_json::from_str(&fs::read_to_string(marker_path(id)).ok()?).ok()
 }
 
-pub fn mark_compiled(id: &str, hash: &str) {
-    let m = Marker { hash: hash.to_string(), stats: stats_of(id).unwrap_or_default() };
+/// WebKit already compiled every part of this exact input: number of parts (restores stats).
+pub fn compiled_parts(g: &Group, hash: &str) -> Option<usize> {
+    let first = marker(g.parts[0]).filter(|m| m.hash == hash)?;
+    let n = first.parts;
+    let all = n >= 1 && n <= g.parts.len() && g.parts[1..n].iter().all(|p| marker(p).is_some_and(|m| m.hash == hash));
+    all.then(|| {
+        set_stats(g.key, Some(first.stats));
+        n
+    })
+}
+
+pub fn mark_compiled(id: &str, hash: &str, parts: usize) {
+    let Some((g, _)) = group_of(id) else { return };
+    let m = Marker { hash: hash.to_string(), parts, stats: stats_of(g.key).unwrap_or_default() };
     let _ = fs::create_dir_all(data_dir());
     let _ = fs::write(marker_path(id), serde_json::to_string(&m).unwrap_or_default());
 }
 
 pub fn forget(id: &str) {
-    set_stats(id, None);
+    if let Some((g, 0)) = group_of(id) {
+        set_stats(g.key, None);
+    }
     let _ = fs::remove_file(marker_path(id));
 }
 
-/// Parses the list's filters and converts them to content-blocker JSON (off the main thread;
-/// large transient allocation, freed when done).
-pub fn build(id: &str) -> Option<String> {
+/// Splits converted rules into WebKit lists of at most `MAX_RULES` without losing integrity:
+/// every part ends with all exceptions (they only cancel rules of their own list); network
+/// rules are placed before cosmetic ones, so only cosmetic rules are dropped if even
+/// `max_parts` lists are not enough.
+fn pack(rules: Vec<CbRule>, max_parts: usize) -> (Vec<Vec<CbRule>>, usize) {
+    if rules.len() <= MAX_RULES {
+        return (vec![rules], 0);
+    }
+    let (mut ignore, mut cosmetic, mut network) = (Vec::new(), Vec::new(), Vec::new());
+    for r in rules {
+        match r.action.typ {
+            CbType::IgnorePreviousRules => ignore.push(r),
+            CbType::CssDisplayNone => cosmetic.push(r),
+            _ => network.push(r),
+        }
+    }
+    let room = MAX_RULES.saturating_sub(ignore.len()).max(1);
+    let total = network.len() + cosmetic.len();
+    let mut parts: Vec<Vec<CbRule>> = Vec::new();
+    for r in network.into_iter().chain(cosmetic) {
+        if parts.last().is_none_or(|p| p.len() == room) {
+            if parts.len() == max_parts {
+                break;
+            }
+            parts.push(Vec::with_capacity(room));
+        }
+        if let Some(p) = parts.last_mut() {
+            p.push(r);
+        }
+    }
+    let kept: usize = parts.iter().map(Vec::len).sum();
+    for p in &mut parts {
+        p.extend(ignore.iter().cloned());
+    }
+    (parts, total - kept)
+}
+
+/// Parses the group's filters and converts them to content-blocker JSON, one string per WebKit
+/// list (off the main thread; large transient allocation, freed when done).
+pub fn build(g: &Group) -> Option<Vec<String>> {
     let mut set = FilterSet::new(true); // debug = keep raw lines, required by the conversion
-    for (text, format) in inputs(id)? {
+    for (text, format) in inputs(g)? {
         set.add_filter_list(text, ParseOptions { format, ..Default::default() });
     }
-    let (mut rules, used) = set.into_content_blocking().ok()?;
-    let truncated = rules.len() > MAX_RULES;
-    if truncated {
-        // Exceptions (ignore-previous-rules) are last and must stay; drop generic cosmetic
-        // rules first, then the oldest block rules.
-        rules.retain(|r| !(r.action.selector.is_some() && r.trigger.url_filter == ".*" && r.trigger.if_domain.is_none()));
-        let over = rules.len().saturating_sub(MAX_RULES);
-        rules.drain(..over);
-    }
-    set_stats(id, Some(ListStats { filters: used.len(), rules: rules.len(), truncated }));
-    serde_json::to_string(&rules).ok()
+    let (rules, used) = set.into_content_blocking().ok()?;
+    let (parts, dropped) = pack(rules, g.parts.len());
+    let rules = parts.iter().map(Vec::len).sum();
+    set_stats(g.key, Some(ListStats { filters: used.len(), rules, parts: parts.len(), dropped }));
+    parts.iter().map(|p| serde_json::to_string(p).ok()).collect()
 }
 
 /// Downloadable lists for the enabled options that are missing or older than a week.
@@ -270,7 +341,7 @@ pub fn stale(easylist: bool, hosts: bool) -> Vec<&'static Source> {
 }
 
 pub fn remove(hosts: bool) {
-    for s in SOURCES.iter().filter(|s| s.hosts == hosts) {
+    for s in SOURCES.iter().filter(|s| (s.group == "hosts") == hosts) {
         let _ = fs::remove_file(path(s.file));
     }
 }
@@ -279,6 +350,9 @@ pub fn remove(hosts: bool) {
 pub fn fetch(s: &Source) -> Result<(), String> {
     let _ = fs::create_dir_all(data_dir());
     let part = path(&format!("{}.part", s.file));
+    if update::private_file(&part).is_err() {
+        return Err(format!("{} sa nepodarilo uložiť", s.name));
+    }
     let ok = update::curl()
         .args(["--max-time", "120", "--max-filesize"])
         .arg(MAX_LIST_BYTES.to_string())

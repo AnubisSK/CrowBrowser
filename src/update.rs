@@ -81,9 +81,12 @@ struct CommitBody {
     message: String,
 }
 
+/// curl that ignores `~/.curlrc` (`-q` must be first), refuses anything but HTTPS (also on
+/// redirects) and bypasses proxy settings from the environment.
 pub fn curl() -> Command {
     let mut c = Command::new("curl");
-    c.args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "10"]);
+    c.arg("-q");
+    c.args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "--noproxy", "*", "--connect-timeout", "10"]);
     c.arg("-A").arg(format!("Crow/{CURRENT}"));
     c
 }
@@ -209,14 +212,14 @@ fn download_dir() -> PathBuf {
     crate::wk::download_dir()
 }
 
-fn free_path(dir: &Path, name: &str) -> PathBuf {
-    let mut p = dir.join(name);
-    let mut n = 1;
-    while p.exists() {
-        p = dir.join(format!("{n}-{name}"));
-        n += 1;
-    }
-    p
+/// Creates (or truncates) `path` readable only by the user; curl then writes into it and keeps
+/// the mode.
+pub fn private_file(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    // An existing file keeps its old mode: enforce it.
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
 fn sha256_of(path: &Path) -> Option<String> {
@@ -239,14 +242,24 @@ pub fn download(proxy: EventLoopProxy<UserEvent>, asset: Asset) {
     std::thread::spawn(move || {
         let dir = download_dir();
         let _ = fs::create_dir_all(&dir);
-        let path = free_path(&dir, &asset.name);
-        let part = path.with_file_name(format!("{}.part", asset.name));
+        let path = crate::download::unique_path(&dir, &asset.name);
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else { return };
+        let part = path.with_file_name(format!("{name}.part"));
         let send = |e| {
             let _ = proxy.send_event(e);
         };
         send(UserEvent::DownloadStarted { url: asset.url.clone(), path: path.clone() });
-        let fetched = curl().args(["--max-time", "1800", "-o"]).arg(&part).arg(&asset.url).status();
-        let ok = fetched.is_ok_and(|s| s.success())
+        let fetched = private_file(&part).ok().and_then(|_| {
+            curl()
+                .args(["--max-time", "1800", "--max-filesize"])
+                .arg((asset.size.max(1) + 1024 * 1024).to_string())
+                .arg("-o")
+                .arg(&part)
+                .arg(&asset.url)
+                .status()
+                .ok()
+        });
+        let ok = fetched.is_some_and(|s| s.success())
             && asset.sha256.as_deref().is_some_and(|want| sha256_of(&part).as_deref() == Some(want))
             && fs::rename(&part, &path).is_ok();
         if !ok {

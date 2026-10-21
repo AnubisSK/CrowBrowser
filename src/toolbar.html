@@ -32,6 +32,8 @@
   #ask { height: 36px; padding: 0 8px 0 12px; gap: 8px; background: var(--nav); border-bottom: 1px solid var(--line); display: none; }
   body.asking #ask { display: flex; }
   #ask > svg { color: var(--accent); flex: none; }
+  #askrisk { flex: none; display: none; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; color: #fff; background: #e5534b; }
+  #askrisk.show { display: inline-block; }
   #asktext { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #ask .txt { width: auto; padding: 0 12px; font: inherit; border: 1px solid var(--line); }
   #ask .txt.primary, #upd .txt.primary { background: var(--accent); color: #fff; border-color: transparent; }
@@ -176,6 +178,7 @@
   </div>
   <div id="ask" class="row">
     <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
+    <span id="askrisk"></span>
     <span id="asktext"></span>
     <div class="spacer"></div>
     <button id="askno" class="txt">Zrušiť</button>
@@ -303,6 +306,9 @@
     if (a) {
       let from = a.url; try { from = new URL(a.url).host || a.url.split(':')[0] + ':'; } catch {}
       $('asktext').textContent = 'Stiahnuť „' + a.name + '“ z ' + from + '?' + (a.more ? ' (+' + a.more + ' ďalšie)' : '');
+      // Executable/script types: explicit warning badge next to the question.
+      $('askrisk').textContent = a.risk ? '⚠ ' + a.risk : '';
+      $('askrisk').classList.toggle('show', !!a.risk);
     }
     const u = st.update;
     document.body.classList.toggle('updating', !!u);
