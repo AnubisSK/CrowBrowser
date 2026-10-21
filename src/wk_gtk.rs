@@ -131,10 +131,17 @@ pub fn popup_config(features: NewWindowFeatures) -> Config {
     Config(features.opener.webview)
 }
 
+/// WebKitGTK's default UA (no Safari version) makes Google/Gmail show "unsupported browser".
+/// Set in each view's WebKitSettings: request header and `navigator.userAgent` both follow it.
+#[cfg(target_os = "linux")]
+const USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
+
+/// Tab views (including adopted popups); the browser UI uses `ui_builder`.
 /// `incognito` only stops wry from creating a throwaway *persistent* context (which would write
 /// HSTS/storage files to disk); the related view decides the context actually used.
 pub fn builder<'a>(config: Config) -> WebViewBuilder<'a> {
-    WebViewBuilder::new().with_incognito(true).with_related_view(config.0)
+    WebViewBuilder::new().with_incognito(true).with_related_view(config.0).with_user_agent(USER_AGENT)
 }
 
 pub fn ui_builder<'a>() -> WebViewBuilder<'a> {
