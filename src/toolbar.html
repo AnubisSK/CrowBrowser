@@ -241,8 +241,8 @@
     const ref = at < 0 ? null : others[at];
     if (el.nextSibling !== ref || (ref === null && el !== $('tabs').lastChild)) $('tabs').insertBefore(el, ref);
   });
+  // No blur handler: selecting the tab focuses its webview and would cancel the drag.
   document.addEventListener('mouseup', dragEnd);
-  window.addEventListener('blur', dragEnd);
 
   function render(st) {
     if (drag && drag.on) { pendingState = st; S = st; return; }
