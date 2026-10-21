@@ -196,8 +196,6 @@
             select('unload', [[1, '1 minúte'], [5, '5 minútach'], [15, '15 minútach'], [30, '30 minútach'], [60, '1 hodine'], [0, 'Nikdy']]))),
         h('h2', {}, 'Ochrana súkromia'),
         h('section', {},
-          row('Identifikácia prehliadača', 'Ako sa Crow predstaví webom. Chrome odstráni hlášku Google „nepodporovaný prehliadač“, Safari je záloha, ak sa niektorý web s Chrome identitou správa zle. Platí pre nové a znova načítané karty',
-            seg('ua', [['chrome', 'Chrome'], ['safari', 'Safari']])),
           row('Blokovanie reklám a sledovačov', 'Blokuje sa priamo v sieťovej vrstve WebKitu. Vlastný zoznam: ~/Library/Application Support/Crow/blocklist.txt',
             seg('adblock', [['on', 'Zapnuté'], ['off', 'Vypnuté']])),
           row('Vymazať históriu', null, confirmBtn('Vymazať', () => { send('clear:history'); toast('História vymazaná'); })),

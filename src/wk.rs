@@ -64,24 +64,16 @@ pub fn popup_config(features: NewWindowFeatures) -> Config {
     Config(features.opener.target_configuration)
 }
 
-/// Monterey's WebKit reports an old Safari version, so Google/Gmail serve legacy layouts or
-/// "unsupported browser". Chrome identity is the default; Safari 18 is the fallback setting.
+/// Monterey's WebKit reports an old Safari version, so sites (e.g. Google) serve legacy layouts.
+/// Native Safari identity only: a Chrome UA makes Google serve Blink-only layouts that break in WebKit.
+/// `customUserAgent` covers the request header and `navigator.userAgent` alike.
 #[cfg(target_os = "macos")]
-const UA_CHROME: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-#[cfg(target_os = "macos")]
-const UA_SAFARI: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+const USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
 
 /// Tab views (including adopted popups); the browser UI uses `ui_builder`.
-/// `customUserAgent` sets the request header; the init script aligns `navigator` in all frames.
-pub fn builder<'a>(config: Config, chrome: bool) -> WebViewBuilder<'a> {
-    let b = WebViewBuilder::new().with_webview_configuration(config.0);
-    if chrome {
-        b.with_user_agent(UA_CHROME).with_initialization_script_for_main_only(crate::app::navigator_js(UA_CHROME), false)
-    } else {
-        b.with_user_agent(UA_SAFARI)
-    }
+pub fn builder<'a>(config: Config) -> WebViewBuilder<'a> {
+    WebViewBuilder::new().with_webview_configuration(config.0).with_user_agent(USER_AGENT)
 }
 
 pub fn ui_builder<'a>() -> WebViewBuilder<'a> {

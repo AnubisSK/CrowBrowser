@@ -74,17 +74,6 @@ const FAV_JS: &str = r#"(function () {
   next();
 })()"#;
 
-/// Chrome identity in page JS: same values as the request header, defined on the prototype so
-/// `navigator` has no own (detectable) properties.
-pub fn navigator_js(ua: &str) -> String {
-    let app = ua.strip_prefix("Mozilla/").unwrap_or(ua);
-    format!(
-        "(function () {{ const p = Navigator.prototype, d = (k, v) => {{ try {{ Object.defineProperty(p, k, {{ get: () => v, configurable: true }}); }} catch (e) {{}} }};\n  d('userAgent', {}); d('appVersion', {}); d('vendor', 'Google Inc.'); }})();",
-        js(ua),
-        js(app)
-    )
-}
-
 pub enum UserEvent {
     Menu(String),
     Ipc(String),
@@ -127,8 +116,6 @@ struct TabCtx {
     window: Rc<Window>,
     proxy: EventLoopProxy<UserEvent>,
     next_id: Rc<Cell<u32>>,
-    /// `Settings::ua == "chrome"`; read when a tab view is created.
-    chrome_ua: Rc<Cell<bool>>,
 }
 
 impl TabCtx {
@@ -151,7 +138,7 @@ impl TabCtx {
     ) -> wry::Result<WebView> {
         let (p1, p2) = (self.proxy.clone(), self.proxy.clone());
         let ctx = self.clone();
-        let mut b = wk::builder(config, self.chrome_ua.get())
+        let mut b = wk::builder(config)
             .with_background_color(bg_of(&self.window))
             .with_on_page_load_handler(move |ev, url| {
                 let started = matches!(ev, PageLoadEvent::Started);
@@ -453,7 +440,7 @@ impl App {
                 },
             );
         }
-        let ctx = TabCtx { window: Rc::new(window), proxy, next_id: Rc::new(Cell::new(1)), chrome_ua: Rc::new(Cell::new(true)) };
+        let ctx = TabCtx { window: Rc::new(window), proxy, next_id: Rc::new(Cell::new(1)) };
         let mut app = Self {
             ctx,
             cfg: Settings::default(), // real settings live in the vault
@@ -666,7 +653,6 @@ impl App {
         self.cfg = data.settings.take().or_else(Settings::take_legacy).unwrap_or_default();
         let w = &self.ctx.window;
         wk::set_theme(w, theme_of(&self.cfg.theme));
-        self.ctx.chrome_ua.set(self.cfg.ua == "chrome");
         let html = include_str!("toolbar.html").to_string();
         let Some(toolbar) = self.ctx.ui_view(html, toolbar_rect(w, TABS_H + NAV_H)) else {
             return self.lock_fail("Nepodarilo sa vytvoriť okno");
@@ -1297,8 +1283,6 @@ impl App {
                             wk::set_rules(v, self.cfg.adblock);
                         }
                     }
-                    // Applies to tab views created from now on (new, woken or reopened tabs).
-                    "ua" => self.ctx.chrome_ua.set(self.cfg.ua == "chrome"),
                     _ => {}
                 }
                 s.sync(&self.cfg);

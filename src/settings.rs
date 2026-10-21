@@ -22,7 +22,6 @@ pub struct Settings {
     pub adblock: bool,
     pub unload: u32, // minutes before hidden tabs are unloaded, 0 = never
     pub updates: bool, // check GitHub Releases after unlocking
-    pub ua: String,    // "chrome" | "safari": identity sent to websites
 }
 
 impl Default for Settings {
@@ -36,7 +35,6 @@ impl Default for Settings {
             adblock: true,
             unload: 5,
             updates: true,
-            ua: "chrome".into(),
         }
     }
 }
@@ -85,7 +83,6 @@ impl Settings {
             "theme" if matches!(v, "dark" | "light" | "system") => self.theme = v.into(),
             "adblock" if matches!(v, "on" | "off") => self.adblock = v == "on",
             "updates" if matches!(v, "on" | "off") => self.updates = v == "on",
-            "ua" if matches!(v, "chrome" | "safari") => self.ua = v.into(),
             "zoom" => match v.parse::<f64>() {
                 Ok(z) if (0.25..=3.0).contains(&z) => self.zoom = z,
                 _ => return false,

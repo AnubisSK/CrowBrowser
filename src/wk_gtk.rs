@@ -131,26 +131,18 @@ pub fn popup_config(features: NewWindowFeatures) -> Config {
     Config(features.opener.webview)
 }
 
-/// WebKitGTK's default UA makes Google/Gmail show "unsupported browser". Chrome identity is the
-/// default (Linux platform token, matching `navigator.platform`); Safari 18 is the fallback setting.
+/// WebKitGTK's default UA makes Google/Gmail show "unsupported browser". Native Safari identity
+/// only: a Chrome UA makes Google serve Blink-only layouts that break in WebKit.
+/// WebKitSettings UA covers the request header and `navigator.userAgent` alike.
 #[cfg(target_os = "linux")]
-const UA_CHROME: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-#[cfg(target_os = "linux")]
-const UA_SAFARI: &str =
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+const USER_AGENT: &str =
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
 
 /// Tab views (including adopted popups); the browser UI uses `ui_builder`.
 /// `incognito` only stops wry from creating a throwaway *persistent* context (which would write
 /// HSTS/storage files to disk); the related view decides the context actually used.
-/// WebKitSettings UA sets the request header; the init script aligns `navigator` in all frames.
-pub fn builder<'a>(config: Config, chrome: bool) -> WebViewBuilder<'a> {
-    let b = WebViewBuilder::new().with_incognito(true).with_related_view(config.0);
-    if chrome {
-        b.with_user_agent(UA_CHROME).with_initialization_script_for_main_only(crate::app::navigator_js(UA_CHROME), false)
-    } else {
-        b.with_user_agent(UA_SAFARI)
-    }
+pub fn builder<'a>(config: Config) -> WebViewBuilder<'a> {
+    WebViewBuilder::new().with_incognito(true).with_related_view(config.0).with_user_agent(USER_AGENT)
 }
 
 pub fn ui_builder<'a>() -> WebViewBuilder<'a> {
