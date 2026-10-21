@@ -67,6 +67,11 @@
   .item .del:hover { background: var(--input); color: var(--fg); }
   .state { font-size: 12px; flex: none; }
   .state.active { color: var(--accent); } .state.failed { color: var(--danger); } .state.done { color: var(--ok); }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; flex: none; background: var(--input); color: var(--mute); }
+  .badge.on { background: rgba(91, 141, 239, .18); color: var(--accent); }
+  .item .fdot { width: 8px; height: 8px; border-radius: 50%; background: var(--mute); opacity: .5; flex: none; }
+  .item .fdot.on { background: var(--accent); opacity: 1; }
+  .item .user { color: var(--mute); width: 110px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { padding: 32px; text-align: center; color: var(--mute); }
 
   #toast {
@@ -84,6 +89,7 @@
   <button data-s="history"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>História</button>
   <button data-s="bookmarks"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>Obľúbené</button>
   <button data-s="downloads"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Stiahnuté</button>
+  <button data-s="logins"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg>Prihlásenia</button>
   <button data-s="about"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg>O aplikácii</button>
 </nav>
 <main><div class="wrap" id="root"></div></main>
@@ -326,6 +332,33 @@
           h('div', { class: 'title' }, b.title || host(b.url)), h('div', { class: 'sub' }, b.url)),
         h('button', { class: 'del', title: 'Odstrániť', onclick: () => send('bm-del:' + b.url) }, '×')));
       return [header('Obľúbené'), list];
+    },
+
+    // Sites with cookies in the vault. Data is sanitized in Rust: no cookie values, no passwords.
+    logins() {
+      const list = h('div', { class: 'list' }, h('div', { class: 'empty' }, 'Načítava sa…'));
+      window.setSessions = (rows) => {
+        if (section !== 'logins') return;
+        if (!rows.length) return list.replaceChildren(h('div', { class: 'empty' }, 'Žiadne uložené prihlásenia ani cookies'));
+        list.replaceChildren(...rows.map(r => {
+          const row = h('div', { class: 'item' },
+            h('span', { class: 'fdot' + (r.has_session ? ' on' : '') }),
+            h('div', { class: 'main', onclick: (ev) => openUrl('https://' + r.domain, ev), title: r.domain },
+              h('div', { class: 'title' }, r.domain),
+              h('div', { class: 'sub' }, (r.last_used ? 'Naposledy ' + fmtDay(r.last_used) + ' ' + fmtTime(r.last_used) : 'Bez histórie') + ' · cookies: ' + r.cookies)),
+            h('span', { class: 'user', title: 'Crow neukladá mená ani heslá' }, r.username || '—'),
+            h('span', { class: 'badge' + (r.has_session ? ' on' : '') }, r.has_session ? 'Aktívna relácia' : 'Len cookies'),
+            confirmBtn('Odhlásiť a vymazať', () => { send('delete-vault-session:' + r.domain); row.remove(); }));
+          return row;
+        }));
+      };
+      send('get-vault-sessions');
+      return [
+        header('Prihlásenia a relácie'),
+        h('p', { class: 'note', style: 'color:var(--mute);margin:-8px 4px 14px;font-size:12px' },
+          'Weby, na ktorých máš uložené cookies (šifrovane v trezore). „Aktívna relácia“ = web má prihlasovacie cookie. Odhlásenie vymaže cookies webu z trezora aj z prehliadača. Crow neukladá heslá ani mená.'),
+        list,
+      ];
     },
 
     downloads() {

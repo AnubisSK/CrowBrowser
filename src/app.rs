@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     path::PathBuf,
     rc::Rc,
     time::{Duration, Instant},
@@ -104,6 +105,8 @@ pub enum UserEvent {
     RulesReady,
     /// Content blocker blocked loads (collected via `wk::take_blocked`).
     Blocked,
+    /// Live cookies for the logins panel; `revoke` = delete this site's cookies first.
+    VaultSessions { cookies: Vec<CookieRec>, revoke: Option<String> },
     /// Navigation refused by WebKit because of the server certificate.
     TlsError { tab: u32, url: String, reasons: Vec<&'static str> },
     /// Result of a filter-list download the user asked for.
@@ -418,6 +421,7 @@ impl Session {
             "url": url,
             "loading": cur.is_some_and(|t| t.loading),
             "tls": cur.map_or("", |t| t.tls),
+            "login": logged_in(&self.data.cookies, &host_of(url)),
             "blocked": cur.map_or(0, |t| t.blocked),
             "bookmarked": self.data.bookmarks.iter().any(|b| b.url == url),
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
@@ -609,6 +613,7 @@ impl App {
             UserEvent::Cookies(c, after) => self.saved(c, after),
             UserEvent::CookiesRestored => self.restored(true),
             UserEvent::SiteCookies { cookies, clear } => self.site_cookies(cookies, clear),
+            UserEvent::VaultSessions { cookies, revoke } => self.vault_sessions(cookies, revoke),
             UserEvent::RulesCached { id, hash } => {
                 let (p, p2) = (self.ctx.proxy.clone(), self.ctx.proxy.clone());
                 let ok = move || {
@@ -1108,6 +1113,71 @@ impl App {
             self.request_site_cookies(false);
         }
         self.persist(After::Nothing);
+    }
+
+    /// Exports live cookies for the logins panel (`revoke`: delete that site's first).
+    fn request_sessions(&self, revoke: Option<String>) {
+        let Some(s) = self.s.as_ref() else { return };
+        let p = self.ctx.proxy.clone();
+        let revoke = RefCell::new(revoke);
+        wk::export_cookies(&s.store, move |cookies| {
+            let _ = p.send_event(UserEvent::VaultSessions { cookies, revoke: revoke.borrow_mut().take() });
+        });
+    }
+
+    /// Logins panel data: one entry per site with cookies. Sanitized: no cookie names or values
+    /// leave Rust. Crow stores no passwords, so there is no username to show.
+    fn vault_sessions(&mut self, cookies: Vec<CookieRec>, revoke: Option<String>) {
+        let Some(s) = self.s.as_mut() else { return };
+        if let Some(site) = revoke {
+            let (gone, keep): (Vec<_>, Vec<_>) = cookies.into_iter().partition(|c| site_of(&c.domain) == site);
+            // Vault first (atomic .vault.tmp -> rename in `save_now`), then WebKit's live store.
+            if s.cookies_ok {
+                s.data.cookies = keep;
+            } else {
+                s.data.cookies.retain(|c| site_of(&c.domain) != site);
+            }
+            s.save_now(&self.cfg);
+            s.toast(&format!("Odhlásené: {site}"));
+            s.sync(&self.cfg);
+            // Once WebKit has deleted them, send the panel the fresh list.
+            let p = self.ctx.proxy.clone();
+            let store = s.store.clone();
+            return wk::delete_cookies(&s.store, &gone, move || {
+                let p = p.clone();
+                wk::export_cookies(&store, move |cookies| {
+                    let _ = p.send_event(UserEvent::VaultSessions { cookies, revoke: None });
+                });
+            });
+        }
+        let mut last: HashMap<String, u64> = HashMap::new();
+        for e in &s.data.history {
+            let t = last.entry(site_of(&host_of(&e.url))).or_default();
+            *t = (*t).max(e.time);
+        }
+        let mut sites: Vec<(String, bool, usize)> = Vec::new();
+        for c in &cookies {
+            let site = site_of(&c.domain);
+            match sites.iter_mut().find(|(d, ..)| *d == site) {
+                Some(e) => {
+                    e.1 |= is_login_cookie(c);
+                    e.2 += 1;
+                }
+                None => sites.push((site, is_login_cookie(c), 1)),
+            }
+        }
+        let mut list: Vec<_> = sites
+            .into_iter()
+            .filter(|(d, ..)| !d.is_empty())
+            .map(|(domain, has_session, count)| {
+                let used = last.get(&domain).copied();
+                json!({ "domain": domain, "username": null, "has_session": has_session, "cookies": count, "last_used": used })
+            })
+            .collect();
+        list.sort_by_key(|e| (!e["has_session"].as_bool().unwrap_or(false), std::cmp::Reverse(e["last_used"].as_u64().unwrap_or(0))));
+        if let Some(p) = &s.panel {
+            let _ = p.evaluate_script(&format!("setSessions({})", serde_json::Value::Array(list)));
+        }
     }
 
     fn request_site_cookies(&mut self, clear: bool) {
@@ -1650,6 +1720,13 @@ impl App {
             }
             "get-adblock-stats" => s.push_shield(&self.cfg),
             "site-clear" => self.request_site_cookies(true),
+            "get-vault-sessions" => self.request_sessions(None),
+            "delete-vault-session" => {
+                let site = arg.trim().to_ascii_lowercase();
+                if !site.is_empty() && site.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')) {
+                    self.request_sessions(Some(site));
+                }
+            }
             "site-close" => {
                 if s.site.take().is_some() {
                     s.site_closed = Instant::now();
@@ -1793,6 +1870,36 @@ fn host_of(url: &str) -> String {
         auth.split(':').next().unwrap_or(auth)
     };
     host.to_ascii_lowercase()
+}
+
+/// Registrable site of a host or cookie domain ("mail.google.com" -> "google.com",
+/// "www.bbc.co.uk" -> "bbc.co.uk"); heuristic, no public-suffix list.
+fn site_of(domain: &str) -> String {
+    let d = domain.trim_start_matches('.').to_ascii_lowercase();
+    let parts: Vec<&str> = d.split('.').collect();
+    if parts.len() <= 2 || d.bytes().all(|b| b.is_ascii_digit() || b == b'.') {
+        return d;
+    }
+    let n = parts.len();
+    let second_level = ["co", "com", "org", "net", "ac", "gov", "edu", "or", "ne", "go"].contains(&parts[n - 2]);
+    let take = if second_level && parts[n - 1].len() == 2 { 3 } else { 2 };
+    parts[n - take..].join(".")
+}
+
+/// Cookie name typical for a login session (heuristic; analytics/consent cookies don't match).
+fn is_login_cookie(c: &CookieRec) -> bool {
+    const KEYS: &[&str] = &["sess", "sid", "auth", "token", "login", "logged", "user", "account", "jwt", "remember", "li_at"];
+    let n = c.name.to_ascii_lowercase();
+    KEYS.iter().any(|k| n.contains(k)) || n.starts_with("__host-") || n.starts_with("__secure-")
+}
+
+/// The site of `host` holds a login-like cookie (vault snapshot; refreshed on every save).
+fn logged_in(cookies: &[CookieRec], host: &str) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+    let site = site_of(host);
+    cookies.iter().any(|c| is_login_cookie(c) && site_of(&c.domain) == site)
 }
 
 /// Cookie `domain` applies to `host` (exact or parent domain).

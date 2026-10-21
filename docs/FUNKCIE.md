@@ -158,6 +158,13 @@ Podporované vyhľadávače: **DuckDuckGo** (predvolený), **Google**, **Bing**,
 - Prepínač pre web je aj v informáciách o stránke (zámok).
 - Výnimky sú uložené v šifrovanom trezore a dajú sa odstrániť v Nastaveniach.
 
+## Prihlásenia a relácie
+
+- Panel **Prihlásenia** (⚙ → bočné menu) ukazuje weby, ktoré majú v trezore cookies: doménu, poslednú návštevu (z histórie), počet cookies a značku **Aktívna relácia**, ak má web prihlasovaciu cookie (podľa názvu, napr. `session`, `sid`, `auth`, `token`).
+- **Odhlásiť a vymazať** (dvojklik na potvrdenie) vymaže všetky cookies webu vrátane subdomén: najprv z trezora (bezpečný zápis cez `.vault.tmp`), potom z bežiaceho prehliadača. Web ťa po ďalšom načítaní odhlási.
+- Do panela sa neposielajú hodnoty ani názvy cookies. Crow neukladá heslá ani mená, preto je stĺpec používateľa prázdny.
+- Ak si na aktuálnom webe prihlásený, v adresnom riadku je ikona kľúča. Klik na ňu otvorí tento panel.
+
 ## Priblíženie
 
 - **⌘+** priblížiť, **⌘−** oddialiť, **⌘0** vrátiť na predvolené.

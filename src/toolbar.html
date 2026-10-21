@@ -95,6 +95,10 @@
   .urlwrap:focus-within #sec { display: none; }
   .urlwrap:focus-within #url { padding-left: 12px; }
   #star { position: absolute; right: 2px; top: 0; width: 28px; }
+  /* Logged-in indicator (login cookie for this site in the vault) */
+  #login { position: absolute; right: 30px; top: 0; width: 28px; color: var(--accent); display: none; }
+  .urlwrap.login #login { display: grid; }
+  .urlwrap.login #url { padding-right: 60px; }
   #star.on { background: transparent; color: #f5c518; }
   #star.on svg { fill: #f5c518; }
   #shield.blocking { color: var(--accent); }
@@ -153,6 +157,7 @@
     <div class="urlwrap">
       <span id="sec"><svg class="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><svg class="warn" viewBox="0 0 24 24"><path d="M12 3l10 18H2z"/><path d="M12 10v4M12 17.5v.01"/></svg><span class="txt">Nezabezpečené</span></span>
       <input id="url" spellcheck="false" autocomplete="off" placeholder="Hľadať alebo zadať adresu">
+      <button id="login" title="Prihlásený na tomto webe (správa prihlásení)"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg></button>
       <button id="star" title="Obľúbené (⌘D)"><svg viewBox="0 0 24 24"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg></button>
     </div>
     <button id="shield" title="Blokovanie reklám"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span id="shieldn"></span></button>
@@ -192,7 +197,7 @@
   const url = $('url'), fq = $('fq');
   let S = { tabs: [], active: 0 };
 
-  const click = { newtab: 'new-tab', back: 'back', forward: 'forward', home: 'home', star: 'bookmark',
+  const click = { login: 'panel:logins', newtab: 'new-tab', back: 'back', forward: 'forward', home: 'home', star: 'bookmark',
                   bms: 'panel:bookmarks', hist: 'panel:history', dl: 'panel:downloads',
                   settings: 'panel:settings', fclose: 'find-close' };
   for (const [id, cmd] of Object.entries(click)) $(id).onclick = () => send(cmd);
@@ -308,6 +313,7 @@
     }
     document.body.classList.toggle('loading', st.loading);
     $('star').classList.toggle('on', st.bookmarked);
+    url.parentElement.classList.toggle('login', !!st.login);
     const blocking = st.adblock && !st.siteAllowed;
     $('shield').classList.toggle('blocking', blocking);
     $('shield').classList.toggle('off', !blocking);
