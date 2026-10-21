@@ -26,7 +26,7 @@
 
 ## Blokovanie reklám
 
-- Vstavaný zoznam má 105 domén, nie desaťtisíce ako EasyList. Väčší zoznam si môžeš pridať do `blocklist.txt` (najviac 50 000 pravidiel).
+- Blokuje sa podľa domén (vstavaný zoznam, StevenBlack hosts, `blocklist.txt`), nie podľa EasyList filtrov. Reklamy podávané z rovnakej domény ako obsah (napr. YouTube) sa tak nezablokujú. Spolu najviac 150 000 pravidiel.
 - Pravidlá v `blocklist.txt` podporujú len celé domény. Filtre na cesty, výnimky (`@@`) ani kozmetické filtre v štýle uBlock nie sú podporované.
 - Nepočíta sa, koľko požiadaviek bolo zablokovaných.
 

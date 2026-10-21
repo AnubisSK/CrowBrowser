@@ -146,7 +146,9 @@ Podporované vyhľadávače: **DuckDuckGo** (predvolený), **Google**, **Bing**,
   0.0.0.0 tracker.example.net
   ||ads.example.org^
   ```
-  Podporuje teda bežné hosts súbory aj zjednodušený AdBlock formát. Zoznam môže mať najviac 50 000 pravidiel a načíta sa pri štarte.
+  Podporuje teda bežné hosts súbory aj zjednodušený AdBlock formát a načíta sa pri štarte.
+- **StevenBlack hosts:** [verejný zoznam](https://github.com/StevenBlack/hosts) reklamných a škodlivých domén (~70 000). Po odomknutí sa stiahne, ak chýba alebo je starší ako týždeň. Dá sa ručne aktualizovať alebo vypnúť v **Nastavenia → Ochrana súkromia → Zoznamy blokovania**, kde je aj počet domén z každého zdroja.
+- Subdomény už blokovaných domén sa vynechajú (pravidlo pokrýva aj ich), spolu najviac 150 000 pravidiel (limit WebKitu). Skompilované pravidlá si WebKit pamätá, takže sa kompilujú (~2–3 s na pozadí) len keď sa zoznam zmení.
 - Blokovanie sa zapína a vypína v **Nastavenia → Ochrana súkromia** a platí okamžite pre všetky karty.
 - **Štít v paneli:** modrý = blokuje sa, sivý = vypnuté. Klik vypne alebo zapne blokovanie pre aktuálny web (výnimka platí aj pre subdomény a karty tohto webu sa znova načítajú), **⌥+klik** (Linux **Alt+klik**) ho prepne všade. To isté je v informáciách o stránke (zámok).
 - Výnimky sú uložené v šifrovanom trezore a dajú sa odstrániť v Nastaveniach.

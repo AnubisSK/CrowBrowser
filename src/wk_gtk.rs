@@ -55,6 +55,18 @@ unsafe extern "C" {
         res: *mut gio::ffi::GAsyncResult,
         err: *mut *mut glib::ffi::GError,
     ) -> *mut c_void;
+    fn webkit_user_content_filter_store_load(
+        store: *mut c_void,
+        id: *const c_char,
+        cancellable: *mut gio::ffi::GCancellable,
+        callback: GAsyncReadyCallback,
+        data: *mut c_void,
+    );
+    fn webkit_user_content_filter_store_load_finish(
+        store: *mut c_void,
+        res: *mut gio::ffi::GAsyncResult,
+        err: *mut *mut glib::ffi::GError,
+    ) -> *mut c_void;
     fn webkit_user_content_filter_unref(filter: *mut c_void);
     fn webkit_user_content_manager_add_filter(manager: *mut c_void, filter: *mut c_void);
     fn webkit_cookie_manager_get_all_cookies(
@@ -237,13 +249,38 @@ fn finish_data(f: impl FnOnce(*mut glib::gobject_ffi::GObject, *mut gio::ffi::GA
     Box::into_raw(Box::new(f)) as *mut c_void
 }
 
-pub fn compile_rules(json: String, done: impl Fn() + 'static) {
+/// `cached`: the store already holds these exact rules (see `adblock::is_compiled`);
+/// load them instead of recompiling ~100k rules, compile only if loading fails.
+pub fn compile_rules(json: String, cached: bool, done: impl Fn() + 'static) {
     let dir = cache_dir().join("filters");
     let _ = std::fs::create_dir_all(&dir);
     let Ok(path) = CString::new(dir.to_string_lossy().as_bytes()) else { return };
-    let bytes = glib::Bytes::from_owned(json.into_bytes());
     unsafe {
         let store = webkit_user_content_filter_store_new(path.as_ptr());
+        if !cached {
+            return save_rules(store, json, done);
+        }
+        let data = finish_data(move |src, res| {
+            let mut err = ptr::null_mut();
+            let f = webkit_user_content_filter_store_load_finish(src as *mut c_void, res, &mut err);
+            if !err.is_null() {
+                glib::ffi::g_error_free(err);
+            }
+            if f.is_null() {
+                return save_rules(src as *mut c_void, json, done); // takes over the store ref
+            }
+            RULES.with(|r| *r.borrow_mut() = Some(Filter(f)));
+            done();
+            glib::gobject_ffi::g_object_unref(src);
+        });
+        webkit_user_content_filter_store_load(store, c"crow-adblock".as_ptr(), ptr::null_mut(), Some(finish_trampoline), data);
+    }
+}
+
+/// Compiles and stores the rules; consumes the `store` reference.
+unsafe fn save_rules(store: *mut c_void, json: String, done: impl Fn() + 'static) {
+    let bytes = glib::Bytes::from_owned(json.into_bytes());
+    unsafe {
         let data = finish_data(move |src, res| {
             let mut err = ptr::null_mut();
             let f = webkit_user_content_filter_store_save_finish(src as *mut c_void, res, &mut err);

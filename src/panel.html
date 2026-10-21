@@ -157,6 +157,25 @@
   }
   const openUrl = (u, e) => send((e && (e.metaKey || e.ctrlKey) ? 'open-new:' : 'open:') + u);
 
+  // Sources of the ad-block rules with counts; the hosts list can be refreshed or turned off.
+  function adblockLists() {
+    const s = D.adblockStats || {};
+    const n = (x) => (x || 0).toLocaleString('sk');
+    const when = s.hosts_time ? ' · stiahnutý ' + fmtDay(s.hosts_time) + ' ' + fmtTime(s.hosts_time) : '';
+    const list = h('div', { class: 'item' }, h('div', { class: 'main' },
+      h('div', { class: 'title' }, 'Vstavaný zoznam: ' + n(s.builtin) + ' domén'),
+      h('div', { class: 'sub' }, 'Vlastný blocklist.txt: ' + n(s.custom) + ' domén')));
+    const hosts = h('div', { class: 'item' },
+      h('div', { class: 'main', onclick: () => send('open-new:https://github.com/StevenBlack/hosts'), title: 'github.com/StevenBlack/hosts' },
+        h('div', { class: 'title' }, 'StevenBlack hosts: ' + (D.settings.adblock_hosts ? n(s.hosts) + ' domén' : 'vypnutý')),
+        h('div', { class: 'sub' }, 'Reklamy a malvér, aktualizuje sa raz týždenne' + when)),
+      D.settings.adblock_hosts ? h('button', { class: 'btn', onclick: () => send('adblock-update') }, 'Aktualizovať') : null,
+      seg('adblock_hosts', [['on', 'Zapnutý'], ['off', 'Vypnutý']]));
+    return h('div', { class: 'row', style: 'display:block' },
+      h('div', {}, 'Zoznamy blokovania', h('small', {}, 'Spolu ' + n(s.rules) + ' pravidiel' + (s.truncated ? ' (dosiahnutý limit WebKitu 150 000)' : ''))),
+      h('div', { class: 'list', style: 'margin-top:10px' }, list, hosts));
+  }
+
   const views = {
     settings() {
       const home = h('input', { type: 'text', spellcheck: 'false' });
@@ -198,6 +217,7 @@
         h('section', {},
           row('Blokovanie reklám a sledovačov', 'Blokuje sa priamo v sieťovej vrstve WebKitu. Vlastný zoznam: ~/Library/Application Support/Crow/blocklist.txt',
             seg('adblock', [['on', 'Zapnuté'], ['off', 'Vypnuté']])),
+          adblockLists(),
           row('Výnimky blokovania', D.allow.length ? null : 'Žiadne. Pre aktuálny web ich pridáš kliknutím na štít v paneli',
             D.allow.length ? h('div', {}, ...D.allow.map(d => {
               const b = h('button', { class: 'btn', title: 'Odstrániť výnimku' }, d + ' ×');
@@ -328,8 +348,9 @@
   function show(s) { if (views[s]) { section = s; render(); } }
   function setData(d) {
     const keep = D.settings;
+    const stats = JSON.stringify(D.adblockStats);
     D = d; D.settings = keep;
-    if (section !== 'settings') render();
+    if (section !== 'settings' || JSON.stringify(D.adblockStats) !== stats) render();
   }
 
   document.querySelectorAll('nav button').forEach(b => b.onclick = () => { show(b.dataset.s); send('panel-section:' + b.dataset.s); });

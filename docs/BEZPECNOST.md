@@ -16,6 +16,7 @@ Všetky osobné dáta prehliadača sú na disku v jednom zašifrovanom súbore, 
 | Nastavenia (vyhľadávač, motív, domovská stránka…) | ✅ | |
 | **Stiahnuté súbory** v ~/Downloads | ❌ | bežné súbory na disku |
 | `blocklist.txt` | ❌ | verejný zoznam domén, nie je citlivý |
+| `hosts-stevenblack.txt`, `adblock.sha256` | ❌ | stiahnutý verejný zoznam a kontrolný súčet skompilovaných pravidiel, nie sú citlivé |
 | Cache WebKitu, localStorage, IndexedDB | (neukladá sa) | existujú len v pamäti počas behu |
 
 ## Trezor

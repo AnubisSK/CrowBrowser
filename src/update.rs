@@ -81,7 +81,7 @@ struct CommitBody {
     message: String,
 }
 
-fn curl() -> Command {
+pub fn curl() -> Command {
     let mut c = Command::new("curl");
     c.args(["-fsSL", "--proto", "=https", "--proto-redir", "=https", "--connect-timeout", "10"]);
     c.arg("-A").arg(format!("Crow/{CURRENT}"));

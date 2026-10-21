@@ -25,6 +25,8 @@ pub struct Settings {
     /// Sites (and their subdomains) where the ad blocker is off. Lives in the encrypted vault;
     /// applied per tab, so it never ends up in WebKit's on-disk rule store.
     pub adblock_allow: Vec<String>,
+    /// Use the downloaded StevenBlack hosts list in addition to the built-in one.
+    pub adblock_hosts: bool,
 }
 
 impl Default for Settings {
@@ -39,6 +41,7 @@ impl Default for Settings {
             unload: 5,
             updates: true,
             adblock_allow: Vec::new(),
+            adblock_hosts: true,
         }
     }
 }
@@ -87,6 +90,7 @@ impl Settings {
             "theme" if matches!(v, "dark" | "light" | "system") => self.theme = v.into(),
             "adblock" if matches!(v, "on" | "off") => self.adblock = v == "on",
             "updates" if matches!(v, "on" | "off") => self.updates = v == "on",
+            "adblock_hosts" if matches!(v, "on" | "off") => self.adblock_hosts = v == "on",
             "zoom" => match v.parse::<f64>() {
                 Ok(z) if (0.25..=3.0).contains(&z) => self.zoom = z,
                 _ => return false,

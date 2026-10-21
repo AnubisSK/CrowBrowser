@@ -109,25 +109,45 @@ fn set_manager_rules(manager: &WKUserContentController, on: bool) {
     }
 }
 
-pub fn compile_rules(json: String, done: impl Fn() + 'static) {
+/// `cached`: WebKit's store already holds these exact rules (see `adblock::is_compiled`);
+/// look them up instead of recompiling ~100k rules, compile only if the lookup fails.
+pub fn compile_rules(json: String, cached: bool, done: impl Fn() + 'static) {
     let Some(store) = (unsafe { WKContentRuleListStore::defaultStore(mtm()) }) else {
         return;
     };
-    let block = RcBlock::new(move |list: *mut WKContentRuleList, err: *mut NSError| {
+    let done = Rc::new(done);
+    let d = done.clone();
+    let compile = move |store: &WKContentRuleListStore, json: &str| {
+        let d = d.clone();
+        let block = RcBlock::new(move |list: *mut WKContentRuleList, err: *mut NSError| {
+            if let Some(list) = unsafe { Retained::retain(list) } {
+                RULES.with(|r| *r.borrow_mut() = Some(list));
+                d();
+            } else if let Some(err) = unsafe { err.as_ref() } {
+                eprintln!("adblock: {}", err.localizedDescription());
+            }
+        });
+        unsafe {
+            store.compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
+                Some(ns_string!("crow-adblock")),
+                Some(&NSString::from_str(json)),
+                Some(&block),
+            );
+        }
+    };
+    if !cached {
+        return compile(&store, &json);
+    }
+    let pending = RefCell::new(Some((store.clone(), json)));
+    let block = RcBlock::new(move |list: *mut WKContentRuleList, _err: *mut NSError| {
         if let Some(list) = unsafe { Retained::retain(list) } {
             RULES.with(|r| *r.borrow_mut() = Some(list));
             done();
-        } else if let Some(err) = unsafe { err.as_ref() } {
-            eprintln!("adblock: {}", err.localizedDescription());
+        } else if let Some((store, json)) = pending.take() {
+            compile(&store, &json);
         }
     });
-    unsafe {
-        store.compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
-            Some(ns_string!("crow-adblock")),
-            Some(&NSString::from_str(&json)),
-            Some(&block),
-        );
-    }
+    unsafe { store.lookUpContentRuleListForIdentifier_completionHandler(Some(ns_string!("crow-adblock")), Some(&block)) };
 }
 
 pub fn export_cookies(store: &Store, done: impl Fn(Vec<CookieRec>) + 'static) {

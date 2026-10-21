@@ -92,7 +92,11 @@ pub enum UserEvent {
     /// Fresh cookie list for the site-info popover; `clear` = delete the site's cookies first.
     SiteCookies { cookies: Vec<CookieRec>, clear: bool },
     CookiesRestored,
+    /// Rule JSON built off-thread; `msg` = toast for the user (hosts list refreshed).
+    RulesBuilt(adblock::Rules, Option<String>),
     RulesReady,
+    /// Hosts list download failed: shown only when the user asked for it.
+    HostsFailed(String),
     /// Result of `FAV_READ` in a tab (JSON string).
     Icon { tab: u32, data: String },
     Update { result: Result<Option<update::Info>, String>, manual: bool },
@@ -407,6 +411,7 @@ impl Session {
             "bookmarks": self.data.bookmarks,
             "downloads": downloads,
             "allow": cfg.adblock_allow,
+            "adblockStats": adblock::stats(),
             "version": update::CURRENT,
             "update": self.update,
             "updateBusy": self.update_busy,
@@ -435,10 +440,7 @@ pub struct App {
 
 impl App {
     pub fn new(window: Window, proxy: EventLoopProxy<UserEvent>) -> Self {
-        let p = proxy.clone();
-        wk::compile_rules(adblock::rules_json(), move || {
-            let _ = p.send_event(UserEvent::RulesReady);
-        });
+        build_rules(proxy.clone(), false, false);
         #[cfg(target_os = "linux")]
         {
             let (p0, p1, p2) = (proxy.clone(), proxy.clone(), proxy.clone());
@@ -537,6 +539,26 @@ impl App {
             UserEvent::Cookies(c, after) => self.saved(c, after),
             UserEvent::CookiesRestored => self.restored(true),
             UserEvent::SiteCookies { cookies, clear } => self.site_cookies(cookies, clear),
+            UserEvent::RulesBuilt(rules, msg) => {
+                let p = self.ctx.proxy.clone();
+                let cached = adblock::is_compiled(&rules.hash);
+                let hash = rules.hash;
+                wk::compile_rules(rules.json, cached, move || {
+                    adblock::mark_compiled(&hash);
+                    let _ = p.send_event(UserEvent::RulesReady);
+                });
+                if let Some(s) = &self.s {
+                    if let Some(m) = msg {
+                        s.toast(&m);
+                    }
+                    s.refresh_panel(&self.cfg);
+                }
+            }
+            UserEvent::HostsFailed(e) => {
+                if let Some(s) = &self.s {
+                    s.toast(&format!("Zoznam reklám: {e}"));
+                }
+            }
             UserEvent::RulesReady => {
                 if let Some(s) = self.s.as_mut() {
                     s.apply_rules_all(&self.cfg);
@@ -727,6 +749,9 @@ impl App {
         if self.cfg.updates && !self.update_checked {
             self.update_checked = true;
             update::check(self.ctx.proxy.clone(), false);
+            if self.cfg.adblock_hosts && adblock::hosts_stale() {
+                build_rules(self.ctx.proxy.clone(), true, false);
+            }
         }
     }
 
@@ -1311,10 +1336,20 @@ impl App {
                         }
                     }
                     "adblock" => s.apply_rules_all(&self.cfg),
+                    "adblock_hosts" => {
+                        if !self.cfg.adblock_hosts {
+                            adblock::remove_hosts();
+                        }
+                        build_rules(self.ctx.proxy.clone(), self.cfg.adblock_hosts, true);
+                    }
                     _ => {}
                 }
                 s.sync(&self.cfg);
                 self.persist(After::Nothing);
+            }
+            "adblock-update" if self.cfg.adblock_hosts => {
+                s.toast("Sťahujem zoznam reklám…");
+                build_rules(self.ctx.proxy.clone(), true, true);
             }
             // Global switch; takes effect immediately on all loaded tabs.
             "toggle-adblock" => {
@@ -1450,6 +1485,27 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// Rebuilds the rule list off the main thread (optionally downloading the hosts list first),
+/// then hands it to WebKit via `UserEvent::RulesBuilt`.
+fn build_rules(proxy: EventLoopProxy<UserEvent>, fetch: bool, manual: bool) {
+    std::thread::spawn(move || {
+        let msg = if fetch {
+            match adblock::fetch_hosts() {
+                Ok(n) => Some(format!("Zoznam reklám aktualizovaný: {n} domén")),
+                Err(e) => {
+                    if manual {
+                        let _ = proxy.send_event(UserEvent::HostsFailed(e));
+                    }
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let _ = proxy.send_event(UserEvent::RulesBuilt(adblock::build(), msg.filter(|_| manual)));
+    });
 }
 
 /// Ad blocker wanted for `url`: globally on and the site not allowlisted.
