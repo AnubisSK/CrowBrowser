@@ -92,7 +92,8 @@ pub enum UserEvent {
     DownloadStarted { url: String, path: PathBuf },
     DownloadDone { url: String, ok: bool },
     FindResult(String),
-    Cookies(Vec<CookieRec>, After),
+    /// Exported cookies for a save; `u64` = cookie epoch when the export was requested.
+    Cookies(Vec<CookieRec>, After, u64),
     /// Fresh cookie list for the site-info popover; `clear` = delete the site's cookies first.
     SiteCookies { cookies: Vec<CookieRec>, clear: bool },
     CookiesRestored,
@@ -225,7 +226,12 @@ impl TabCtx {
         }
     }
 
+    /// Internal UI with `window.ipc`. Strict CSP: no network, no external scripts/styles/frames;
+    /// only its own inline code. Tab views never get an IPC handler, so wry never injects
+    /// `window.ipc` there (popups inherit the opener tab's configuration, also without IPC).
     fn ui_view(&self, html: String, rect: Rect) -> Option<WebView> {
+        const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'\">";
+        let html = html.replacen("<head>", &format!("<head>{CSP}"), 1);
         let p = self.proxy.clone();
         let b = wk::ui_builder()
             .with_html(wk::ui_html(html))
@@ -267,12 +273,19 @@ struct Tab {
     tls_error: bool,
 }
 
+/// Every way a tab disappears (close, session lock, app exit) releases its view the same way.
+impl Drop for Tab {
+    fn drop(&mut self) {
+        self.drop_view();
+    }
+}
+
 impl Tab {
     fn new(id: u32, url: String, view: Option<WebView>) -> Self {
         Self { id, url, title: String::new(), view, hidden_since: Instant::now(), loading: false, icon: String::new(), fav_tries: 0, blocking: None, blocked: 0, tls: "", tls_error: false }
     }
 
-    /// Frees the page (unload/close); stops its blocked-load reporting.
+    /// Frees the page (unload/close/lock); stops its reporting and releases the view.
     fn drop_view(&mut self) {
         if let Some(v) = self.view.take() {
             wk::forget(&v);
@@ -301,6 +314,10 @@ struct Session {
     zoom: f64,
     dirty: bool,
     saving: bool,
+    /// Save requested while an export was running (strongest `After` wins), run afterwards.
+    queued: Option<After>,
+    /// Bumped whenever cookies are deleted; an export requested before that is stale.
+    cookie_epoch: u64,
     ready: bool,
     /// WebKit confirmed the cookie import (false if the session started on timeout).
     cookies_ok: bool,
@@ -617,7 +634,7 @@ impl App {
                     s.eval(&format!("findCount({})", r.trim().parse::<u32>().unwrap_or(0)));
                 }
             }
-            UserEvent::Cookies(c, after) => self.saved(c, after),
+            UserEvent::Cookies(c, after, epoch) => self.saved(c, after, epoch),
             UserEvent::CookiesRestored => self.restored(true),
             UserEvent::SiteCookies { cookies, clear } => self.site_cookies(cookies, clear),
             UserEvent::VaultSessions { cookies, revoke } => self.vault_sessions(cookies, revoke),
@@ -830,6 +847,8 @@ impl App {
             zoom: self.cfg.zoom,
             dirty: legacy,
             saving: false,
+            queued: None,
+            cookie_epoch: 0,
             ready: false,
             cookies_ok: false,
             closed: Vec::new(),
@@ -1142,6 +1161,7 @@ impl App {
     fn vault_sessions(&mut self, cookies: Vec<CookieRec>, revoke: Option<String>) {
         let Some(s) = self.s.as_mut() else { return };
         if let Some(site) = revoke {
+            s.cookie_epoch += 1;
             let (gone, keep): (Vec<_>, Vec<_>) = cookies.into_iter().partition(|c| site_of(&c.domain) == site);
             // Vault first (atomic .vault.tmp -> rename in `save_now`), then WebKit's live store.
             if s.cookies_ok {
@@ -1206,6 +1226,7 @@ impl App {
         let url = s.cur().map(|t| t.url.clone()).unwrap_or_default();
         let host = host_of(&url);
         if clear {
+            s.cookie_epoch += 1;
             let (site, rest): (Vec<_>, Vec<_>) = cookies.into_iter().partition(|c| cookie_for(&host, &c.domain));
             s.dirty = true;
             let p = self.ctx.proxy.clone();
@@ -1306,18 +1327,27 @@ impl App {
             s.save_now(&self.cfg);
             return self.after_save(after);
         }
-        if s.saving && after == After::Nothing {
+        // One export at a time: later requests are queued, so an older cookie list can never
+        // arrive after (and overwrite) a newer one.
+        if s.saving {
+            s.queued = Some(stronger(s.queued.unwrap_or(After::Nothing), after));
             return;
         }
         s.saving = true;
-        let p = self.ctx.proxy.clone();
+        let (p, epoch) = (self.ctx.proxy.clone(), s.cookie_epoch);
         wk::export_cookies(&s.store, move |c| {
-            let _ = p.send_event(UserEvent::Cookies(c, after));
+            let _ = p.send_event(UserEvent::Cookies(c, after, epoch));
         });
     }
 
-    fn saved(&mut self, cookies: Vec<CookieRec>, after: After) {
+    fn saved(&mut self, cookies: Vec<CookieRec>, after: After, epoch: u64) {
         let Some(s) = self.s.as_mut() else { return };
+        s.saving = false;
+        let queued = s.queued.take();
+        if epoch != s.cookie_epoch {
+            // Cookies were deleted while this export ran: it may still contain them. Export again.
+            return self.persist(stronger(after, queued.unwrap_or(After::Nothing)));
+        }
         if !s.cookies_ok {
             // Import was never confirmed: keep vault cookies WebKit may not have received yet.
             let mut cookies = cookies;
@@ -1333,8 +1363,11 @@ impl App {
             s.data.cookies = cookies;
         }
         s.save_now(&self.cfg);
-        s.saving = false;
-        self.after_save(after);
+        match queued {
+            // Requested during this export: one more export so nothing set meanwhile is lost.
+            Some(q) => self.persist(stronger(after, q)),
+            None => self.after_save(after),
+        }
     }
 
     fn after_save(&mut self, after: After) {
@@ -1651,6 +1684,7 @@ impl App {
                     "history" => s.data.history.clear(),
                     "downloads" => s.data.downloads.retain(|d| d.state == "active"),
                     "cookies" => {
+                        s.cookie_epoch += 1;
                         wk::clear_store(&s.store);
                         s.data.cookies.clear();
                     }
@@ -1847,6 +1881,16 @@ button {{ margin-top: 16px; font: inherit; color: #fff; background: #5b8def; bor
 <button onclick="history.back()">Späť do bezpečia</button>
 </main></body></html>"#
     )
+}
+
+/// Combined follow-up of two save requests: Quit > Lock > Nothing.
+fn stronger(a: After, b: After) -> After {
+    let rank = |x: After| match x {
+        After::Nothing => 0,
+        After::Lock => 1,
+        After::Quit => 2,
+    };
+    if rank(b) > rank(a) { b } else { a }
 }
 
 fn js(s: &str) -> String {

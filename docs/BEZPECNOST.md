@@ -68,6 +68,7 @@ Po **⌃⌘L** (alebo z Nastavení) Crow:
 - Kľúč je uložený v `Zeroizing<[u8; 32]>`, pri uvoľnení sa prepíše nulami.
 - Správa s heslom z obrazovky odomknutia sa po spracovaní prepíše nulami.
 - Pri zmene hesla sa prepíšu nulami staré aj nové heslo.
+- Cookies do trezora: naraz beží len jeden export z WebKitu, ďalšie požiadavky sa zaradia za neho. Export spustený pred mazaním cookies (odhlásenie, vymazanie) sa zahodí a zopakuje, takže starší zoznam neprepíše novší ani nevráti vymazané prihlásenie.
 - Dešifrovaný obsah trezora sa drží v `Zeroizing` bufferi. Cookies (názov, hodnota, doména) sa prepíšu nulami vždy, keď sa ich zoznam nahradí alebo uvoľní (po exporte z WebKitu, importe, vymazaní, zamknutí). Posledná kópia cookies zostáva v pamäti počas behu, aby sa dali uložiť aj pri nečakanom ukončení. Kópie vo WebKite Crow vymazať nevie.
 - **Zmena hesla** (`Vault::rotate_key`): nová náhodná soľ, nový kľúč Argon2id, zápis do `.vault.tmp`, `sync_all` a premenovanie. Nový kľúč sa začne používať až po úspešnom zápise, inak zostáva pôvodné heslo na disku aj v pamäti.
 
@@ -79,7 +80,8 @@ Po **⌃⌘L** (alebo z Nastavení) Crow:
 ## Ochrana rozhrania prehliadača
 
 - Rozhranie (panel, nastavenia, obrazovka odomknutia) beží v oddelených WebView s vlastným HTML. Len tieto WebView môžu posielať príkazy do Rustu cez IPC.
-- **Webové stránky nemajú IPC kanál.** Žiadna stránka nemôže čítať históriu, meniť nastavenia ani zamknúť či odomknúť trezor.
+- **Webové stránky nemajú IPC kanál.** Žiadna stránka nemôže čítať históriu, meniť nastavenia ani zamknúť či odomknúť trezor. wry vkladá `window.ipc` len do WebView s IPC handlerom (rozhranie), karty ani okná z `window.open` ho nemajú.
+- Rozhranie má prísne CSP (`default-src 'none'`, len vlastný inline kód, obrázky len `data:`), takže nemôže načítať nič zo siete ani externý skript. Beží v samostatnom dočasnom úložisku (`nonPersistentDataStore` na macOS, vlastný ephemeral kontext na Linuxe), na disk nezapisuje cache ani storage.
 - Dáta vkladané do HTML panelu sú escapované (`</` → `<\/`). Názvy stránok a adresy sa vykresľujú cez `textContent`, nie `innerHTML`, takže nemôžu vložiť skript.
 - Otvorenie súboru zo zoznamu stiahnutých je povolené len pre cesty, ktoré v zozname naozaj sú.
 

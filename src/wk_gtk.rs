@@ -426,7 +426,16 @@ pub fn watch(v: &WebView, tab: u32) {
     });
 }
 
-pub fn forget(_v: &WebView) {}
+/// Tab is closing/unloading: detach the view from the layout before wry destroys it, so no
+/// container reference keeps the WebKitWebView (and its web process) alive.
+pub fn forget(v: &WebView) {
+    let wv = v.webview();
+    if let Some(layout) = LAYOUT.with(|l| l.borrow().clone())
+        && wv.parent().is_some()
+    {
+        layout.remove(&wv);
+    }
+}
 
 /// TLS state of the committed page as verified by WebKit (never inferred from the URL).
 /// Mixed content is not reported by WebKitGTK.

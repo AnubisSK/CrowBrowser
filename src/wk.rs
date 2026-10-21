@@ -52,8 +52,6 @@ pub struct Config(Retained<WKWebViewConfiguration>);
 thread_local! {
     /// Compiled content-blocker lists by id (see `adblock::LISTS`).
     static RULES: RefCell<Vec<(&'static str, Retained<WKContentRuleList>)>> = const { RefCell::new(Vec::new()) };
-    /// Tab id of each watched WKWebView (by pointer), for content-blocker notifications.
-    static WATCHED: RefCell<HashMap<usize, u32>> = RefCell::new(HashMap::new());
     /// Loads blocked per tab since the last `take_blocked`.
     static BLOCKED: RefCell<HashMap<u32, u32>> = RefCell::new(HashMap::new());
     static ON_BLOCKED: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
@@ -102,8 +100,10 @@ pub fn builder<'a>(config: Config) -> WebViewBuilder<'a> {
         .with_initialization_script_for_main_only(crate::adblock::DEFUSER, false)
 }
 
+/// Browser UI (toolbar, panel, lock screen, popovers): its own non-persistent data store
+/// (`incognito` = `nonPersistentDataStore`), so no UI cache or storage ever reaches the disk.
 pub fn ui_builder<'a>() -> WebViewBuilder<'a> {
-    WebViewBuilder::new()
+    WebViewBuilder::new().with_incognito(true)
 }
 
 pub fn attach(b: WebViewBuilder, rect: Rect, window: &Window) -> wry::Result<WebView> {
@@ -217,8 +217,7 @@ unsafe extern "C-unwind" fn rule_action(
         let known: Bool = msg_send![action, respondsToSelector: sel!(blockedLoad)];
         known.as_bool() && msg_send![action, blockedLoad]
     };
-    let tab = WATCHED.with(|w| w.borrow().get(&(web_view as usize)).copied());
-    let (true, Some(tab)) = (blocked, tab) else { return };
+    let (true, Some(tab)) = (blocked, tab_of(web_view)) else { return };
     let first = BLOCKED.with(|b| {
         let mut b = b.borrow_mut();
         let first = b.is_empty();
@@ -272,13 +271,40 @@ unsafe extern "C-unwind" fn nav_failed(
         let url = (url as *mut NSString).as_ref().map(|u| u.to_string()).unwrap_or_default();
         (domain.as_ref().map(|d| d.to_string()).unwrap_or_default(), code, url)
     };
-    let tab = WATCHED.with(|w| w.borrow().get(&(web_view as usize)).copied());
+    let tab = tab_of(web_view);
     let (Some(tab), Some(reason)) = (tab, tls_reason(code).filter(|_| domain == "NSURLErrorDomain")) else { return };
     ON_TLS.with(|f| {
         if let Some(f) = &*f.borrow() {
             f(tab, url, vec![reason]);
         }
     });
+}
+
+/// Key of the tab id associated with a WKWebView (address of this static, never dereferenced).
+static TAB_KEY: u8 = 0;
+
+/// Tags the view itself with its tab id (associated object): the tag lives and dies with that
+/// exact WKWebView, so a recycled address can never map callbacks to another tab (no ABA, no
+/// global pointer map). Tab ids are monotonic and never reused.
+fn set_tab(web_view: *mut AnyObject, tab: Option<u32>) {
+    let value = tab.map(|t| NSString::from_str(&t.to_string()));
+    let ptr = value.as_ref().map_or(std::ptr::null_mut(), |v| Retained::as_ptr(v) as *mut AnyObject);
+    unsafe {
+        objc2::ffi::objc_setAssociatedObject(
+            web_view,
+            &TAB_KEY as *const u8 as *const c_void,
+            ptr,
+            objc2::ffi::OBJC_ASSOCIATION_RETAIN_NONATOMIC,
+        )
+    };
+}
+
+fn tab_of(web_view: *mut AnyObject) -> Option<u32> {
+    if web_view.is_null() {
+        return None;
+    }
+    let v = unsafe { objc2::ffi::objc_getAssociatedObject(web_view, &TAB_KEY as *const u8 as *const c_void) };
+    unsafe { (v as *const NSString).as_ref() }?.to_string().parse().ok()
 }
 
 /// Adds `imp` for `sel` to the delegate's class unless the class already implements it.
@@ -292,7 +318,7 @@ unsafe fn add_method(cls: &AnyClass, sel: Sel, imp: Imp, types: &std::ffi::CStr)
 /// navigation delegate class and re-sets the delegate, so WebKit re-reads which methods exist.
 pub fn watch(v: &WebView, tab: u32) {
     let wv = v.webview();
-    WATCHED.with(|w| w.borrow_mut().insert(Retained::as_ptr(&wv) as usize, tab));
+    set_tab(Retained::as_ptr(&wv) as *mut AnyObject, Some(tab));
     unsafe {
         let d: *mut AnyObject = msg_send![&*wv, navigationDelegate];
         let Some(d) = d.as_ref() else { return };
@@ -316,9 +342,9 @@ pub fn tls(v: &WebView) -> Tls {
     if secure_only { Tls::Secure } else { Tls::Mixed }
 }
 
+/// Tab is closing/unloading: late callbacks from this view (teardown) are ignored.
 pub fn forget(v: &WebView) {
-    let ptr = Retained::as_ptr(&v.webview()) as usize;
-    WATCHED.with(|w| w.borrow_mut().remove(&ptr));
+    set_tab(Retained::as_ptr(&v.webview()) as *mut AnyObject, None);
 }
 
 /// Blocked loads per tab since the last call.
