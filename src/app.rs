@@ -1,6 +1,7 @@
 use crate::{
     adblock, cert,
     settings::{ENGINES, Settings},
+    update,
     vault::{self, Bookmark, CookieRec, Download, HistoryEntry, MAX_HISTORY, Vault, VaultData},
     wk,
 };
@@ -23,6 +24,7 @@ const TABS_H: f64 = 36.0;
 const NAV_H: f64 = 40.0;
 const FIND_H: f64 = 36.0;
 const ASK_H: f64 = 36.0;
+const UPD_H: f64 = 36.0;
 const SITE_W: f64 = 360.0;
 const BG_DARK: RGBA = (0x1f, 0x1f, 0x23, 0xff);
 const BG_LIGHT: RGBA = (0xf4, 0xf4, 0xf6, 0xff);
@@ -31,6 +33,11 @@ const TICK: Duration = Duration::from_secs(30);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Max wait for WebKit to confirm the cookie import before the session starts anyway.
 const RESTORE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Favicon: polled after load (tab views have no IPC), a 32x32 PNG data URL of bounded size.
+const FAV_POLL: Duration = Duration::from_millis(500);
+const FAV_TRIES: u8 = 8;
+const FAV_MAX: usize = 48 * 1024;
+const FAV_READ: &str = "window.__crowIcon || ''";
 
 const FIND_JS: &str = r#"(function (q, dir) {
   const sel = getSelection();
@@ -42,6 +49,30 @@ const FIND_JS: &str = r#"(function (q, dir) {
   while ((i = t.indexOf(s, i)) !== -1) { n++; i += s.length; }
   return ok ? n : 0;
 })"#;
+
+/// Runs in the page: tries <link rel=icon> candidates then /favicon.ico, re-encodes the first
+/// one that loads into a PNG data URL (only CORS-readable images survive the canvas).
+const FAV_JS: &str = r#"(function () {
+  window.__crowIcon = '';
+  const c = [...document.querySelectorAll('link[rel~="icon" i]')].map(l => l.href).filter(h => /^(https?|data):/i.test(h));
+  if (/^https?:$/.test(location.protocol)) c.push(location.origin + '/favicon.ico');
+  const next = () => {
+    const src = c.shift();
+    if (!src) { window.__crowIcon = '-'; return; }
+    const img = new Image();
+    if (!src.startsWith('data:')) img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const cv = document.createElement('canvas'); cv.width = cv.height = 32;
+        cv.getContext('2d').drawImage(img, 0, 0, 32, 32);
+        window.__crowIcon = cv.toDataURL('image/png');
+      } catch (e) { next(); }
+    };
+    img.onerror = next;
+    img.src = src;
+  };
+  next();
+})()"#;
 
 pub enum UserEvent {
     Menu(String),
@@ -61,6 +92,10 @@ pub enum UserEvent {
     SiteCookies { cookies: Vec<CookieRec>, clear: bool },
     CookiesRestored,
     RulesReady,
+    /// Result of `FAV_READ` in a tab (JSON string).
+    Icon { tab: u32, data: String },
+    Update { result: Result<Option<update::Info>, String>, manual: bool },
+    UpdateSaved(Option<PathBuf>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -185,11 +220,13 @@ struct Tab {
     view: Option<WebView>, // None = unloaded to save memory
     hidden_since: Instant,
     loading: bool,
+    icon: String,
+    fav_tries: u8,
 }
 
 impl Tab {
     fn new(id: u32, url: String, view: Option<WebView>) -> Self {
-        Self { id, url, title: String::new(), view, hidden_since: Instant::now(), loading: false }
+        Self { id, url, title: String::new(), view, hidden_since: Instant::now(), loading: false, icon: String::new(), fav_tries: 0 }
     }
 
     fn label(&self) -> String {
@@ -224,6 +261,10 @@ struct Session {
     site_x: f64,
     site_h: f64,
     site_closed: Instant,
+    fav_due: Option<Instant>,
+    update: Option<update::Info>,
+    update_bar: bool,
+    update_busy: bool,
 }
 
 impl Session {
@@ -232,6 +273,28 @@ impl Session {
             + NAV_H
             + if self.find_open { FIND_H } else { 0.0 }
             + if self.asks.is_empty() { 0.0 } else { ASK_H }
+            + if self.update_bar { UPD_H } else { 0.0 }
+    }
+
+    fn poll_icons(&mut self, proxy: &EventLoopProxy<UserEvent>) {
+        self.fav_due = None;
+        for t in &mut self.tabs {
+            if t.fav_tries == 0 {
+                continue;
+            }
+            let Some(v) = &t.view else {
+                t.fav_tries = 0;
+                continue;
+            };
+            t.fav_tries -= 1;
+            let (p, tab) = (proxy.clone(), t.id);
+            let _ = v.evaluate_script_with_callback(FAV_READ, move |data| {
+                let _ = p.send_event(UserEvent::Icon { tab, data });
+            });
+            if t.fav_tries > 0 {
+                self.fav_due = Some(Instant::now() + FAV_POLL);
+            }
+        }
     }
 
     fn cur(&self) -> Option<&Tab> {
@@ -297,7 +360,7 @@ impl Session {
         let tabs: Vec<_> = self
             .tabs
             .iter()
-            .map(|t| json!({ "id": t.id, "title": t.label(), "loading": t.loading, "asleep": t.view.is_none() }))
+            .map(|t| json!({ "id": t.id, "title": t.label(), "loading": t.loading, "asleep": t.view.is_none(), "icon": t.icon }))
             .collect();
         let state = json!({
             "tabs": tabs,
@@ -310,6 +373,9 @@ impl Session {
             "adblock": cfg.adblock,
             "ask": self.asks.first().map(|a| json!({
                 "id": a.id, "name": a.name, "url": a.url, "more": self.asks.len() - 1,
+            })),
+            "update": self.update.as_ref().filter(|_| self.update_bar).map(|u| json!({
+                "version": u.version, "busy": self.update_busy, "asset": u.asset.is_some(),
             })),
         });
         self.eval(&format!("render({state})"));
@@ -326,6 +392,9 @@ impl Session {
             "history": history,
             "bookmarks": self.data.bookmarks,
             "downloads": downloads,
+            "version": update::CURRENT,
+            "update": self.update,
+            "updateBusy": self.update_busy,
         })
         .to_string()
     }
@@ -346,6 +415,7 @@ pub struct App {
     next_tick: Instant,
     quit_at: Option<Instant>,
     restore_by: Option<Instant>,
+    update_checked: bool,
 }
 
 impl App {
@@ -380,6 +450,7 @@ impl App {
             next_tick: Instant::now() + TICK,
             quit_at: None,
             restore_by: None,
+            update_checked: false,
         };
         app.show_lock();
         app
@@ -400,7 +471,8 @@ impl App {
     }
 
     pub fn wake(&self) -> Instant {
-        [self.quit_at, self.restore_by].into_iter().flatten().fold(self.next_tick, Instant::min)
+        let fav = self.s.as_ref().and_then(|s| s.fav_due);
+        [self.quit_at, self.restore_by, fav].into_iter().flatten().fold(self.next_tick, Instant::min)
     }
 
     pub fn resize(&self) {
@@ -457,6 +529,25 @@ impl App {
                     }
                 }
             }
+            UserEvent::Icon { tab, data } => self.icon(tab, data),
+            UserEvent::Update { result, manual } => self.update_result(result, manual),
+            UserEvent::UpdateSaved(path) => {
+                let Some(s) = self.s.as_mut() else { return };
+                s.update_busy = false;
+                match path {
+                    // Installer is never run by Crow; the user opens it from the file manager.
+                    Some(p) => {
+                        wk::reveal(&p.to_string_lossy());
+                        s.update_bar = false;
+                        self.resize();
+                    }
+                    None => s.toast("Aktualizáciu sa nepodarilo stiahnuť alebo overiť"),
+                }
+                if let Some(s) = &self.s {
+                    s.sync(&self.cfg);
+                    s.refresh_panel(&self.cfg);
+                }
+            }
         }
     }
 
@@ -473,6 +564,11 @@ impl App {
         if self.restore_by.is_some_and(|r| now >= r) {
             eprintln!("cookie restore timed out; starting session without waiting");
             self.restored(false);
+        }
+        if let Some(s) = self.s.as_mut()
+            && s.fav_due.is_some_and(|d| now >= d)
+        {
+            s.poll_icons(&self.ctx.proxy);
         }
         if now < self.next_tick {
             return;
@@ -590,6 +686,10 @@ impl App {
             site_x: 0.0,
             site_h: 0.0,
             site_closed: Instant::now(),
+            fav_due: None,
+            update: None,
+            update_bar: false,
+            update_busy: false,
         });
     }
 
@@ -611,6 +711,10 @@ impl App {
         }
         s.active = active;
         self.activate(active);
+        if self.cfg.updates && !self.update_checked {
+            self.update_checked = true;
+            update::check(self.ctx.proxy.clone(), false);
+        }
     }
 
     fn activate(&mut self, idx: usize) {
@@ -726,6 +830,14 @@ impl App {
         if !url.is_empty() {
             t.url = url.clone();
         }
+        match &t.view {
+            Some(v) if url.starts_with("http") => {
+                let _ = v.evaluate_script(FAV_JS);
+                t.fav_tries = FAV_TRIES;
+                s.fav_due.get_or_insert_with(|| Instant::now() + FAV_POLL);
+            }
+            _ => t.icon.clear(),
+        }
         if url.starts_with("http") {
             let title = t.title.clone();
             let h = &mut s.data.history;
@@ -749,6 +861,45 @@ impl App {
             e.title = t.title.clone();
         }
         s.sync(&self.cfg);
+    }
+
+    fn icon(&mut self, id: u32, res: String) {
+        let Some(s) = self.s.as_mut() else { return };
+        let Some(i) = s.tab_idx(id) else { return };
+        let data: String = serde_json::from_str(&res).unwrap_or_default();
+        if data.is_empty() {
+            return; // still loading, polled again
+        }
+        let t = &mut s.tabs[i];
+        t.fav_tries = 0;
+        let valid = data.strip_prefix("data:image/png;base64,").is_some_and(|b| {
+            b.len() <= FAV_MAX && b.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
+        });
+        let icon = if valid { data } else { String::new() };
+        if t.icon != icon {
+            t.icon = icon;
+            s.sync(&self.cfg);
+        }
+    }
+
+    fn update_result(&mut self, result: Result<Option<update::Info>, String>, manual: bool) {
+        let Some(s) = self.s.as_mut() else { return };
+        match result {
+            Ok(Some(info)) => {
+                s.update = Some(info);
+                if !s.update_bar {
+                    s.update_bar = true;
+                    self.resize();
+                }
+            }
+            Ok(None) if manual => s.toast(&format!("Crow {} je najnovšia verzia", update::CURRENT)),
+            Err(e) if manual => s.toast(&format!("Kontrola aktualizácií zlyhala: {e}")),
+            _ => {}
+        }
+        if let Some(s) = &self.s {
+            s.sync(&self.cfg);
+            s.refresh_panel(&self.cfg);
+        }
     }
 
     fn request_site_cookies(&mut self, clear: bool) {
@@ -943,6 +1094,44 @@ impl App {
                 if let Some(url) = s.closed.pop() {
                     self.open_tab(url);
                 }
+            }
+            "move-tab" => {
+                let (id, to) = arg.split_once(':').unwrap_or((arg, ""));
+                let (Some(from), Ok(to)) = (id.parse().ok().and_then(|id| s.tab_idx(id)), to.parse::<usize>()) else {
+                    return;
+                };
+                let to = to.min(s.tabs.len() - 1);
+                if from != to {
+                    let active = s.tabs[s.active].id;
+                    let tab = s.tabs.remove(from);
+                    s.tabs.insert(to, tab);
+                    s.active = s.tab_idx(active).unwrap_or(0);
+                    s.dirty = true;
+                }
+                s.sync(&self.cfg);
+            }
+            "update-check" => update::check(self.ctx.proxy.clone(), true),
+            "update-show" => self.session_cmd("panel", "update"),
+            "update-dismiss" => {
+                s.update_bar = false;
+                self.resize();
+                if let Some(s) = &self.s {
+                    s.sync(&self.cfg);
+                }
+            }
+            // The click is the explicit confirmation; the file is verified and only revealed.
+            "update-get" => {
+                if s.update_busy {
+                    return;
+                }
+                let Some(asset) = s.update.as_ref().and_then(|u| u.asset.clone()) else { return };
+                if asset.sha256.is_none() {
+                    return s.toast("Inštalátor nemá kontrolný súčet, stiahni ho z GitHubu ručne");
+                }
+                s.update_busy = true;
+                update::download(self.ctx.proxy.clone(), asset);
+                s.sync(&self.cfg);
+                s.refresh_panel(&self.cfg);
             }
             "select" => {
                 if let Some(i) = arg.parse().ok().and_then(|id| s.tab_idx(id)) {

@@ -75,7 +75,8 @@ Okno má priehľadnú macOS lištu, takže semafor (zavrieť/minimalizovať/zvä
 - **Úsporné spustenie:** pri obnovení relácie sa načíta len aktívna karta, ostatné až po kliknutí.
 - **Vyskakovacie okná na prihlásenie** („Prihlásiť cez Google/Apple/Facebook“) si zachovajú prepojenie na pôvodnú stránku (`window.opener`), takže prihlásenie funguje.
 - Zavretím poslednej karty sa otvorí nová s domovskou stránkou, aplikácia sa nezavrie.
-- Počas načítavania sa namiesto bodky na karte točí indikátor.
+- Karta ukazuje ikonu webu (favicon), bez nej bodku. Počas načítavania sa točí indikátor.
+- **Presúvanie:** kartu chyť a ťahaj vľavo alebo vpravo. Poradie sa uloží aj do relácie.
 
 ## Adresný riadok a vyhľadávanie
 
@@ -172,8 +173,17 @@ Otvoríš ich cez **⌘,** alebo ⚙. Panel má bočné menu: **Nastavenia · Hi
 | Ochrana súkromia | Vymazať zoznam stiahnutých | súbory zostanú | |
 | Šifrovanie | Zamknúť teraz | ⌃⌘L | |
 | Šifrovanie | Zmeniť heslo | aktuálne + nové 2× (min. 8 znakov) | |
+| O aplikácii | Automaticky kontrolovať aktualizácie | Zapnuté / Vypnuté | Zapnuté |
+| O aplikácii | Skontrolovať aktualizácie | ručná kontrola | |
 
 Motív **Systém** sleduje nastavenie macOS. Stránky podporujúce `prefers-color-scheme` (napr. DuckDuckGo) sa prepnú tiež.
+
+## Aktualizácie
+
+- Po odomknutí sa Crow raz opýta GitHub Releases (`AnubisSK/CrowBrowser`), či existuje novšia verzia. Ide to cez systémový `curl` a odošle sa len požiadavka na GitHub API, žiadne údaje z trezora.
+- Ak je novšia, pod adresným riadkom sa zobrazí lišta **Čo je nové · Neskôr · Stiahnuť**.
+- **Čo je nové:** zoznam commitov medzi tvojou verziou a novým vydaním. Klik na commit ho otvorí na GitHube.
+- **Stiahnuť:** inštalátor pre tvoj systém sa uloží do Stiahnutých a overí sa podľa SHA-256 z GitHubu. Ak nesedí, súbor sa zmaže. Overený inštalátor sa ukáže vo Finderi (správcovi súborov), **nikdy sa nespustí sám**.
 
 ## Ukladanie a obnovenie relácie
 

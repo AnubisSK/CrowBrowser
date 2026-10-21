@@ -17,10 +17,7 @@
 
 - Bez rozšírení (extensions).
 - Bez súkromného okna (celý prehliadač je šifrovaný, ale nie je režim „nič neukladaj“).
-- Bez viacerých okien, všetko je v kartách jedného okna.
-- Karty sa nedajú presúvať ťahaním.
-- Bez ikon webov (favicon) na kartách, namiesto nich je bodka alebo indikátor načítavania.
-- Bez vývojárskych nástrojov (Web Inspector).
+- Favicon sa zobrazí len vtedy, keď ho stránka dovolí prečítať (rovnaký pôvod alebo CORS). Inak zostane bodka. Uspané karty po spustení ikonu nemajú, kým sa nenačítajú.
 - Bez tlače (⌘P).
 - Bez ponuky „Otvoriť odkaz v novej karte“ v kontextovom menu. Funguje však ⌘+klik v paneloch a odkazy `target=_blank`.
 - Hľadanie na stránke rozlišuje diakritiku (`š` ≠ `s`), počíta len viditeľný text a nehľadá v iframoch.
@@ -38,7 +35,7 @@
 
 - Aplikácia nie je notarizovaná, takže na iných Macoch zobrazí upozornenie Gatekeepera.
 - Build je len pre Intel (x86_64). Na Apple Silicon beží cez Rosettu, univerzálny build je opísaný v [BUILD.md](BUILD.md).
-- Bez automatických aktualizácií.
+- Aktualizácie sa len zistia a stiahnu (po kliknutí, overené SHA-256 z GitHubu). Inštaláciu robíš sám, Crow inštalátor nespúšťa. Kontrola potrebuje systémový `curl` a vydanie (Release) na GitHube s tagom `vX.Y.Z` a inštalátorom (`.dmg`; na Linuxe `.pkg.tar.zst`/`.deb`/`.rpm`/`.AppImage`/`.tar.gz`).
 
 ## Možné ďalšie kroky
 
@@ -46,7 +43,6 @@
 - Šifrované ukladanie localStorage
 - Výnimky adblocku pre jednotlivé weby a počítadlo blokovaní
 - Kontextové menu s položkou „Otvoriť v novej karte“
-- Presúvanie kariet ťahaním a ikony webov (favicony)
 - Automatické zamknutie po nečinnosti
 - Univerzálny build a notarizácia
 

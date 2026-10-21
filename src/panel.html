@@ -206,7 +206,35 @@
             h('button', { class: 'btn', onclick: () => send('lock') }, 'Zamknúť teraz (⌃⌘L)')),
           h('div', { class: 'pw' }, ...pw, pwBtn)),
         h('h2', {}, 'O aplikácii'),
-        h('section', {}, row('Crow Browser', 'WebKit · Rust · tao + wry', null)),
+        h('section', {},
+          row('Crow Browser ' + D.version, 'WebKit · Rust · tao + wry',
+            h('button', { class: 'btn', onclick: () => { send('update-check'); toast('Kontrolujem…'); } }, 'Skontrolovať aktualizácie')),
+          row('Automaticky kontrolovať aktualizácie', 'Po odomknutí sa opýta GitHubu na novú verziu. Inštalátor sa stiahne len na tvoj pokyn',
+            seg('updates', [['on', 'Zapnuté'], ['off', 'Vypnuté']]))),
+      ];
+    },
+
+    update() {
+      const u = D.update;
+      if (!u) return [header('Aktualizácia'), h('section', {},
+        row('Crow ' + D.version + ' je najnovšia verzia', null,
+          h('button', { class: 'btn', onclick: () => send('update-check') }, 'Skontrolovať znova')))];
+      const get = u.asset
+        ? h('button', { class: 'btn primary', onclick: () => send('update-get') }, D.updateBusy ? 'Sťahuje sa…' : 'Stiahnuť inštalátor')
+        : h('button', { class: 'btn', onclick: () => send('open-new:' + u.page) }, 'Otvoriť na GitHube');
+      if (D.updateBusy) get.disabled = true;
+      const list = h('div', { class: 'list' });
+      if (!u.notes.length) list.append(h('div', { class: 'empty' }, 'Zoznam zmien nie je k dispozícii'));
+      for (const n of u.notes) list.append(h('div', { class: 'item' },
+        h('div', { class: 'main', onclick: () => send('open-new:' + n.url), title: n.url },
+          h('div', { class: 'title' }, n.msg), h('div', { class: 'sub' }, n.sha))));
+      return [
+        header('Aktualizácia'),
+        h('section', {},
+          row('Crow ' + u.version + ' je dostupný', 'Nainštalovaná verzia: ' + D.version +
+            (u.asset ? ' · ' + u.asset.name + ' (' + (u.asset.size / 1048576).toFixed(1) + ' MB). Po stiahnutí sa ukáže vo Finderi, nespustí sa.' : ''), get)),
+        h('h2', {}, 'Čo je nové'),
+        list,
       ];
     },
 

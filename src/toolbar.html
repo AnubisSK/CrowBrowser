@@ -34,7 +34,13 @@
   #ask > svg { color: var(--accent); flex: none; }
   #asktext { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   #ask .txt { width: auto; padding: 0 12px; font: inherit; border: 1px solid var(--line); }
-  #ask .txt.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  #ask .txt.primary, #upd .txt.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  #upd { height: 36px; padding: 0 8px 0 12px; gap: 8px; background: var(--nav); border-bottom: 1px solid var(--line); display: none; }
+  body.updating #upd { display: flex; }
+  #upd > svg { color: var(--accent); flex: none; }
+  #updtext { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  #upd .txt { width: auto; padding: 0 12px; font: inherit; border: 1px solid var(--line); }
+  #upd .txt:disabled { opacity: .6; }
 
   #tabs { display: flex; flex: 1; min-width: 0; gap: 2px; }
   .tab {
@@ -46,6 +52,10 @@
   .tab.on { background: var(--tab-on); color: var(--fg); }
   .tab.asleep .t { opacity: .6; }
   .tab .t { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .tab.dragging { background: var(--active); color: var(--fg); z-index: 2; }
+  .tab .fav { width: 16px; height: 16px; flex: none; border-radius: 3px; }
+  .tab.loading .fav { display: none; }
+  .tab:not(.loading) .fav + .dot { display: none; }
   .tab .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mute); flex: none; opacity: .5; }
   .tab.loading .dot { background: transparent; border: 2px solid var(--accent); border-right-color: transparent; animation: spin .8s linear infinite; opacity: 1; }
   .tab .x { width: 18px; height: 18px; border-radius: 4px; display: grid; place-items: center; opacity: 0; font-size: 14px; flex: none; }
@@ -162,6 +172,14 @@
     <button id="askno" class="txt">Zrušiť</button>
     <button id="askyes" class="txt primary">Uložiť</button>
   </div>
+  <div id="upd" class="row">
+    <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+    <span id="updtext"></span>
+    <div class="spacer"></div>
+    <button id="updnotes" class="txt">Čo je nové</button>
+    <button id="updlater" class="txt">Neskôr</button>
+    <button id="updget" class="txt primary">Stiahnuť</button>
+  </div>
   <div id="bar"></div>
   <div id="toast"></div>
 <script>
@@ -181,6 +199,9 @@
   $('sec').onclick = () => send('site-info:' + Math.round($('sec').getBoundingClientRect().left));
   $('askyes').onclick = () => S.ask && send('dl-allow:' + S.ask.id);
   $('askno').onclick = () => S.ask && send('dl-deny:' + S.ask.id);
+  $('updnotes').onclick = () => send('update-show');
+  $('updlater').onclick = () => send('update-dismiss');
+  $('updget').onclick = () => send('update-get');
 
   url.onkeydown = (e) => {
     if (e.key === 'Enter') { send('go:' + url.value); url.blur(); }
@@ -194,7 +215,37 @@
   function setFocus(on) { document.body.classList.toggle('blurred', !on); }
   $('tabrow').ondblclick = (e) => { if (e.target.id === 'tabrow' || e.target.id === 'tabs') send('new-tab'); };
 
+  // Tab reordering: drag past the threshold, reorder the DOM live, commit the index on release.
+  let drag = null, pendingState = null;
+  const tabEl = (id) => document.querySelector('.tab[data-id="' + id + '"]');
+  function dragEnd() {
+    if (!drag) return;
+    const d = drag; drag = null;
+    const el = tabEl(d.id);
+    if (d.on && el) {
+      el.classList.remove('dragging');
+      send('move-tab:' + d.id + ':' + [...$('tabs').children].indexOf(el));
+    }
+    if (pendingState) { const st = pendingState; pendingState = null; render(st); }
+  }
+  document.addEventListener('mousemove', (e) => {
+    if (!drag) return;
+    if (!(e.buttons & 1)) return dragEnd();
+    if (!drag.on && Math.abs(e.clientX - drag.x) < 6) return;
+    const el = tabEl(drag.id);
+    if (!el) return;
+    drag.on = true;
+    el.classList.add('dragging');
+    const others = [...$('tabs').children].filter(o => o !== el);
+    const at = others.findIndex(o => { const r = o.getBoundingClientRect(); return e.clientX < r.left + r.width / 2; });
+    const ref = at < 0 ? null : others[at];
+    if (el.nextSibling !== ref || (ref === null && el !== $('tabs').lastChild)) $('tabs').insertBefore(el, ref);
+  });
+  document.addEventListener('mouseup', dragEnd);
+  window.addEventListener('blur', dragEnd);
+
   function render(st) {
+    if (drag && drag.on) { pendingState = st; S = st; return; }
     S = st;
     const tabs = $('tabs');
     tabs.replaceChildren(...st.tabs.map((t, i) => {
@@ -206,8 +257,16 @@
       const title = document.createElement('span'); title.className = 't'; title.textContent = t.title;
       const x = document.createElement('span'); x.className = 'x'; x.textContent = '×';
       x.onclick = (e) => { e.stopPropagation(); send('close-tab:' + t.id); };
-      el.onmousedown = (e) => { if (e.button === 0 && e.target !== x) send('select:' + t.id); };
+      el.onmousedown = (e) => {
+        if (e.button !== 0 || e.target === x) return;
+        drag = { id: t.id, x: e.clientX, on: false };
+        send('select:' + t.id);
+      };
       el.onauxclick = (e) => { if (e.button === 1) send('close-tab:' + t.id); };
+      if (t.icon && t.icon.startsWith('data:image/png;base64,')) {
+        const fav = document.createElement('img'); fav.className = 'fav'; fav.src = t.icon; fav.draggable = false; fav.alt = '';
+        el.append(fav);
+      }
       el.append(dot, title, x);
       return el;
     }));
@@ -222,6 +281,13 @@
     if (a) {
       let from = a.url; try { from = new URL(a.url).host || a.url.split(':')[0] + ':'; } catch {}
       $('asktext').textContent = 'Stiahnuť „' + a.name + '“ z ' + from + '?' + (a.more ? ' (+' + a.more + ' ďalšie)' : '');
+    }
+    const u = st.update;
+    document.body.classList.toggle('updating', !!u);
+    if (u) {
+      $('updtext').textContent = u.busy ? 'Sťahuje sa Crow ' + u.version + '…' : 'Je dostupná nová verzia Crow ' + u.version;
+      $('updget').disabled = !!u.busy;
+      $('updget').style.display = u.asset ? '' : 'none';
     }
     document.body.classList.toggle('loading', st.loading);
     $('star').classList.toggle('on', st.bookmarked);

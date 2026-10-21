@@ -399,7 +399,7 @@ pub fn clear_store(store: &Store) {
     }
 }
 
-fn download_dir() -> PathBuf {
+pub fn download_dir() -> PathBuf {
     glib::user_special_dir(glib::UserDirectory::Downloads)
         .unwrap_or_else(|| glib::home_dir().join("Downloads"))
 }
@@ -601,6 +601,7 @@ pub fn ui_html(html: String) -> String {
         ("⌘G", "F3"),
         ("⌘", "Ctrl+"),
         ("Zobraziť vo Finderi", "Zobraziť v priečinku"),
+        ("ukáže vo Finderi", "ukáže v správcovi súborov"),
         ("~/Library/Application Support/Crow/", "~/.local/share/crow/"),
     ];
     let mut html = html;

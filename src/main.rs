@@ -2,6 +2,7 @@ mod adblock;
 mod app;
 mod cert;
 mod settings;
+mod update;
 mod vault;
 #[cfg_attr(target_os = "linux", path = "wk_gtk.rs")]
 mod wk;

@@ -21,6 +21,7 @@ pub struct Settings {
     pub zoom: f64,
     pub adblock: bool,
     pub unload: u32, // minutes before hidden tabs are unloaded, 0 = never
+    pub updates: bool, // check GitHub Releases after unlocking
 }
 
 impl Default for Settings {
@@ -33,6 +34,7 @@ impl Default for Settings {
             zoom: 1.0,
             adblock: true,
             unload: 5,
+            updates: true,
         }
     }
 }
@@ -80,6 +82,7 @@ impl Settings {
             "startup" if matches!(v, "home" | "last") => self.startup = v.into(),
             "theme" if matches!(v, "dark" | "light" | "system") => self.theme = v.into(),
             "adblock" if matches!(v, "on" | "off") => self.adblock = v == "on",
+            "updates" if matches!(v, "on" | "off") => self.updates = v == "on",
             "zoom" => match v.parse::<f64>() {
                 Ok(z) if (0.25..=3.0).contains(&z) => self.zoom = z,
                 _ => return false,
