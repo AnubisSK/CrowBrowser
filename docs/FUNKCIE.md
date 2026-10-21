@@ -151,8 +151,11 @@ Podporované vyhľadávače: **DuckDuckGo** (predvolený), **Google**, **Bing**,
 - **StevenBlack hosts:** [verejný zoznam](https://github.com/StevenBlack/hosts) reklamných a škodlivých domén (~70 000), subdomény už blokovaných domén sa vynechajú.
 - Zoznamy sa po odomknutí stiahnu, ak chýbajú alebo sú staršie ako týždeň. Zapínajú sa, aktualizujú a ich počty pravidiel sú v **Nastavenia → Ochrana súkromia → Zoznamy blokovania**. Ležia v priečinku dát Crow (`easylist.txt`, `easyprivacy.txt`, `hosts-stevenblack.txt`).
 - WebKit dovolí najviac 150 000 pravidiel v jednom zozname, preto sú dva: hlavný (vstavaný, `blocklist.txt`, EasyList, EasyPrivacy) a hosts. Prevod a kompilácia (~10 s na pozadí) bežia len keď sa niektorý zoznam zmení, inak sa načíta skompilovaná kópia.
+- **Obchádzanie detekcie blokovania** („Blokovače reklám sú zakázané“): do stránok sa pred ich skriptami vloží malý skript. Zablokovaný reklamný skript či obrázok sa stránke javí ako načítaný, `fetch` na reklamnú adresu vráti prázdnu odpoveď 200, nastavia sa „návnadové“ premenné (`canRunAds` …) a skryté návnadové prvky (`.adsbox`, `ins.adsbygoogle` …) hlásia nenulovú veľkosť. Ak web aj tak trvá na vypnutí, pomôže výnimka cez štít.
 - Blokovanie sa zapína a vypína v **Nastavenia → Ochrana súkromia** a platí okamžite pre všetky karty.
-- **Štít v paneli:** modrý = blokuje sa, sivý = vypnuté. Klik vypne alebo zapne blokovanie pre aktuálny web (výnimka platí aj pre subdomény a karty tohto webu sa znova načítajú), **⌥+klik** (Linux **Alt+klik**) ho prepne všade. To isté je v informáciách o stránke (zámok).
+- **Štít v paneli:** modrý = blokuje sa, sivý = vypnuté. Číslo na ňom je počet zablokovaných požiadaviek na aktuálnej stránke (nová stránka začína od nuly). **⌥+klik** (Linux **Alt+klik**) prepne blokovanie všade.
+- **Klik na štít** otvorí okno v štýle Brave Shields: doména, prepínač pre tento web (výnimka platí aj pre subdomény, karty webu sa znova načítajú), počet zablokovaných reklám a sledovačov, ušetrené dáta a čas a súhrn za celé používanie. Dáta a čas sú odhad: 50 kB a 50 ms na každú zablokovanú požiadavku. Zatvorí sa klikom mimo neho alebo **Esc**. Celkový počet sa ukladá do šifrovaného trezora.
+- Prepínač pre web je aj v informáciách o stránke (zámok).
 - Výnimky sú uložené v šifrovanom trezore a dajú sa odstrániť v Nastaveniach.
 
 ## Priblíženie

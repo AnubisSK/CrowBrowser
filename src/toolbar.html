@@ -99,6 +99,9 @@
   #star.on svg { fill: #f5c518; }
   #shield.blocking { color: var(--accent); }
   #shield.off { opacity: .35; }
+  #shieldn { position: absolute; top: 1px; right: 0; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 7px;
+    background: var(--accent); color: #fff; font-size: 9px; font-weight: 600; line-height: 14px; text-align: center; display: none; }
+  #shield.blocking #shieldn.show { display: block; }
   #dl.busy { color: var(--accent); }
   #dl.busy::after { content: ''; position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
@@ -152,7 +155,7 @@
       <input id="url" spellcheck="false" autocomplete="off" placeholder="Hľadať alebo zadať adresu">
       <button id="star" title="Obľúbené (⌘D)"><svg viewBox="0 0 24 24"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg></button>
     </div>
-    <button id="shield" title="Blokovanie reklám"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></button>
+    <button id="shield" title="Blokovanie reklám"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span id="shieldn"></span></button>
     <button id="bms" title="Obľúbené stránky (⌘⌥B)"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
     <button id="hist" title="História (⌘Y)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></button>
     <button id="dl" title="Stiahnuté (⌘⌥L)"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></button>
@@ -194,8 +197,14 @@
                   settings: 'panel:settings', fclose: 'find-close' };
   for (const [id, cmd] of Object.entries(click)) $(id).onclick = () => send(cmd);
   $('reload').onclick = () => send(S.loading ? 'stop' : 'reload');
-  // Shield: click = this site on/off, ⌥/Alt+click (or no site) = global switch. State comes back via render().
-  $('shield').onclick = (e) => send(e.altKey || !S.host || !S.adblock ? 'toggle-adblock' : 'adblock-allow:' + S.host);
+  // Shield: click = stats popover (per-site switch inside), ⌥/Alt+click = global switch.
+  $('shield').onclick = (e) => send(e.altKey ? 'toggle-adblock' : 'shield-open:' + Math.round($('shield').getBoundingClientRect().left));
+  // Blocked loads on the current page (badge); pushed by the backend as they happen.
+  function setBlocked(n) {
+    const b = $('shieldn');
+    b.textContent = n > 99 ? '99+' : String(n);
+    b.classList.toggle('show', n > 0);
+  }
   $('fnext').onclick = () => findStep(false);
   $('fprev').onclick = () => findStep(true);
   // Lock / "not secure" badge opens the site-info popover under it.
@@ -297,10 +306,9 @@
     const blocking = st.adblock && !st.siteAllowed;
     $('shield').classList.toggle('blocking', blocking);
     $('shield').classList.toggle('off', !blocking);
-    $('shield').title = !st.adblock ? 'Blokovanie reklám: vypnuté všade (klik zapne)'
-      : st.siteAllowed ? 'Blokovanie reklám: vypnuté pre ' + st.host + ' (klik zapne, ⌥klik vypne všade)'
-      : st.host ? 'Blokovanie reklám: zapnuté (klik vypne pre ' + st.host + ', ⌥klik vypne všade)'
-      : 'Blokovanie reklám: zapnuté (⌥klik vypne všade)';
+    $('shield').title = (!st.adblock ? 'Blokovanie reklám: vypnuté všade' : st.siteAllowed ? 'Blokovanie reklám: vypnuté pre ' + st.host : 'Blokovanie reklám: zapnuté')
+      + ' (klik: štatistiky, ⌥klik: zapnúť/vypnúť všade)';
+    setBlocked(st.blocked || 0);
     $('dl').classList.toggle('busy', st.downloads > 0);
     for (const [id, sec] of [['bms', 'bookmarks'], ['hist', 'history'], ['dl', 'downloads'], ['settings', 'settings']])
       $(id).classList.toggle('on', st.panel === sec);

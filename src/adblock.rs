@@ -48,6 +48,12 @@ const DOMAINS: &[&str] = &[
 const HIDE: &str = "ins.adsbygoogle, .adsbygoogle, [id^='google_ads_iframe'], [id^='div-gpt-ad'], \
     iframe[src*='doubleclick.net'], .ad-banner, .advertisement, .adsbox, [data-ad-slot]";
 
+/// Anti-adblock defuser, injected at document start into every frame of every tab. WebKit's
+/// content blockers abort blocked loads (no empty 200/204 responses possible), so the page-side
+/// symptoms are neutralized instead: ad resource errors become `load`, ad fetches resolve with an
+/// empty 200, bait globals are set and hidden bait elements report a non-zero size.
+pub const DEFUSER: &str = include_str!("defuser.js");
+
 /// WebKit's content-blocker limit per rule list.
 const MAX_RULES: usize = 150_000;
 /// Bump when the conversion changes, so cached compiled lists are rebuilt.

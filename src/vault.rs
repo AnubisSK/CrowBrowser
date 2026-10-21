@@ -65,6 +65,8 @@ pub struct VaultData {
     pub session: Vec<String>,
     pub active: usize,
     pub settings: Option<Settings>,
+    /// Lifetime count of loads blocked by the ad blocker.
+    pub blocked_total: u64,
 }
 
 pub struct Vault {

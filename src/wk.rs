@@ -17,9 +17,12 @@ use objc2_web_kit::{
 use objc2::{
     encode::{Encoding, RefEncode},
     msg_send,
+    runtime::{AnyClass, Bool, Imp, Sel},
+    sel,
 };
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     ffi::c_void,
     ptr::NonNull,
     rc::Rc,
@@ -36,6 +39,11 @@ pub struct Config(Retained<WKWebViewConfiguration>);
 thread_local! {
     /// Compiled content-blocker lists by id (see `adblock::LISTS`).
     static RULES: RefCell<Vec<(&'static str, Retained<WKContentRuleList>)>> = const { RefCell::new(Vec::new()) };
+    /// Tab id of each watched WKWebView (by pointer), for content-blocker notifications.
+    static WATCHED: RefCell<HashMap<usize, u32>> = RefCell::new(HashMap::new());
+    /// Loads blocked per tab since the last `take_blocked`.
+    static BLOCKED: RefCell<HashMap<u32, u32>> = RefCell::new(HashMap::new());
+    static ON_BLOCKED: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
     /// URLs the user confirmed in the download prompt; consumed by the next download of that URL.
     static APPROVED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
@@ -74,7 +82,10 @@ const USER_AGENT: &str =
 
 /// Tab views (including adopted popups); the browser UI uses `ui_builder`.
 pub fn builder<'a>(config: Config) -> WebViewBuilder<'a> {
-    WebViewBuilder::new().with_webview_configuration(config.0).with_user_agent(USER_AGENT)
+    WebViewBuilder::new()
+        .with_webview_configuration(config.0)
+        .with_user_agent(USER_AGENT)
+        .with_initialization_script_for_main_only(crate::adblock::DEFUSER, false)
 }
 
 pub fn ui_builder<'a>() -> WebViewBuilder<'a> {
@@ -163,6 +174,77 @@ pub fn drop_rules(id: &'static str) {
     if let Some(store) = store() {
         unsafe { store.removeContentRuleListForIdentifier_completionHandler(Some(&NSString::from_str(id)), Some(&RcBlock::new(|_: *mut NSError| {}))) };
     }
+}
+
+/// Blocked loads are reported (and counted) on this platform.
+pub const BLOCK_STATS: bool = true;
+
+/// Called once per batch of blocked loads (collect them with `take_blocked`).
+pub fn on_blocked(f: impl Fn() + 'static) {
+    ON_BLOCKED.with(|o| *o.borrow_mut() = Some(Box::new(f)));
+}
+
+/// WebKit SPI (macOS 10.15.4+, `WKNavigationDelegatePrivate`): called for every content-blocker
+/// action. Content blockers have no public reporting API.
+fn rule_action_sel() -> Sel {
+    sel!(_webView:contentRuleListWithIdentifier:performedAction:forURL:)
+}
+
+unsafe extern "C-unwind" fn rule_action(
+    _this: *mut AnyObject,
+    _cmd: Sel,
+    web_view: *mut AnyObject,
+    _id: *mut AnyObject,
+    action: *mut AnyObject,
+    _url: *mut AnyObject,
+) {
+    let Some(action) = (unsafe { action.as_ref() }) else { return };
+    let blocked = unsafe {
+        let known: Bool = msg_send![action, respondsToSelector: sel!(blockedLoad)];
+        known.as_bool() && msg_send![action, blockedLoad]
+    };
+    let tab = WATCHED.with(|w| w.borrow().get(&(web_view as usize)).copied());
+    let (true, Some(tab)) = (blocked, tab) else { return };
+    let first = BLOCKED.with(|b| {
+        let mut b = b.borrow_mut();
+        let first = b.is_empty();
+        *b.entry(tab).or_default() += 1;
+        first
+    });
+    if first {
+        ON_BLOCKED.with(|f| {
+            if let Some(f) = &*f.borrow() {
+                f();
+            }
+        });
+    }
+}
+
+/// Reports loads blocked in `v` as tab `tab`: adds the SPI method to wry's navigation delegate
+/// class and re-sets the delegate, so WebKit re-reads which delegate methods exist.
+pub fn watch_blocked(v: &WebView, tab: u32) {
+    let wv = v.webview();
+    WATCHED.with(|w| w.borrow_mut().insert(Retained::as_ptr(&wv) as usize, tab));
+    unsafe {
+        let d: *mut AnyObject = msg_send![&*wv, navigationDelegate];
+        let Some(d) = d.as_ref() else { return };
+        let cls = d.class();
+        if cls.instance_method(rule_action_sel()).is_none() {
+            let imp: Imp = std::mem::transmute(rule_action as unsafe extern "C-unwind" fn(_, _, _, _, _, _));
+            objc2::ffi::class_addMethod(cls as *const AnyClass as *mut AnyClass, rule_action_sel(), imp, c"v@:@@@@".as_ptr());
+        }
+        let _: () = msg_send![&*wv, setNavigationDelegate: d];
+    }
+}
+
+pub fn forget_blocked(v: &WebView) {
+    let ptr = Retained::as_ptr(&v.webview()) as usize;
+    WATCHED.with(|w| w.borrow_mut().remove(&ptr));
+}
+
+/// Blocked loads per tab since the last call.
+pub fn take_blocked() -> Vec<(u32, u32)> {
+    BLOCKED.with(|b| b.borrow_mut().drain().collect())
 }
 
 pub fn export_cookies(store: &Store, done: impl Fn(Vec<CookieRec>) + 'static) {

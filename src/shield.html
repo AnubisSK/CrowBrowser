@@ -1,0 +1,119 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #222226; --line: #33333a; --fg: #e6e6e9; --mute: #9a9aa3; --hover: #2c2c32; --input: #2a2a2f;
+    --accent: #5b8def; --tile: #1b1b1f;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; --bg: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76; --hover: #f2f2f5; --input: #f0f0f3; --tile: #f6f6f8; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font: 13px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; color: var(--fg);
+    user-select: none; -webkit-user-select: none; cursor: default;
+  }
+  #card { background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  header svg { width: 22px; height: 22px; flex: none; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; color: var(--mute); }
+  header.on svg { color: var(--accent); fill: rgba(91, 141, 239, .18); }
+  .who { flex: 1; min-width: 0; }
+  .host { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .state { color: var(--mute); font-size: 12px; margin-top: 2px; }
+  header.on .state { color: var(--accent); }
+  /* Switch */
+  .sw { position: relative; width: 38px; height: 22px; border-radius: 11px; background: var(--input); border: 1px solid var(--line); flex: none; transition: background .15s; }
+  .sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: var(--mute); transition: transform .15s, background .15s; }
+  .sw.on { background: var(--accent); border-color: transparent; }
+  .sw.on::after { transform: translateX(16px); background: #fff; }
+  .sw.dis { opacity: .4; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 14px 16px; }
+  .tile { background: var(--tile); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .tile.big { grid-column: 1 / -1; }
+  .num { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tile.big .num { font-size: 32px; color: var(--accent); }
+  .lbl { color: var(--mute); font-size: 12px; margin-top: 2px; }
+  .note { padding: 0 16px 12px; color: var(--mute); font-size: 11px; line-height: 1.4; }
+  footer { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); }
+  .btn { font: inherit; color: var(--fg); border: 1px solid var(--line); background: var(--input); padding: 4px 10px; border-radius: 7px; white-space: nowrap; }
+  .btn:hover { border-color: var(--mute); }
+  .spacer { flex: 1; }
+</style>
+</head>
+<body>
+<div id="card"></div>
+<script>
+  let D = /*DATA*/;
+  const send = (m) => window.ipc.postMessage(m);
+  const card = document.getElementById('card');
+
+  function h(tag, props = {}, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k.startsWith('on')) el[k] = v; else if (k === 'class') el.className = v; else el.setAttribute(k, v);
+    }
+    for (const k of kids.flat()) if (k != null) el.append(k);
+    return el;
+  }
+  function shield() {
+    const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    s.setAttribute('viewBox', '0 0 24 24');
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('d', 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z');
+    s.append(p);
+    return s;
+  }
+  const num = (n) => n.toLocaleString('sk');
+  function bytes(b) {
+    if (b < 1024 * 1024) return (b / 1024).toLocaleString('sk', { maximumFractionDigits: 0 }) + ' kB';
+    if (b < 1024 ** 3) return (b / 1024 ** 2).toLocaleString('sk', { maximumFractionDigits: 1 }) + ' MB';
+    return (b / 1024 ** 3).toLocaleString('sk', { maximumFractionDigits: 2 }) + ' GB';
+  }
+  function time(ms) {
+    if (ms < 1000) return ms + ' ms';
+    const s = ms / 1000;
+    if (s < 60) return s.toLocaleString('sk', { maximumFractionDigits: 1 }) + ' s';
+    if (s < 3600) return (s / 60).toLocaleString('sk', { maximumFractionDigits: 1 }) + ' min';
+    return (s / 3600).toLocaleString('sk', { maximumFractionDigits: 1 }) + ' h';
+  }
+  const tile = (value, label, big) => h('div', { class: 'tile' + (big ? ' big' : '') }, h('div', { class: 'num' }, value), h('div', { class: 'lbl' }, label));
+
+  function render() {
+    const on = D.is_enabled && !D.allowed;
+    const sw = h('div', { class: 'sw' + (on ? ' on' : '') + (D.host || !D.is_enabled ? '' : ' dis'), role: 'switch', title: on ? 'Vypnúť pre tento web' : 'Zapnúť' });
+    sw.onclick = () => {
+      if (!D.is_enabled) send('toggle-adblock');
+      else if (D.host) send('adblock-allow:' + D.host);
+    };
+    const state = !D.is_enabled ? 'Blokovanie je vypnuté všade' : D.allowed ? 'Vypnuté pre tento web' : 'Reklamy a sledovače sa blokujú';
+    const out = [h('header', { class: on ? 'on' : '' }, shield(),
+      h('div', { class: 'who' }, h('div', { class: 'host' }, D.host || 'Táto stránka'), h('div', { class: 'state' }, state)), sw)];
+    if (D.available) {
+      out.push(h('div', { class: 'grid' },
+        tile(num(D.tab_blocked), 'Zablokované reklamy a sledovače na tejto stránke', true),
+        tile(bytes(D.tab_bytes), 'Ušetrené dáta'),
+        tile(time(D.tab_ms), 'Ušetrený čas')));
+      out.push(h('div', { class: 'note' },
+        'Celkovo: ' + num(D.total_blocked) + ' zablokovaných · ' + bytes(D.total_bytes) + ' · ' + time(D.total_ms) +
+        '. Dáta a čas sú odhad (50 kB a 50 ms na požiadavku).'));
+    } else {
+      out.push(h('div', { class: 'note', style: 'padding-top:12px' }, 'Počet zablokovaných požiadaviek WebKitGTK neposkytuje, blokovanie však funguje.'));
+    }
+    out.push(h('footer', {},
+      h('button', { class: 'btn', onclick: () => send('toggle-adblock') }, D.is_enabled ? 'Vypnúť všade' : 'Zapnúť všade'),
+      h('div', { class: 'spacer' }),
+      h('button', { class: 'btn', onclick: () => send('site-settings') }, 'Nastavenia')));
+    card.replaceChildren(...out);
+    requestAnimationFrame(() => send('site-size:' + Math.ceil(document.body.scrollHeight)));
+  }
+  function update(d) { D = d; render(); }
+
+  document.onkeydown = (e) => { if (e.key === 'Escape') send('site-close'); };
+  window.onblur = () => send('site-close');
+  render();
+</script>
+</body>
+</html>

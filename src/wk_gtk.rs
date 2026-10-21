@@ -167,7 +167,11 @@ const USER_AGENT: &str =
 /// `incognito` only stops wry from creating a throwaway *persistent* context (which would write
 /// HSTS/storage files to disk); the related view decides the context actually used.
 pub fn builder<'a>(config: Config) -> WebViewBuilder<'a> {
-    WebViewBuilder::new().with_incognito(true).with_related_view(config.0).with_user_agent(USER_AGENT)
+    WebViewBuilder::new()
+        .with_incognito(true)
+        .with_related_view(config.0)
+        .with_user_agent(USER_AGENT)
+        .with_initialization_script_for_main_only(crate::adblock::DEFUSER, false)
 }
 
 pub fn ui_builder<'a>() -> WebViewBuilder<'a> {
@@ -345,6 +349,19 @@ fn same_site_str(p: soup::SameSitePolicy) -> Option<String> {
         soup::SameSitePolicy::Strict => Some("strict".into()),
         _ => None,
     }
+}
+
+/// WebKitGTK has no API reporting content-filter actions: blocked loads are not counted.
+pub const BLOCK_STATS: bool = false;
+
+pub fn on_blocked(_f: impl Fn() + 'static) {}
+
+pub fn watch_blocked(_v: &WebView, _tab: u32) {}
+
+pub fn forget_blocked(_v: &WebView) {}
+
+pub fn take_blocked() -> Vec<(u32, u32)> {
+    Vec::new()
 }
 
 pub fn export_cookies(store: &Store, done: impl Fn(Vec<CookieRec>) + 'static) {
@@ -682,6 +699,7 @@ pub fn ui_html(html: String) -> String {
         ("⌘", "Ctrl+"),
         ("Zobraziť vo Finderi", "Zobraziť v priečinku"),
         ("ukáže vo Finderi", "ukáže v správcovi súborov"),
+        ("⌥klik", "Alt+klik"),
         ("~/Library/Application Support/Crow/", "~/.local/share/crow/"),
     ];
     let mut html = html;

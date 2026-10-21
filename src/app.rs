@@ -39,6 +39,9 @@ const FAV_TRIES: u8 = 8;
 const FAV_MAX: usize = 48 * 1024;
 const FAV_READ: &str = "window.__crowIcon || ''";
 const MAX_ALLOW: usize = 1000;
+/// Shield estimates per blocked load (typical ad/tracker response size and request latency).
+const BLOCK_BYTES: u64 = 50 * 1024;
+const BLOCK_MS: u64 = 50;
 
 const FIND_JS: &str = r#"(function (q, dir) {
   const sel = getSelection();
@@ -99,6 +102,8 @@ pub enum UserEvent {
     /// List has no sources (disabled).
     RulesOff(&'static str),
     RulesReady,
+    /// Content blocker blocked loads (collected via `wk::take_blocked`).
+    Blocked,
     /// Result of a filter-list download the user asked for.
     RulesNote(String),
     /// Result of `FAV_READ` in a tab (JSON string).
@@ -179,7 +184,9 @@ impl TabCtx {
         if let Some(url) = url {
             b = b.with_url(url);
         }
-        wk::attach(b, rect, &self.window)
+        let view = wk::attach(b, rect, &self.window)?;
+        wk::watch_blocked(&view, id);
+        Ok(view)
     }
 
     /// window.open / target=_blank: a real WKWebView keeping `window.opener`
@@ -233,11 +240,20 @@ struct Tab {
     fav_tries: u8,
     /// Content blocker state last applied to `view` (None = unknown, apply on next check).
     blocking: Option<bool>,
+    /// Loads blocked on the current page.
+    blocked: u32,
 }
 
 impl Tab {
     fn new(id: u32, url: String, view: Option<WebView>) -> Self {
-        Self { id, url, title: String::new(), view, hidden_since: Instant::now(), loading: false, icon: String::new(), fav_tries: 0, blocking: None }
+        Self { id, url, title: String::new(), view, hidden_since: Instant::now(), loading: false, icon: String::new(), fav_tries: 0, blocking: None, blocked: 0 }
+    }
+
+    /// Frees the page (unload/close); stops its blocked-load reporting.
+    fn drop_view(&mut self) {
+        if let Some(v) = self.view.take() {
+            wk::forget_blocked(&v);
+        }
     }
 
     fn label(&self) -> String {
@@ -267,8 +283,9 @@ struct Session {
     cookies_ok: bool,
     closed: Vec<String>,
     asks: Vec<Ask>,
-    /// Site-info popover (lock icon), its left edge and content height.
+    /// Popover under the address bar: site info (lock icon) or ad-block shield; left edge, height.
     site: Option<WebView>,
+    shield_open: bool,
     site_x: f64,
     site_h: f64,
     site_closed: Instant,
@@ -387,6 +404,7 @@ impl Session {
             "active": self.active,
             "url": url,
             "loading": cur.is_some_and(|t| t.loading),
+            "blocked": cur.map_or(0, |t| t.blocked),
             "bookmarked": self.data.bookmarks.iter().any(|b| b.url == url),
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
             "panel": if self.panel.is_some() { self.panel_section.as_str() } else { "" },
@@ -401,6 +419,32 @@ impl Session {
             })),
         });
         self.eval(&format!("render({state})"));
+    }
+
+    /// Shield popover data (`get-adblock-stats`): current site and lifetime counts with estimates.
+    fn shield_data(&self, cfg: &Settings) -> serde_json::Value {
+        let url = self.cur().map_or("", |t| t.url.as_str());
+        let host = if url.starts_with("http") { host_of(url) } else { String::new() };
+        let tab = self.cur().map_or(0, |t| t.blocked) as u64;
+        let total = self.data.blocked_total;
+        json!({
+            "host": host,
+            "is_enabled": cfg.adblock,
+            "allowed": cfg.allowed(&host),
+            "available": wk::BLOCK_STATS,
+            "tab_blocked": tab,
+            "tab_bytes": tab * BLOCK_BYTES,
+            "tab_ms": tab * BLOCK_MS,
+            "total_blocked": total,
+            "total_bytes": total * BLOCK_BYTES,
+            "total_ms": total * BLOCK_MS,
+        })
+    }
+
+    fn push_shield(&self, cfg: &Settings) {
+        if let (Some(v), true) = (&self.site, self.shield_open) {
+            let _ = v.evaluate_script(&format!("update({})", self.shield_data(cfg)));
+        }
     }
 
     fn panel_data(&self, cfg: &Settings, section: &str) -> String {
@@ -445,6 +489,10 @@ pub struct App {
 impl App {
     pub fn new(window: Window, proxy: EventLoopProxy<UserEvent>) -> Self {
         refresh_rules(proxy.clone(), Vec::new(), false);
+        let p = proxy.clone();
+        wk::on_blocked(move || {
+            let _ = p.send_event(UserEvent::Blocked);
+        });
         #[cfg(target_os = "linux")]
         {
             let (p0, p1, p2) = (proxy.clone(), proxy.clone(), proxy.clone());
@@ -571,6 +619,20 @@ impl App {
                 adblock::forget(id);
                 self.handle(UserEvent::RulesReady);
             }
+            UserEvent::Blocked => {
+                let blocked = wk::take_blocked();
+                let Some(s) = self.s.as_mut() else { return };
+                for (id, n) in blocked {
+                    if let Some(i) = s.tab_idx(id) {
+                        s.tabs[i].blocked += n;
+                        s.data.blocked_total += n as u64;
+                        s.dirty = true;
+                    }
+                }
+                let n = s.cur().map_or(0, |t| t.blocked);
+                s.eval(&format!("setBlocked({n})"));
+                s.push_shield(&self.cfg);
+            }
             UserEvent::RulesNote(msg) => {
                 if let Some(s) = &self.s {
                     s.toast(&msg);
@@ -633,7 +695,7 @@ impl App {
             let mut changed = false;
             for (i, t) in s.tabs.iter_mut().enumerate() {
                 if i != s.active && t.view.is_some() && t.hidden_since.elapsed() >= limit {
-                    t.view = None;
+                    t.drop_view();
                     t.loading = false;
                     changed = true;
                 }
@@ -736,6 +798,7 @@ impl App {
             closed: Vec::new(),
             asks: Vec::new(),
             site: None,
+            shield_open: false,
             site_x: 0.0,
             site_h: 0.0,
             site_closed: Instant::now(),
@@ -837,11 +900,11 @@ impl App {
         if idx >= s.tabs.len() {
             return;
         }
-        let tab = s.tabs.remove(idx);
+        let mut tab = s.tabs.remove(idx);
         if tab.url.starts_with("http") {
             s.closed.push(tab.url.clone());
         }
-        drop(tab);
+        tab.drop_view();
         s.dirty = true;
         if s.tabs.is_empty() {
             s.active = 0;
@@ -884,8 +947,15 @@ impl App {
             // Anti-spoofing: the address bar keeps the last finished URL until this load
             // completes; only the spinner changes.
             t.loading = true;
+            // New page: per-page blocked count starts over.
+            t.blocked = 0;
             if i == s.active {
-                s.site = None; // describes the page being left
+                if s.shield_open {
+                    s.push_shield(&self.cfg); // stays open across its own on/off reload
+                } else {
+                    s.site = None; // describes the page being left
+                }
+                s.eval("setBlocked(0)");
             }
             let js = format!("setLoading({id},true)");
             return s.eval(&js);
@@ -971,7 +1041,9 @@ impl App {
         let Some(s) = self.s.as_ref() else { return };
         s.sync(&self.cfg);
         s.refresh_panel(&self.cfg);
-        if s.site.is_some() {
+        if s.shield_open {
+            s.push_shield(&self.cfg);
+        } else if s.site.is_some() {
             self.request_site_cookies(false);
         }
         self.persist(After::Nothing);
@@ -1489,8 +1561,22 @@ impl App {
                     return;
                 }
                 s.site_x = arg.parse().unwrap_or(150.0);
+                s.shield_open = false;
                 self.request_site_cookies(false);
             }
+            // Shield popover: blocked counts and the per-site switch (same toggle rule as site-info).
+            "shield-open" => {
+                if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
+                    return;
+                }
+                s.site_x = arg.parse().unwrap_or(0.0);
+                let data = s.shield_data(&self.cfg).to_string().replace("</", "<\\/");
+                let html = include_str!("shield.html").replace("/*DATA*/", &data);
+                let h = if s.site_h > 0.0 { s.site_h } else { 300.0 };
+                s.site = self.ctx.ui_view(html, site_rect(&self.ctx.window, s.site_x, h));
+                s.shield_open = true;
+            }
+            "get-adblock-stats" => s.push_shield(&self.cfg),
             "site-clear" => self.request_site_cookies(true),
             "site-close" => {
                 if s.site.take().is_some() {
