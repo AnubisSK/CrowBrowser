@@ -29,7 +29,9 @@ const UPD_H: f64 = 36.0;
 const SITE_W: f64 = 360.0;
 const BG_DARK: RGBA = (0x1f, 0x1f, 0x23, 0xff);
 const BG_LIGHT: RGBA = (0xf4, 0xf4, 0xf6, 0xff);
-const ZOOM_STEPS: &[f64] = &[0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
+const ZOOM_STEPS: &[f64] = &[
+    0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+];
 const TICK: Duration = Duration::from_secs(30);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Max wait for WebKit to confirm the cookie import before the session starts anyway.
@@ -82,39 +84,81 @@ const FAV_JS: &str = r#"(function () {
 pub enum UserEvent {
     Menu(String),
     Ipc(String),
-    PageLoad { tab: u32, started: bool, url: String },
-    Title { tab: u32, title: String },
+    PageLoad {
+        tab: u32,
+        started: bool,
+        url: String,
+    },
+    Title {
+        tab: u32,
+        title: String,
+    },
     NewTab(String),
     AdoptTab(u32),
     /// A download wants to write to disk; held until the user answers the toolbar prompt.
     /// `key` identifies the pending download inside `wk`, `tab` the requesting tab (if known).
-    DownloadAsk { key: u32, tab: Option<u32>, url: String, name: String },
-    DownloadStarted { url: String, path: PathBuf },
-    DownloadDone { url: String, ok: bool },
+    DownloadAsk {
+        key: u32,
+        tab: Option<u32>,
+        url: String,
+        name: String,
+    },
+    DownloadStarted {
+        url: String,
+        path: PathBuf,
+    },
+    DownloadDone {
+        url: String,
+        ok: bool,
+    },
     FindResult(String),
     /// Exported cookies for a save; `u64` = cookie epoch when the export was requested.
     Cookies(Vec<CookieRec>, After, u64),
     /// Fresh cookie list for the site-info popover; `clear` = delete the site's cookies first.
-    SiteCookies { cookies: Vec<CookieRec>, clear: bool },
+    SiteCookies {
+        cookies: Vec<CookieRec>,
+        clear: bool,
+    },
     CookiesRestored,
     /// Content-blocker list `id` is unchanged since WebKit compiled it: load, don't rebuild.
-    RulesCached { id: &'static str, hash: String },
+    RulesCached {
+        id: &'static str,
+        hash: String,
+    },
     /// Freshly converted part `id` of a filter group (`parts` lists in total), for WebKit.
-    RulesBuilt { id: &'static str, hash: String, json: String, parts: usize },
+    RulesBuilt {
+        id: &'static str,
+        hash: String,
+        json: String,
+        parts: usize,
+    },
     /// List has no sources (disabled).
     RulesOff(&'static str),
     RulesReady,
     /// Content blocker blocked loads (collected via `wk::take_blocked`).
     Blocked,
     /// Live cookies for the logins panel; `revoke` = delete this site's cookies first.
-    VaultSessions { cookies: Vec<CookieRec>, revoke: Option<String> },
+    VaultSessions {
+        cookies: Vec<CookieRec>,
+        revoke: Option<String>,
+    },
     /// Navigation refused by WebKit because of the server certificate.
-    TlsError { tab: u32, url: String, reasons: Vec<&'static str> },
+    TlsError {
+        tab: u32,
+        url: String,
+        reasons: Vec<&'static str>,
+    },
     /// Result of a filter-list download the user asked for.
     RulesNote(String),
     /// Result of `FAV_READ` in a tab (JSON string).
-    Icon { tab: u32, data: String },
-    Update { result: Result<Option<update::Info>, String>, manual: bool },
+    Icon {
+        tab: u32,
+        data: String,
+    },
+    Update {
+        result: Result<Option<update::Info>, String>,
+        manual: bool,
+    },
     UpdateSaved(Option<PathBuf>),
 }
 
@@ -167,7 +211,11 @@ impl TabCtx {
             .with_background_color(bg_of(&self.window))
             .with_on_page_load_handler(move |ev, url| {
                 let started = matches!(ev, PageLoadEvent::Started);
-                let _ = p1.send_event(UserEvent::PageLoad { tab: id, started, url });
+                let _ = p1.send_event(UserEvent::PageLoad {
+                    tab: id,
+                    started,
+                    url,
+                });
             })
             .with_document_title_changed_handler(move |title| {
                 let _ = p2.send_event(UserEvent::Title { tab: id, title });
@@ -180,17 +228,28 @@ impl TabCtx {
             b = b
                 .with_download_started_handler(move |url, path| {
                     // WebKit's suggested name goes through the same sanitizing as on Linux.
-                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                     let name = download::sanitize(&name);
                     if wk::take_approved(&url) {
                         if let Some(dir) = path.parent().map(Path::to_path_buf) {
                             *path = download::unique_path(&dir, &name);
                         }
-                        let _ = p3.send_event(UserEvent::DownloadStarted { url, path: path.clone() });
+                        let _ = p3.send_event(UserEvent::DownloadStarted {
+                            url,
+                            path: path.clone(),
+                        });
                         return true;
                     }
                     // No drive-by downloads: cancel, ask the user, retry on approval.
-                    let _ = p3.send_event(UserEvent::DownloadAsk { key: 0, tab: Some(id), url, name });
+                    let _ = p3.send_event(UserEvent::DownloadAsk {
+                        key: 0,
+                        tab: Some(id),
+                        url,
+                        name,
+                    });
                     false
                 })
                 .with_download_completed_handler(move |url, _, ok| {
@@ -212,7 +271,13 @@ impl TabCtx {
         let id = self.next();
         let rect = content_rect(&self.window, TABS_H + NAV_H);
         // Rules go on before WebKit navigates the popup (adoption as a tab happens later).
-        match self.build(id, None, wk::popup_config(features), rect, self.adblock.get()) {
+        match self.build(
+            id,
+            None,
+            wk::popup_config(features),
+            rect,
+            self.adblock.get(),
+        ) {
             Ok(view) => {
                 let response = wk::popup_response(&view);
                 PENDING.with(|p| p.borrow_mut().push((id, view)));
@@ -282,7 +347,20 @@ impl Drop for Tab {
 
 impl Tab {
     fn new(id: u32, url: String, view: Option<WebView>) -> Self {
-        Self { id, url, title: String::new(), view, hidden_since: Instant::now(), loading: false, icon: String::new(), fav_tries: 0, blocking: None, blocked: 0, tls: "", tls_error: false }
+        Self {
+            id,
+            url,
+            title: String::new(),
+            view,
+            hidden_since: Instant::now(),
+            loading: false,
+            icon: String::new(),
+            fav_tries: 0,
+            blocking: None,
+            blocked: 0,
+            tls: "",
+            tls_error: false,
+        }
     }
 
     /// Frees the page (unload/close/lock); stops its reporting and releases the view.
@@ -296,8 +374,14 @@ impl Tab {
         if !self.title.trim().is_empty() {
             return self.title.clone();
         }
-        let host = self.url.split("://").nth(1).and_then(|r| r.split('/').next());
-        host.filter(|h| !h.is_empty()).unwrap_or("Nová karta").to_string()
+        let host = self
+            .url
+            .split("://")
+            .nth(1)
+            .and_then(|r| r.split('/').next());
+        host.filter(|h| !h.is_empty())
+            .unwrap_or("Nová karta")
+            .to_string()
     }
 }
 
@@ -466,7 +550,11 @@ impl Session {
     /// Shield popover data (`get-adblock-stats`): current site and lifetime counts with estimates.
     fn shield_data(&self, cfg: &Settings) -> serde_json::Value {
         let url = self.cur().map_or("", |t| t.url.as_str());
-        let host = if url.starts_with("http") { host_of(url) } else { String::new() };
+        let host = if url.starts_with("http") {
+            host_of(url)
+        } else {
+            String::new()
+        };
         let tab = self.cur().map_or(0, |t| t.blocked) as u64;
         let total = self.data.blocked_total;
         json!({
@@ -545,7 +633,12 @@ impl App {
             wk::watch_downloads(
                 &wk::new_store(),
                 move |key, url, name| {
-                    let _ = p0.send_event(UserEvent::DownloadAsk { key, tab: None, url, name });
+                    let _ = p0.send_event(UserEvent::DownloadAsk {
+                        key,
+                        tab: None,
+                        url,
+                        name,
+                    });
                 },
                 move |url, path| {
                     let _ = p1.send_event(UserEvent::DownloadStarted { url, path });
@@ -555,7 +648,12 @@ impl App {
                 },
             );
         }
-        let ctx = TabCtx { window: Rc::new(window), proxy, next_id: Rc::new(Cell::new(1)), adblock: Rc::new(Cell::new(true)) };
+        let ctx = TabCtx {
+            window: Rc::new(window),
+            proxy,
+            next_id: Rc::new(Cell::new(1)),
+            adblock: Rc::new(Cell::new(true)),
+        };
         let mut app = Self {
             ctx,
             cfg: Settings::default(), // real settings live in the vault
@@ -587,7 +685,10 @@ impl App {
 
     pub fn wake(&self) -> Instant {
         let fav = self.s.as_ref().and_then(|s| s.fav_due);
-        [self.quit_at, self.restore_by, fav].into_iter().flatten().fold(self.next_tick, Instant::min)
+        [self.quit_at, self.restore_by, fav]
+            .into_iter()
+            .flatten()
+            .fold(self.next_tick, Instant::min)
     }
 
     pub fn resize(&self) {
@@ -626,12 +727,20 @@ impl App {
             UserEvent::Title { tab, title } => self.title(tab, title),
             UserEvent::NewTab(url) => self.open_tab(url),
             UserEvent::AdoptTab(id) => self.adopt(id),
-            UserEvent::DownloadAsk { key, tab, url, name } => self.download_ask(key, tab, url, name),
+            UserEvent::DownloadAsk {
+                key,
+                tab,
+                url,
+                name,
+            } => self.download_ask(key, tab, url, name),
             UserEvent::DownloadStarted { url, path } => self.download_started(url, path),
             UserEvent::DownloadDone { url, ok } => self.download_done(url, ok),
             UserEvent::FindResult(r) => {
                 if let Some(s) = &self.s {
-                    s.eval(&format!("findCount({})", r.trim().parse::<u32>().unwrap_or(0)));
+                    s.eval(&format!(
+                        "findCount({})",
+                        r.trim().parse::<u32>().unwrap_or(0)
+                    ));
                 }
             }
             UserEvent::Cookies(c, after, epoch) => self.saved(c, after, epoch),
@@ -647,11 +756,20 @@ impl App {
                 let fail = move || {
                     let (p, hash) = (p2.clone(), hash.clone());
                     std::thread::spawn(move || {
-                        let Some((g, i)) = adblock::group_of(id) else { return };
-                        let Some(jsons) = adblock::build(g) else { return };
+                        let Some((g, i)) = adblock::group_of(id) else {
+                            return;
+                        };
+                        let Some(jsons) = adblock::build(g) else {
+                            return;
+                        };
                         let parts = jsons.len();
                         let e = match jsons.into_iter().nth(i) {
-                            Some(json) => UserEvent::RulesBuilt { id, hash, json, parts },
+                            Some(json) => UserEvent::RulesBuilt {
+                                id,
+                                hash,
+                                json,
+                                parts,
+                            },
                             None => UserEvent::RulesOff(id),
                         };
                         let _ = p.send_event(e);
@@ -659,7 +777,12 @@ impl App {
                 };
                 wk::load_rules(id, ok, fail);
             }
-            UserEvent::RulesBuilt { id, hash, json, parts } => {
+            UserEvent::RulesBuilt {
+                id,
+                hash,
+                json,
+                parts,
+            } => {
                 let p = self.ctx.proxy.clone();
                 wk::compile_rules(id, json, move || {
                     adblock::mark_compiled(id, &hash, parts);
@@ -783,7 +906,11 @@ impl App {
             }
             "fullscreen" => {
                 let w = &self.ctx.window;
-                w.set_fullscreen(if w.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
+                w.set_fullscreen(if w.fullscreen().is_some() {
+                    None
+                } else {
+                    Some(Fullscreen::Borderless(None))
+                });
             }
             "unlock" | "create" | "reset" if self.s.is_none() => self.lock_cmd(name, arg),
             _ if self.s.as_ref().is_some_and(|s| s.ready) => self.session_cmd(name, arg),
@@ -818,7 +945,11 @@ impl App {
 
     fn start(&mut self, vault: Vault, mut data: VaultData) {
         let legacy = data.settings.is_none();
-        self.cfg = data.settings.take().or_else(Settings::take_legacy).unwrap_or_default();
+        self.cfg = data
+            .settings
+            .take()
+            .or_else(Settings::take_legacy)
+            .unwrap_or_default();
         self.ctx.adblock.set(self.cfg.adblock);
         let w = &self.ctx.window;
         wk::set_theme(w, theme_of(&self.cfg.theme));
@@ -875,8 +1006,16 @@ impl App {
         }
         s.ready = true;
         let restore = self.cfg.startup == "last" && !s.data.session.is_empty();
-        let urls = if restore { s.data.session.clone() } else { vec![self.cfg.homepage.clone()] };
-        let active = if restore { s.data.active.min(urls.len() - 1) } else { 0 };
+        let urls = if restore {
+            s.data.session.clone()
+        } else {
+            vec![self.cfg.homepage.clone()]
+        };
+        let active = if restore {
+            s.data.active.min(urls.len() - 1)
+        } else {
+            0
+        };
         // Only the active tab is loaded; the rest load on first click.
         for url in urls {
             s.tabs.push(Tab::new(self.ctx.next(), url, None));
@@ -913,7 +1052,10 @@ impl App {
         if tab.view.is_none() {
             let on = blocks(&self.cfg, &tab.url);
             let config = wk::config(&s.store, on);
-            tab.view = self.ctx.build(tab.id, Some(&tab.url), config, rect, on).ok();
+            tab.view = self
+                .ctx
+                .build(tab.id, Some(&tab.url), config, rect, on)
+                .ok();
             tab.blocking = Some(on);
             if let Some(v) = &tab.view {
                 let _ = v.zoom(s.zoom);
@@ -941,7 +1083,9 @@ impl App {
             let i = p.iter().position(|(pid, _)| *pid == id)?;
             Some(p.remove(i).1)
         });
-        let (Some(view), Some(s)) = (view, self.s.as_mut()) else { return };
+        let (Some(view), Some(s)) = (view, self.s.as_mut()) else {
+            return;
+        };
         let _ = view.zoom(s.zoom);
         let mut tab = Tab::new(id, String::new(), Some(view));
         apply_rules(&self.cfg, &mut tab, "");
@@ -1051,7 +1195,11 @@ impl App {
             let title = t.title.clone();
             let h = &mut s.data.history;
             if h.last().is_none_or(|e| e.url != url) {
-                h.push(HistoryEntry { url, title, time: vault::now_ms() });
+                h.push(HistoryEntry {
+                    url,
+                    title,
+                    time: vault::now_ms(),
+                });
                 if h.len() > MAX_HISTORY {
                     h.drain(..h.len() - MAX_HISTORY);
                 }
@@ -1103,9 +1251,13 @@ impl App {
         }
         let t = &mut s.tabs[i];
         t.fav_tries = 0;
-        let valid = data.strip_prefix("data:image/png;base64,").is_some_and(|b| {
-            b.len() <= FAV_MAX && b.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
-        });
+        let valid = data
+            .strip_prefix("data:image/png;base64,")
+            .is_some_and(|b| {
+                b.len() <= FAV_MAX
+                    && b.bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
+            });
         let icon = if valid { data } else { String::new() };
         if t.icon != icon {
             t.icon = icon;
@@ -1152,7 +1304,10 @@ impl App {
         let p = self.ctx.proxy.clone();
         let revoke = RefCell::new(revoke);
         wk::export_cookies(&s.store, move |cookies| {
-            let _ = p.send_event(UserEvent::VaultSessions { cookies, revoke: revoke.borrow_mut().take() });
+            let _ = p.send_event(UserEvent::VaultSessions {
+                cookies,
+                revoke: revoke.borrow_mut().take(),
+            });
         });
     }
 
@@ -1162,7 +1317,9 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         if let Some(site) = revoke {
             s.cookie_epoch += 1;
-            let (gone, keep): (Vec<_>, Vec<_>) = cookies.into_iter().partition(|c| site_of(&c.domain) == site);
+            let (gone, keep): (Vec<_>, Vec<_>) = cookies
+                .into_iter()
+                .partition(|c| site_of(&c.domain) == site);
             // Vault first (atomic .vault.tmp -> rename in `save_now`), then WebKit's live store.
             if s.cookies_ok {
                 s.data.cookies = keep;
@@ -1178,7 +1335,10 @@ impl App {
             return wk::delete_cookies(&s.store, &gone, move || {
                 let p = p.clone();
                 wk::export_cookies(&store, move |cookies| {
-                    let _ = p.send_event(UserEvent::VaultSessions { cookies, revoke: None });
+                    let _ = p.send_event(UserEvent::VaultSessions {
+                        cookies,
+                        revoke: None,
+                    });
                 });
             });
         }
@@ -1206,7 +1366,12 @@ impl App {
                 json!({ "domain": domain, "username": null, "has_session": has_session, "cookies": count, "last_used": used })
             })
             .collect();
-        list.sort_by_key(|e| (!e["has_session"].as_bool().unwrap_or(false), std::cmp::Reverse(e["last_used"].as_u64().unwrap_or(0))));
+        list.sort_by_key(|e| {
+            (
+                !e["has_session"].as_bool().unwrap_or(false),
+                std::cmp::Reverse(e["last_used"].as_u64().unwrap_or(0)),
+            )
+        });
         if let Some(p) = &s.panel {
             let _ = p.evaluate_script(&format!("setSessions({})", serde_json::Value::Array(list)));
         }
@@ -1227,13 +1392,18 @@ impl App {
         let host = host_of(&url);
         if clear {
             s.cookie_epoch += 1;
-            let (site, rest): (Vec<_>, Vec<_>) = cookies.into_iter().partition(|c| cookie_for(&host, &c.domain));
+            let (site, rest): (Vec<_>, Vec<_>) = cookies
+                .into_iter()
+                .partition(|c| cookie_for(&host, &c.domain));
             s.dirty = true;
             let p = self.ctx.proxy.clone();
             let rest = RefCell::new(Some(rest));
             return wk::delete_cookies(&s.store, &site, move || {
                 if let Some(cookies) = rest.take() {
-                    let _ = p.send_event(UserEvent::SiteCookies { cookies, clear: false });
+                    let _ = p.send_event(UserEvent::SiteCookies {
+                        cookies,
+                        clear: false,
+                    });
                 }
             });
         }
@@ -1241,7 +1411,12 @@ impl App {
             .view()
             .filter(|_| url.starts_with("https:"))
             .and_then(wk::cert_chain)
-            .map(|(chain, errors)| (chain.iter().filter_map(|d| cert::summarize(d)).collect(), errors))
+            .map(|(chain, errors)| {
+                (
+                    chain.iter().filter_map(|d| cert::summarize(d)).collect(),
+                    errors,
+                )
+            })
             .unwrap_or((Vec::new(), Vec::new()));
         let data = json!({
             "url": url,
@@ -1258,9 +1433,12 @@ impl App {
             let _ = v.evaluate_script(&format!("update({data})"));
             return;
         }
-        let html = include_str!("siteinfo.html").replace("/*DATA*/", &data.to_string().replace("</", "<\\/"));
+        let html = include_str!("siteinfo.html")
+            .replace("/*DATA*/", &data.to_string().replace("</", "<\\/"));
         let h = if s.site_h > 0.0 { s.site_h } else { 260.0 };
-        s.site = self.ctx.ui_view(html, site_rect(&self.ctx.window, s.site_x, h));
+        s.site = self
+            .ctx
+            .ui_view(html, site_rect(&self.ctx.window, s.site_x, h));
     }
 
     fn download_ask(&mut self, key: u32, tab: Option<u32>, url: String, name: String) {
@@ -1270,7 +1448,14 @@ impl App {
         let id = self.ctx.next();
         let name = download::sanitize(&name);
         let risk = download::risk(&name);
-        s.asks.push(Ask { id, key, tab, url, name, risk });
+        s.asks.push(Ask {
+            id,
+            key,
+            tab,
+            url,
+            name,
+            risk,
+        });
         if s.asks.len() == 1 {
             self.resize();
         }
@@ -1281,7 +1466,10 @@ impl App {
 
     fn download_started(&mut self, url: String, path: PathBuf) {
         let Some(s) = self.s.as_mut() else { return };
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         s.data.downloads.push(Download {
             url,
             path: path.to_string_lossy().into_owned(),
@@ -1296,7 +1484,13 @@ impl App {
 
     fn download_done(&mut self, url: String, ok: bool) {
         let Some(s) = self.s.as_mut() else { return };
-        let Some(d) = s.data.downloads.iter_mut().rev().find(|d| d.url == url && d.state == "active") else {
+        let Some(d) = s
+            .data
+            .downloads
+            .iter_mut()
+            .rev()
+            .find(|d| d.url == url && d.state == "active")
+        else {
             return;
         };
         d.state = if ok { "done" } else { "failed" }.into();
@@ -1305,7 +1499,11 @@ impl App {
         }
         let name = d.path.rsplit('/').next().unwrap_or("").to_string();
         s.dirty = true;
-        s.toast(&if ok { format!("Stiahnuté: {name}") } else { format!("Sťahovanie zlyhalo: {name}") });
+        s.toast(&if ok {
+            format!("Stiahnuté: {name}")
+        } else {
+            format!("Sťahovanie zlyhalo: {name}")
+        });
         s.sync(&self.cfg);
         s.refresh_panel(&self.cfg);
     }
@@ -1355,7 +1553,11 @@ impl App {
                 .data
                 .cookies
                 .drain(..)
-                .filter(|o| !cookies.iter().any(|c| c.name == o.name && c.domain == o.domain && c.path == o.path))
+                .filter(|o| {
+                    !cookies
+                        .iter()
+                        .any(|c| c.name == o.name && c.domain == o.domain && c.path == o.path)
+                })
                 .collect();
             cookies.extend(missing);
             s.data.cookies = cookies;
@@ -1427,7 +1629,10 @@ impl App {
             }
             "move-tab" => {
                 let (id, to) = arg.split_once(':').unwrap_or((arg, ""));
-                let (Some(from), Ok(to)) = (id.parse().ok().and_then(|id| s.tab_idx(id)), to.parse::<usize>()) else {
+                let (Some(from), Ok(to)) = (
+                    id.parse().ok().and_then(|id| s.tab_idx(id)),
+                    to.parse::<usize>(),
+                ) else {
                     return;
                 };
                 let to = to.min(s.tabs.len() - 1);
@@ -1454,7 +1659,9 @@ impl App {
                 if s.update_busy {
                     return;
                 }
-                let Some(asset) = s.update.as_ref().and_then(|u| u.asset.clone()) else { return };
+                let Some(asset) = s.update.as_ref().and_then(|u| u.asset.clone()) else {
+                    return;
+                };
                 if asset.sha256.is_none() {
                     return s.toast("Inštalátor nemá kontrolný súčet, stiahni ho z GitHubu ručne");
                 }
@@ -1470,12 +1677,20 @@ impl App {
             }
             "tab" => {
                 let n: usize = arg.parse().unwrap_or(1);
-                let i = if n >= 9 { s.tabs.len().saturating_sub(1) } else { n.saturating_sub(1) };
+                let i = if n >= 9 {
+                    s.tabs.len().saturating_sub(1)
+                } else {
+                    n.saturating_sub(1)
+                };
                 self.activate(i);
             }
             "next-tab" | "prev-tab" => {
                 let len = s.tabs.len().max(1);
-                let i = if name == "next-tab" { (s.active + 1) % len } else { (s.active + len - 1) % len };
+                let i = if name == "next-tab" {
+                    (s.active + 1) % len
+                } else {
+                    (s.active + len - 1) % len
+                };
                 self.activate(i);
             }
             // Reload on the certificate interstitial retries the refused URL itself.
@@ -1508,8 +1723,17 @@ impl App {
             "zoom-in" | "zoom-out" | "zoom-reset" => {
                 let z = s.zoom;
                 s.zoom = match name {
-                    "zoom-in" => ZOOM_STEPS.iter().copied().find(|x| *x > z + 0.001).unwrap_or(z),
-                    "zoom-out" => ZOOM_STEPS.iter().rev().copied().find(|x| *x < z - 0.001).unwrap_or(z),
+                    "zoom-in" => ZOOM_STEPS
+                        .iter()
+                        .copied()
+                        .find(|x| *x > z + 0.001)
+                        .unwrap_or(z),
+                    "zoom-out" => ZOOM_STEPS
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|x| *x < z - 0.001)
+                        .unwrap_or(z),
                     _ => self.cfg.zoom,
                 };
                 for v in s.loaded() {
@@ -1524,7 +1748,9 @@ impl App {
                     q: String,
                     dir: String,
                 }
-                let (Ok(r), Some(v)) = (serde_json::from_str::<Req>(arg), s.view()) else { return };
+                let (Ok(r), Some(v)) = (serde_json::from_str::<Req>(arg), s.view()) else {
+                    return;
+                };
                 let p = self.ctx.proxy.clone();
                 let _ = v.evaluate_script_with_callback(
                     &format!("{FIND_JS}({},{})", js(&r.q), js(&r.dir)),
@@ -1542,7 +1768,9 @@ impl App {
             }
             "find-close" => self.set_find(false),
             "bookmark" => {
-                let Some(t) = s.cur().filter(|t| t.url.starts_with("http")) else { return };
+                let Some(t) = s.cur().filter(|t| t.url.starts_with("http")) else {
+                    return;
+                };
                 let (url, title) = (t.url.clone(), t.label());
                 let bms = &mut s.data.bookmarks;
                 if let Some(i) = bms.iter().position(|b| b.url == url) {
@@ -1579,7 +1807,9 @@ impl App {
                 } else {
                     let data = s.panel_data(&self.cfg, arg).replace("</", "<\\/");
                     let html = include_str!("panel.html").replace("/*DATA*/", &data);
-                    s.panel = self.ctx.ui_view(html, content_rect(&self.ctx.window, s.top()));
+                    s.panel = self
+                        .ctx
+                        .ui_view(html, content_rect(&self.ctx.window, s.top()));
                     s.panel_section = arg.to_string();
                 }
                 s.sync(&self.cfg);
@@ -1626,7 +1856,11 @@ impl App {
                         if !on {
                             adblock::remove(hosts);
                         }
-                        let fetch = if on { adblock::stale(!hosts, hosts) } else { Vec::new() };
+                        let fetch = if on {
+                            adblock::stale(!hosts, hosts)
+                        } else {
+                            Vec::new()
+                        };
                         refresh_rules(self.ctx.proxy.clone(), fetch, true);
                     }
                     _ => {}
@@ -1636,7 +1870,10 @@ impl App {
             }
             "adblock-update" => {
                 let (easylist, hosts) = (self.cfg.adblock_easylist, self.cfg.adblock_hosts);
-                let all: Vec<_> = adblock::SOURCES.iter().filter(|s| s.enabled(easylist, hosts)).collect();
+                let all: Vec<_> = adblock::SOURCES
+                    .iter()
+                    .filter(|s| s.enabled(easylist, hosts))
+                    .collect();
                 s.toast("Sťahujem zoznamy reklám…");
                 refresh_rules(self.ctx.proxy.clone(), all, true);
             }
@@ -1645,16 +1882,28 @@ impl App {
                 self.cfg.adblock = !self.cfg.adblock;
                 self.ctx.adblock.set(self.cfg.adblock);
                 s.apply_rules_all(&self.cfg);
-                s.toast(if self.cfg.adblock { "Blokovanie reklám zapnuté" } else { "Blokovanie reklám vypnuté" });
+                s.toast(if self.cfg.adblock {
+                    "Blokovanie reklám zapnuté"
+                } else {
+                    "Blokovanie reklám vypnuté"
+                });
                 s.dirty = true;
                 self.adblock_changed();
             }
             // Toggles a site on the allowlist (empty arg = current tab's site), then reloads its tabs.
             "adblock-allow" => {
-                let host = if arg.is_empty() { s.cur().map(|t| host_of(&t.url)).unwrap_or_default() } else { arg.to_ascii_lowercase() };
+                let host = if arg.is_empty() {
+                    s.cur().map(|t| host_of(&t.url)).unwrap_or_default()
+                } else {
+                    arg.to_ascii_lowercase()
+                };
                 let host = host.trim_start_matches("www.").to_string();
                 let valid = host.contains('.') || host == "localhost";
-                if !valid || !host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')) {
+                if !valid
+                    || !host
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+                {
                     return;
                 }
                 let list = &mut self.cfg.adblock_allow;
@@ -1670,12 +1919,20 @@ impl App {
                     None => return s.toast("Zoznam výnimiek je plný"),
                 };
                 s.apply_rules_all(&self.cfg);
-                for t in s.tabs.iter().filter(|t| t.view.is_some() && (host_of(&t.url) == host || host_of(&t.url).ends_with(&format!(".{host}")))) {
+                for t in s.tabs.iter().filter(|t| {
+                    t.view.is_some()
+                        && (host_of(&t.url) == host
+                            || host_of(&t.url).ends_with(&format!(".{host}")))
+                }) {
                     if let Some(v) = &t.view {
                         let _ = v.reload();
                     }
                 }
-                s.toast(&if allowed { format!("Blokovanie vypnuté pre {host}") } else { format!("Blokovanie zapnuté pre {host}") });
+                s.toast(&if allowed {
+                    format!("Blokovanie vypnuté pre {host}")
+                } else {
+                    format!("Blokovanie zapnuté pre {host}")
+                });
                 s.dirty = true;
                 self.adblock_changed();
             }
@@ -1695,16 +1952,27 @@ impl App {
             }
             // Downloads are never opened/executed, only shown in the file manager.
             "reveal-file" => {
-                if s.data.downloads.iter().any(|d| d.path == arg && d.state == "done") {
+                if s.data
+                    .downloads
+                    .iter()
+                    .any(|d| d.path == arg && d.state == "done")
+                {
                     wk::reveal(arg);
                 }
             }
             "dl-allow" | "dl-deny" => {
-                let Some(i) = arg.parse().ok().and_then(|id: u32| s.asks.iter().position(|a| a.id == id)) else {
+                let Some(i) = arg
+                    .parse()
+                    .ok()
+                    .and_then(|id: u32| s.asks.iter().position(|a| a.id == id))
+                else {
                     return;
                 };
                 let a = s.asks.remove(i);
-                let view = a.tab.and_then(|t| s.tab_idx(t)).and_then(|i| s.tabs[i].view.as_ref());
+                let view = a
+                    .tab
+                    .and_then(|t| s.tab_idx(t))
+                    .and_then(|i| s.tabs[i].view.as_ref());
                 wk::decide_download(a.key, name == "dl-allow", &a.url, view);
                 if s.asks.is_empty() {
                     self.resize();
@@ -1719,7 +1987,9 @@ impl App {
                     old: String,
                     new: String,
                 }
-                let Ok(mut r) = serde_json::from_str::<Req>(arg) else { return };
+                let Ok(mut r) = serde_json::from_str::<Req>(arg) else {
+                    return;
+                };
                 let (ok, msg) = if !s.vault.verify(&r.old) {
                     (false, "Nesprávne aktuálne heslo")
                 } else if r.new.chars().count() < 8 {
@@ -1764,7 +2034,9 @@ impl App {
                 let data = s.shield_data(&self.cfg).to_string().replace("</", "<\\/");
                 let html = include_str!("shield.html").replace("/*DATA*/", &data);
                 let h = if s.site_h > 0.0 { s.site_h } else { 300.0 };
-                s.site = self.ctx.ui_view(html, site_rect(&self.ctx.window, s.site_x, h));
+                s.site = self
+                    .ctx
+                    .ui_view(html, site_rect(&self.ctx.window, s.site_x, h));
                 s.shield_open = true;
             }
             "get-adblock-stats" => s.push_shield(&self.cfg),
@@ -1772,7 +2044,11 @@ impl App {
             "get-vault-sessions" => self.request_sessions(None),
             "delete-vault-session" => {
                 let site = arg.trim().to_ascii_lowercase();
-                if !site.is_empty() && site.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-')) {
+                if !site.is_empty()
+                    && site
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))
+                {
                     self.request_sessions(Some(site));
                 }
             }
@@ -1799,14 +2075,25 @@ impl App {
 
 /// Off the main thread: downloads `fetch`, then for each content-blocker list either reuses
 /// WebKit's compiled copy (inputs unchanged) or converts the filter lists again.
-fn refresh_rules(proxy: EventLoopProxy<UserEvent>, fetch: Vec<&'static adblock::Source>, manual: bool) {
+fn refresh_rules(
+    proxy: EventLoopProxy<UserEvent>,
+    fetch: Vec<&'static adblock::Source>,
+    manual: bool,
+) {
     std::thread::spawn(move || {
         let send = |e| {
             let _ = proxy.send_event(e);
         };
-        let errors: Vec<String> = fetch.iter().filter_map(|s| adblock::fetch(s).err()).collect();
+        let errors: Vec<String> = fetch
+            .iter()
+            .filter_map(|s| adblock::fetch(s).err())
+            .collect();
         if manual && !fetch.is_empty() {
-            send(UserEvent::RulesNote(if errors.is_empty() { "Zoznamy reklám aktualizované".into() } else { errors.join(", ") }));
+            send(UserEvent::RulesNote(if errors.is_empty() {
+                "Zoznamy reklám aktualizované".into()
+            } else {
+                errors.join(", ")
+            }));
         }
         for id in adblock::LEGACY {
             send(UserEvent::RulesOff(id));
@@ -1818,14 +2105,26 @@ fn refresh_rules(proxy: EventLoopProxy<UserEvent>, fetch: Vec<&'static adblock::
             };
             if let Some(n) = adblock::compiled_parts(g, &hash) {
                 for (i, id) in g.parts.iter().enumerate() {
-                    send(if i < n { UserEvent::RulesCached { id, hash: hash.clone() } } else { UserEvent::RulesOff(id) });
+                    send(if i < n {
+                        UserEvent::RulesCached {
+                            id,
+                            hash: hash.clone(),
+                        }
+                    } else {
+                        UserEvent::RulesOff(id)
+                    });
                 }
             } else if let Some(jsons) = adblock::build(g) {
                 let parts = jsons.len();
                 let mut jsons = jsons.into_iter();
                 for id in g.parts {
                     send(match jsons.next() {
-                        Some(json) => UserEvent::RulesBuilt { id, hash: hash.clone(), json, parts },
+                        Some(json) => UserEvent::RulesBuilt {
+                            id,
+                            hash: hash.clone(),
+                            json,
+                            parts,
+                        },
                         None => UserEvent::RulesOff(id),
                     });
                 }
@@ -1851,12 +2150,19 @@ fn apply_rules(cfg: &Settings, t: &mut Tab, url: &str) {
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// Static certificate-error page (rendered in the tab, which has no IPC).
 fn interstitial(host: &str, reasons: &[&str]) -> String {
-    let items: String = reasons.iter().map(|r| format!("<li>{}</li>", html_escape(r))).collect();
+    let items: String = reasons
+        .iter()
+        .map(|r| format!("<li>{}</li>", html_escape(r)))
+        .collect();
     let host = html_escape(if host.is_empty() { "tento web" } else { host });
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><title>Pripojenie nie je bezpečné</title>
@@ -1906,7 +2212,11 @@ pub fn theme_of(name: &str) -> Option<Theme> {
 }
 
 fn bg_of(window: &Window) -> RGBA {
-    if wk::is_light(window) { BG_LIGHT } else { BG_DARK }
+    if wk::is_light(window) {
+        BG_LIGHT
+    } else {
+        BG_DARK
+    }
 }
 
 fn rect(window: &Window, y: f64, h: Option<f64>) -> Rect {
@@ -1952,14 +2262,24 @@ fn site_of(domain: &str) -> String {
         return d;
     }
     let n = parts.len();
-    let second_level = ["co", "com", "org", "net", "ac", "gov", "edu", "or", "ne", "go"].contains(&parts[n - 2]);
-    let take = if second_level && parts[n - 1].len() == 2 { 3 } else { 2 };
+    let second_level = [
+        "co", "com", "org", "net", "ac", "gov", "edu", "or", "ne", "go",
+    ]
+    .contains(&parts[n - 2]);
+    let take = if second_level && parts[n - 1].len() == 2 {
+        3
+    } else {
+        2
+    };
     parts[n - take..].join(".")
 }
 
 /// Cookie name typical for a login session (heuristic; analytics/consent cookies don't match).
 fn is_login_cookie(c: &CookieRec) -> bool {
-    const KEYS: &[&str] = &["sess", "sid", "auth", "token", "login", "logged", "user", "account", "jwt", "remember", "li_at"];
+    const KEYS: &[&str] = &[
+        "sess", "sid", "auth", "token", "login", "logged", "user", "account", "jwt", "remember",
+        "li_at",
+    ];
     let n = c.name.to_ascii_lowercase();
     KEYS.iter().any(|k| n.contains(k)) || n.starts_with("__host-") || n.starts_with("__secure-")
 }
@@ -1970,7 +2290,9 @@ fn logged_in(cookies: &[CookieRec], host: &str) -> bool {
         return false;
     }
     let site = site_of(host);
-    cookies.iter().any(|c| is_login_cookie(c) && site_of(&c.domain) == site)
+    cookies
+        .iter()
+        .any(|c| is_login_cookie(c) && site_of(&c.domain) == site)
 }
 
 /// Cookie `domain` applies to `host` (exact or parent domain).
@@ -1993,7 +2315,9 @@ fn content_rect(window: &Window, top: f64) -> Rect {
 
 fn to_url(input: &str, search_prefix: &str) -> String {
     // Explicit schemes are navigated as typed, never sent to the search engine.
-    const SCHEMES: &[&str] = &["http://", "https://", "file:", "about:", "data:", "blob:", "mailto:"];
+    const SCHEMES: &[&str] = &[
+        "http://", "https://", "file:", "about:", "data:", "blob:", "mailto:",
+    ];
     let lower = input.to_ascii_lowercase();
     if SCHEMES.iter().any(|s| lower.starts_with(s)) {
         return input.to_string();
@@ -2005,7 +2329,8 @@ fn to_url(input: &str, search_prefix: &str) -> String {
     }
     .to_ascii_lowercase();
     // Local dev servers and mDNS hosts usually have no TLS.
-    let local = matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]") || host.ends_with(".local");
+    let local =
+        matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]") || host.ends_with(".local");
     if !input.contains(' ') && local {
         format!("http://{input}")
     } else if !input.contains(' ') && input.contains('.') {
