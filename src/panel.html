@@ -84,6 +84,7 @@
   <button data-s="history"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>História</button>
   <button data-s="bookmarks"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>Obľúbené</button>
   <button data-s="downloads"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Stiahnuté</button>
+  <button data-s="about"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg>O aplikácii</button>
 </nav>
 <main><div class="wrap" id="root"></div></main>
 <div id="toast"></div>
@@ -195,6 +196,8 @@
             select('unload', [[1, '1 minúte'], [5, '5 minútach'], [15, '15 minútach'], [30, '30 minútach'], [60, '1 hodine'], [0, 'Nikdy']]))),
         h('h2', {}, 'Ochrana súkromia'),
         h('section', {},
+          row('Identifikácia prehliadača', 'Ako sa Crow predstaví webom. Chrome odstráni hlášku Google „nepodporovaný prehliadač“, Safari je záloha, ak sa niektorý web s Chrome identitou správa zle. Platí pre nové a znova načítané karty',
+            seg('ua', [['chrome', 'Chrome'], ['safari', 'Safari']])),
           row('Blokovanie reklám a sledovačov', 'Blokuje sa priamo v sieťovej vrstve WebKitu. Vlastný zoznam: ~/Library/Application Support/Crow/blocklist.txt',
             seg('adblock', [['on', 'Zapnuté'], ['off', 'Vypnuté']])),
           row('Vymazať históriu', null, confirmBtn('Vymazať', () => { send('clear:history'); toast('História vymazaná'); })),
@@ -205,12 +208,36 @@
           row('Šifrovaný trezor', 'História, obľúbené, cookies, prihlásenia a karty sú šifrované heslom (Argon2id + XChaCha20-Poly1305)',
             h('button', { class: 'btn', onclick: () => send('lock') }, 'Zamknúť teraz (⌃⌘L)')),
           h('div', { class: 'pw' }, ...pw, pwBtn)),
-        h('h2', {}, 'O aplikácii'),
+        h('h2', {}, 'Aktualizácie'),
         h('section', {},
-          row('Crow Browser ' + D.version, 'WebKit · Rust · tao + wry',
+          row('Crow Browser ' + D.version, null,
             h('button', { class: 'btn', onclick: () => { send('update-check'); toast('Kontrolujem…'); } }, 'Skontrolovať aktualizácie')),
           row('Automaticky kontrolovať aktualizácie', 'Po odomknutí sa opýta GitHubu na novú verziu. Inštalátor sa stiahne len na tvoj pokyn',
             seg('updates', [['on', 'Zapnuté'], ['off', 'Vypnuté']]))),
+      ];
+    },
+
+    about() {
+      const REPO = 'https://github.com/AnubisSK/CrowBrowser';
+      const link = (label, url) => h('button', { class: 'btn', onclick: () => send('open-new:' + url) }, label);
+      const p = (t) => h('div', { class: 'row' }, h('div', {}, t));
+      return [
+        header('O aplikácii'),
+        h('section', {},
+          row('Crow Browser ' + D.version, 'Ľahký, súkromný a šifrovaný webový prehliadač pre macOS a Linux', link('GitHub', REPO)),
+          row('Autor', 'AnubisSVK (GitHub: AnubisSK)', link('Profil', 'https://github.com/AnubisSK')),
+          row('Licencia', 'GNU General Public License v3.0, slobodný a otvorený softvér', link('Text licencie', REPO + '/blob/main/LICENSE'))),
+        h('h2', {}, 'Prečo Crow'),
+        h('section', {},
+          p('Veľké prehliadače zaberajú stovky megabajtov pamäte a starší hardvér nestíhajú. Crow vznikol pre MacBook Air 2015 (Intel Core i5, 4 GB RAM) s macOS 12 Monterey, aby sa aj na ňom dalo pohodlne a bezpečne prehliadať web.'),
+          p('Ľahký: hlavný proces okolo 35 MB RAM, neaktívne karty sa automaticky uspávajú.'),
+          p('Šifrovaný: história, obľúbené, cookies, karty aj nastavenia sú na disku zašifrované heslom (Argon2id + XChaCha20-Poly1305).'),
+          p('Bez reklám a sledovačov: blokujú sa priamo v sieťovej vrstve WebKitu. Žiadna telemetria.'),
+          p('Bezpečný: stiahnuté súbory sa nikdy nespúšťajú samé, adresný riadok sa nedá podvrhnúť počas načítavania.')),
+        h('h2', {}, 'Technológie'),
+        h('section', {},
+          row('Engine', 'Systémový WebKit (macOS) / WebKitGTK 4.1 (Linux), žiadny Chromium ani Electron', null),
+          row('Jazyk a knižnice', 'Rust · tao · wry · mimalloc · argon2 · chacha20poly1305 · zeroize', null)),
       ];
     },
 

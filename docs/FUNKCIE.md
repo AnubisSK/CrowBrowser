@@ -167,6 +167,7 @@ Otvoríš ich cez **⌘,** alebo ⚙. Panel má bočné menu: **Nastavenia · Hi
 | Vzhľad | Motív | Tmavý / Svetlý / Systém | Tmavý |
 | Vzhľad | Predvolené priblíženie | 50 % – 200 % | 100 % |
 | Výkon | Uspávať neaktívne karty po | 1 / 5 / 15 / 30 / 60 min / Nikdy | 5 min |
+| Ochrana súkromia | Identifikácia prehliadača | Chrome / Safari (pre nové a znova načítané karty) | Chrome |
 | Ochrana súkromia | Blokovanie reklám a sledovačov | Zapnuté / Vypnuté | Zapnuté |
 | Ochrana súkromia | Vymazať históriu | (dvojklik na potvrdenie) | |
 | Ochrana súkromia | Vymazať cookies a prihlásenia | odhlási zo všetkých webov | |
