@@ -91,7 +91,7 @@
   .urlwrap.http #sec { color: #e5534b; background: rgba(229, 83, 75, .15); }
   .urlwrap.http #sec .lock { display: none; }
   .urlwrap.https #url { padding-left: 26px; }
-  .urlwrap.http #url { padding-left: 122px; }
+  .urlwrap.http #url { padding-left: var(--secw, 122px); }
   .urlwrap:focus-within #sec { display: none; }
   .urlwrap:focus-within #url { padding-left: 12px; }
   #star { position: absolute; right: 2px; top: 0; width: 28px; }
@@ -283,11 +283,16 @@
       return el;
     }));
     if (document.activeElement !== url) url.value = st.url;
-    const proto = /^https:/i.test(st.url) ? 'https' : /^http:/i.test(st.url) ? 'http' : '';
+    // Security state verified by the engine (backend `tls`), never derived from the URL scheme.
+    const tls = st.tls || '';
     const wrap = url.parentElement;
-    wrap.classList.toggle('https', proto === 'https');
-    wrap.classList.toggle('http', proto === 'http');
-    $('sec').title = proto ? 'Zobraziť informácie o stránke' : '';
+    const warn = tls === 'http' || tls === 'mixed' || tls === 'broken';
+    wrap.classList.toggle('https', tls === 'secure');
+    wrap.classList.toggle('http', warn);
+    $('sec').querySelector('.txt').textContent =
+      tls === 'mixed' ? 'Čiastočne zabezpečené' : tls === 'broken' ? 'Chyba certifikátu' : 'Nezabezpečené';
+    if (warn) requestAnimationFrame(() => wrap.style.setProperty('--secw', ($('sec').offsetWidth + 12) + 'px'));
+    $('sec').title = tls ? 'Zobraziť informácie o stránke' : '';
     const a = st.ask;
     document.body.classList.toggle('asking', !!a);
     if (a) {

@@ -104,6 +104,8 @@ pub enum UserEvent {
     RulesReady,
     /// Content blocker blocked loads (collected via `wk::take_blocked`).
     Blocked,
+    /// Navigation refused by WebKit because of the server certificate.
+    TlsError { tab: u32, url: String, reasons: Vec<&'static str> },
     /// Result of a filter-list download the user asked for.
     RulesNote(String),
     /// Result of `FAV_READ` in a tab (JSON string).
@@ -130,6 +132,8 @@ struct TabCtx {
     window: Rc<Window>,
     proxy: EventLoopProxy<UserEvent>,
     next_id: Rc<Cell<u32>>,
+    /// Global ad-block switch, for popups created inside WebKit callbacks.
+    adblock: Rc<Cell<bool>>,
 }
 
 impl TabCtx {
@@ -143,12 +147,15 @@ impl TabCtx {
         let _ = self.proxy.send_event(e);
     }
 
+    /// Creates a tab view. Content rules (`blocking`) and certificate-failure reporting are
+    /// attached before the first navigation starts, so no request leaves unfiltered.
     fn build(
         &self,
         id: u32,
         url: Option<&str>,
         config: wk::Config,
         rect: Rect,
+        blocking: bool,
     ) -> wry::Result<WebView> {
         let (p1, p2) = (self.proxy.clone(), self.proxy.clone());
         let ctx = self.clone();
@@ -181,11 +188,12 @@ impl TabCtx {
                     let _ = p4.send_event(UserEvent::DownloadDone { url, ok });
                 });
         }
-        if let Some(url) = url {
-            b = b.with_url(url);
-        }
         let view = wk::attach(b, rect, &self.window)?;
-        wk::watch_blocked(&view, id);
+        wk::set_rules(&view, blocking);
+        wk::watch(&view, id);
+        if let Some(url) = url {
+            view.load_url(url)?;
+        }
         Ok(view)
     }
 
@@ -194,7 +202,8 @@ impl TabCtx {
     fn popup(&self, url: String, features: NewWindowFeatures) -> NewWindowResponse {
         let id = self.next();
         let rect = content_rect(&self.window, TABS_H + NAV_H);
-        match self.build(id, None, wk::popup_config(features), rect) {
+        // Rules go on before WebKit navigates the popup (adoption as a tab happens later).
+        match self.build(id, None, wk::popup_config(features), rect, self.adblock.get()) {
             Ok(view) => {
                 let response = wk::popup_response(&view);
                 PENDING.with(|p| p.borrow_mut().push((id, view)));
@@ -242,17 +251,21 @@ struct Tab {
     blocking: Option<bool>,
     /// Loads blocked on the current page.
     blocked: u32,
+    /// Engine-verified security of the committed page: "secure" | "mixed" | "broken" | "http" | "".
+    tls: &'static str,
+    /// Showing the certificate-error interstitial for `url`.
+    tls_error: bool,
 }
 
 impl Tab {
     fn new(id: u32, url: String, view: Option<WebView>) -> Self {
-        Self { id, url, title: String::new(), view, hidden_since: Instant::now(), loading: false, icon: String::new(), fav_tries: 0, blocking: None, blocked: 0 }
+        Self { id, url, title: String::new(), view, hidden_since: Instant::now(), loading: false, icon: String::new(), fav_tries: 0, blocking: None, blocked: 0, tls: "", tls_error: false }
     }
 
     /// Frees the page (unload/close); stops its blocked-load reporting.
     fn drop_view(&mut self) {
         if let Some(v) = self.view.take() {
-            wk::forget_blocked(&v);
+            wk::forget(&v);
         }
     }
 
@@ -404,6 +417,7 @@ impl Session {
             "active": self.active,
             "url": url,
             "loading": cur.is_some_and(|t| t.loading),
+            "tls": cur.map_or("", |t| t.tls),
             "blocked": cur.map_or(0, |t| t.blocked),
             "bookmarked": self.data.bookmarks.iter().any(|b| b.url == url),
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
@@ -493,6 +507,10 @@ impl App {
         wk::on_blocked(move || {
             let _ = p.send_event(UserEvent::Blocked);
         });
+        let p = proxy.clone();
+        wk::on_tls_error(move |tab, url, reasons| {
+            let _ = p.send_event(UserEvent::TlsError { tab, url, reasons });
+        });
         #[cfg(target_os = "linux")]
         {
             let (p0, p1, p2) = (proxy.clone(), proxy.clone(), proxy.clone());
@@ -509,7 +527,7 @@ impl App {
                 },
             );
         }
-        let ctx = TabCtx { window: Rc::new(window), proxy, next_id: Rc::new(Cell::new(1)) };
+        let ctx = TabCtx { window: Rc::new(window), proxy, next_id: Rc::new(Cell::new(1)), adblock: Rc::new(Cell::new(true)) };
         let mut app = Self {
             ctx,
             cfg: Settings::default(), // real settings live in the vault
@@ -633,6 +651,7 @@ impl App {
                 s.eval(&format!("setBlocked({n})"));
                 s.push_shield(&self.cfg);
             }
+            UserEvent::TlsError { tab, url, reasons } => self.tls_error(tab, url, reasons),
             UserEvent::RulesNote(msg) => {
                 if let Some(s) = &self.s {
                     s.toast(&msg);
@@ -766,6 +785,7 @@ impl App {
     fn start(&mut self, vault: Vault, mut data: VaultData) {
         let legacy = data.settings.is_none();
         self.cfg = data.settings.take().or_else(Settings::take_legacy).unwrap_or_default();
+        self.ctx.adblock.set(self.cfg.adblock);
         let w = &self.ctx.window;
         wk::set_theme(w, theme_of(&self.cfg.theme));
         let html = include_str!("toolbar.html").to_string();
@@ -855,11 +875,10 @@ impl App {
         let rect = content_rect(&self.ctx.window, s.top());
         let tab = &mut s.tabs[idx];
         if tab.view.is_none() {
-            let config = wk::config(&s.store, blocks(&self.cfg, &tab.url));
-            tab.view = self.ctx.build(tab.id, Some(&tab.url), config, rect).ok();
-            tab.blocking = None;
-            let url = tab.url.clone();
-            apply_rules(&self.cfg, tab, &url);
+            let on = blocks(&self.cfg, &tab.url);
+            let config = wk::config(&s.store, on);
+            tab.view = self.ctx.build(tab.id, Some(&tab.url), config, rect, on).ok();
+            tab.blocking = Some(on);
             if let Some(v) = &tab.view {
                 let _ = v.zoom(s.zoom);
             }
@@ -939,9 +958,18 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let t = &mut s.tabs[i];
+        // The interstitial itself (about:blank) keeps the refused URL and the broken state.
+        let interstitial = t.tls_error && (url.is_empty() || url == "about:blank");
         // Allowlist follows the page being loaded: switched before its subresources are requested.
-        if !url.is_empty() {
+        if !url.is_empty() && !interstitial {
             apply_rules(&self.cfg, t, &url);
+        }
+        if started && !interstitial {
+            t.tls_error = false;
+        }
+        if !started && interstitial {
+            t.loading = false;
+            return s.sync(&self.cfg);
         }
         if started {
             // Anti-spoofing: the address bar keeps the last finished URL until this load
@@ -964,6 +992,17 @@ impl App {
         if !url.is_empty() {
             t.url = url.clone();
         }
+        // Lock only for a certificate WebKit validated, never from the "https://" prefix.
+        t.tls = match (url.split(':').next(), &t.view) {
+            (Some("https"), Some(v)) => match wk::tls(v) {
+                wk::Tls::Secure => "secure",
+                wk::Tls::Mixed => "mixed",
+                wk::Tls::Unverified => "broken",
+            },
+            (Some("https"), None) => "broken",
+            (Some("http"), _) => "http",
+            _ => "",
+        };
         match &t.view {
             Some(v) if url.starts_with("http") => {
                 let _ = v.evaluate_script(FAV_JS);
@@ -993,6 +1032,28 @@ impl App {
         t.title = title;
         if let Some(e) = s.data.history.last_mut().filter(|e| e.url == t.url) {
             e.title = t.title.clone();
+        }
+        s.sync(&self.cfg);
+    }
+
+    /// WebKit refused the navigation (certificate). Shows a static interstitial in the tab (no
+    /// IPC, no way to proceed); the address bar shows the refused URL marked as broken.
+    fn tls_error(&mut self, id: u32, url: String, reasons: Vec<&'static str>) {
+        let Some(s) = self.s.as_mut() else { return };
+        let Some(i) = s.tab_idx(id) else { return };
+        let t = &mut s.tabs[i];
+        t.loading = false;
+        t.tls_error = true;
+        t.tls = "broken";
+        t.icon.clear();
+        if !url.is_empty() {
+            t.url = url;
+        }
+        if let Some(v) = &t.view {
+            let _ = v.load_html(&interstitial(&host_of(&t.url), &reasons));
+        }
+        if i == s.active {
+            s.site = None;
         }
         s.sync(&self.cfg);
     }
@@ -1088,6 +1149,7 @@ impl App {
             "cookies": cookies.iter().filter(|c| cookie_for(&host, &c.domain)).count(),
             "adblock": self.cfg.adblock,
             "allowed": self.cfg.allowed(&host),
+            "tls": s.cur().map_or("", |t| t.tls),
         });
         if let Some(v) = &s.site {
             let _ = v.evaluate_script(&format!("update({data})"));
@@ -1296,6 +1358,12 @@ impl App {
                 let i = if name == "next-tab" { (s.active + 1) % len } else { (s.active + len - 1) % len };
                 self.activate(i);
             }
+            // Reload on the certificate interstitial retries the refused URL itself.
+            "reload" if s.cur().is_some_and(|t| t.tls_error) => {
+                if let (Some(t), Some(v)) = (s.cur(), s.view()) {
+                    let _ = v.load_url(&t.url);
+                }
+            }
             "back" | "forward" | "reload" | "stop" => {
                 if let Some(v) = s.view() {
                     let _ = match name {
@@ -1426,7 +1494,10 @@ impl App {
                             let _ = v.zoom(s.zoom);
                         }
                     }
-                    "adblock" => s.apply_rules_all(&self.cfg),
+                    "adblock" => {
+                        self.ctx.adblock.set(self.cfg.adblock);
+                        s.apply_rules_all(&self.cfg);
+                    }
                     "adblock_easylist" | "adblock_hosts" => {
                         let (on, hosts) = match k {
                             "adblock_hosts" => (self.cfg.adblock_hosts, true),
@@ -1452,6 +1523,7 @@ impl App {
             // Global switch; takes effect immediately on all loaded tabs.
             "toggle-adblock" => {
                 self.cfg.adblock = !self.cfg.adblock;
+                self.ctx.adblock.set(self.cfg.adblock);
                 s.apply_rules_all(&self.cfg);
                 s.toast(if self.cfg.adblock { "Blokovanie reklám zapnuté" } else { "Blokovanie reklám vypnuté" });
                 s.dirty = true;
@@ -1638,6 +1710,39 @@ fn apply_rules(cfg: &Settings, t: &mut Tab, url: &str) {
         wk::set_rules(v, on);
         t.blocking = Some(on);
     }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
+}
+
+/// Static certificate-error page (rendered in the tab, which has no IPC).
+fn interstitial(host: &str, reasons: &[&str]) -> String {
+    let items: String = reasons.iter().map(|r| format!("<li>{}</li>", html_escape(r))).collect();
+    let host = html_escape(if host.is_empty() { "tento web" } else { host });
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><title>Pripojenie nie je bezpečné</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<style>
+:root {{ color-scheme: dark; }}
+body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #1b1b1f; color: #e6e6e9;
+  font: 14px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; }}
+main {{ max-width: 560px; padding: 32px; }}
+.icon {{ width: 48px; height: 48px; color: #e5534b; }}
+h1 {{ font-size: 22px; margin: 16px 0 8px; }}
+p {{ color: #9a9aa3; line-height: 1.5; }}
+b {{ color: #e6e6e9; }}
+ul {{ color: #e5534b; padding-left: 20px; line-height: 1.6; }}
+button {{ margin-top: 16px; font: inherit; color: #fff; background: #5b8def; border: 0; border-radius: 8px; padding: 8px 16px; }}
+</style></head><body><main>
+<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l10 18H2z"/><path d="M12 10v4M12 17.5v.01"/></svg>
+<h1>Pripojenie nie je bezpečné</h1>
+<p>Crow zablokoval načítanie <b>{host}</b>, pretože certifikát servera sa nepodarilo overiť. Niekto sa môže pokúšať odchytiť údaje, ktoré na tento web posielaš (napríklad heslá alebo čísla kariet).</p>
+<ul>{items}</ul>
+<p>Stránku nie je možné otvoriť. Ak ide o tvoj vlastný server, oprav jeho certifikát.</p>
+<button onclick="history.back()">Späť do bezpečia</button>
+</main></body></html>"#
+    )
 }
 
 fn js(s: &str) -> String {

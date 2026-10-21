@@ -82,14 +82,16 @@
   function render() {
     const https = D.scheme === 'https', http = D.scheme === 'http';
     const leaf = D.certs[0];
-    const bad = D.errors.length > 0 || (leaf && leaf.expired);
+    // "Secure" only when the engine validated the certificate (D.tls), never from the scheme.
+    const bad = D.tls !== 'secure' || D.errors.length > 0 || (leaf && leaf.expired);
     const out = [h('header', {}, h('div', { class: 'host', title: D.url }, D.host || D.url), h('button', { id: 'x', title: 'Zavrieť (Esc)', onclick: () => send('site-close') }, '✕'))];
 
     const conn = h('div', { class: 'sec' });
     if (https && !bad) {
       conn.append(rowEl(I.lock, 'ok', 'Pripojenie je zabezpečené', 'Údaje, ktoré na tento web odošleš (napríklad heslá alebo čísla kariet), sú počas prenosu šifrované.'));
     } else if (https) {
-      conn.append(rowEl(I.warn, 'warn', 'Pripojenie nie je úplne zabezpečené', D.errors.join(' · ') || 'Certifikát nie je platný.'));
+      conn.append(rowEl(I.warn, D.tls === 'mixed' ? 'warn' : 'bad', D.tls === 'mixed' ? 'Pripojenie nie je úplne zabezpečené' : 'Certifikát nebol overený',
+        D.errors.join(' · ') || (D.tls === 'mixed' ? 'Stránka obsahuje aj nezabezpečený (HTTP) obsah.' : 'Crow pre túto stránku nemá overený certifikát. Nezadávaj sem heslá ani platobné údaje.')));
     } else if (http) {
       conn.append(rowEl(I.warn, 'bad', 'Pripojenie nie je zabezpečené', 'Stránka nepoužíva HTTPS. Nezadávaj sem heslá ani platobné údaje, ktokoľvek v sieti ich môže vidieť alebo zmeniť.'));
     } else {

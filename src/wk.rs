@@ -34,6 +34,19 @@ use wry::{
 };
 
 pub type Store = Retained<WKWebsiteDataStore>;
+/// Certificate failure callback: tab, refused URL, reasons.
+type TlsHandler = dyn Fn(u32, String, Vec<&'static str>);
+
+/// Engine-confirmed connection security of a committed page.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Tls {
+    /// Certificate validated by WebKit, no insecure subresources.
+    Secure,
+    /// Valid certificate, but HTTP content on the page.
+    Mixed,
+    /// No validated certificate (certificate errors, or not HTTPS).
+    Unverified,
+}
 pub struct Config(Retained<WKWebViewConfiguration>);
 
 thread_local! {
@@ -44,6 +57,7 @@ thread_local! {
     /// Loads blocked per tab since the last `take_blocked`.
     static BLOCKED: RefCell<HashMap<u32, u32>> = RefCell::new(HashMap::new());
     static ON_BLOCKED: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    static ON_TLS: RefCell<Option<Box<TlsHandler>>> = const { RefCell::new(None) };
     /// URLs the user confirmed in the download prompt; consumed by the next download of that URL.
     static APPROVED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
@@ -220,24 +234,89 @@ unsafe extern "C-unwind" fn rule_action(
     }
 }
 
-/// Reports loads blocked in `v` as tab `tab`: adds the SPI method to wry's navigation delegate
-/// class and re-sets the delegate, so WebKit re-reads which delegate methods exist.
-pub fn watch_blocked(v: &WebView, tab: u32) {
+/// Called when a navigation is refused because of the server certificate (tab, URL, reasons).
+pub fn on_tls_error(f: impl Fn(u32, String, Vec<&'static str>) + 'static) {
+    ON_TLS.with(|o| *o.borrow_mut() = Some(Box::new(f)));
+}
+
+/// NSURLErrorDomain TLS codes. wry answers no authentication challenge, so WebKit's default
+/// trust evaluation rejects bad certificates; this only tells the user why the page did not load.
+fn tls_reason(code: isize) -> Option<&'static str> {
+    Some(match code {
+        -1201 => "Certifikát má neplatný dátum (vypršal alebo ešte neplatí)",
+        -1202 => "Certifikát nie je dôveryhodný pre túto doménu",
+        -1203 => "Certifikát nevydala dôveryhodná autorita",
+        -1204 => "Certifikát ešte nie je platný",
+        -1200 => "Zabezpečené pripojenie sa nepodarilo nadviazať",
+        -1205 | -1206 => "Server vyžaduje klientsky certifikát",
+        _ => return None,
+    })
+}
+
+unsafe extern "C-unwind" fn nav_failed(
+    _this: *mut AnyObject,
+    _cmd: Sel,
+    web_view: *mut AnyObject,
+    _nav: *mut AnyObject,
+    error: *mut AnyObject,
+) {
+    let Some(error) = (unsafe { error.as_ref() }) else { return };
+    let (domain, code, url) = unsafe {
+        let domain: *mut NSString = msg_send![error, domain];
+        let code: isize = msg_send![error, code];
+        let info: *mut AnyObject = msg_send![error, userInfo];
+        let url: *mut AnyObject = match info.as_ref() {
+            Some(info) => msg_send![info, objectForKey: ns_string!("NSErrorFailingURLStringKey")],
+            None => std::ptr::null_mut(),
+        };
+        let url = (url as *mut NSString).as_ref().map(|u| u.to_string()).unwrap_or_default();
+        (domain.as_ref().map(|d| d.to_string()).unwrap_or_default(), code, url)
+    };
+    let tab = WATCHED.with(|w| w.borrow().get(&(web_view as usize)).copied());
+    let (Some(tab), Some(reason)) = (tab, tls_reason(code).filter(|_| domain == "NSURLErrorDomain")) else { return };
+    ON_TLS.with(|f| {
+        if let Some(f) = &*f.borrow() {
+            f(tab, url, vec![reason]);
+        }
+    });
+}
+
+/// Adds `imp` for `sel` to the delegate's class unless the class already implements it.
+unsafe fn add_method(cls: &AnyClass, sel: Sel, imp: Imp, types: &std::ffi::CStr) {
+    if cls.instance_method(sel).is_none() {
+        unsafe { objc2::ffi::class_addMethod(cls as *const AnyClass as *mut AnyClass, sel, imp, types.as_ptr()) };
+    }
+}
+
+/// Reports blocked loads and certificate failures of `v` as tab `tab`: adds the methods to wry's
+/// navigation delegate class and re-sets the delegate, so WebKit re-reads which methods exist.
+pub fn watch(v: &WebView, tab: u32) {
     let wv = v.webview();
     WATCHED.with(|w| w.borrow_mut().insert(Retained::as_ptr(&wv) as usize, tab));
     unsafe {
         let d: *mut AnyObject = msg_send![&*wv, navigationDelegate];
         let Some(d) = d.as_ref() else { return };
         let cls = d.class();
-        if cls.instance_method(rule_action_sel()).is_none() {
-            let imp: Imp = std::mem::transmute(rule_action as unsafe extern "C-unwind" fn(_, _, _, _, _, _));
-            objc2::ffi::class_addMethod(cls as *const AnyClass as *mut AnyClass, rule_action_sel(), imp, c"v@:@@@@".as_ptr());
-        }
+        let imp: Imp = std::mem::transmute(rule_action as unsafe extern "C-unwind" fn(_, _, _, _, _, _));
+        add_method(cls, rule_action_sel(), imp, c"v@:@@@@");
+        let imp: Imp = std::mem::transmute(nav_failed as unsafe extern "C-unwind" fn(_, _, _, _, _));
+        add_method(cls, sel!(webView:didFailProvisionalNavigation:withError:), imp, c"v@:@@@");
         let _: () = msg_send![&*wv, setNavigationDelegate: d];
     }
 }
 
-pub fn forget_blocked(v: &WebView) {
+/// TLS state of the committed page as verified by WebKit (never inferred from the URL).
+pub fn tls(v: &WebView) -> Tls {
+    let wv = v.webview();
+    let trust: *const SecTrust = unsafe { msg_send![&*wv, serverTrust] };
+    if trust.is_null() {
+        return Tls::Unverified;
+    }
+    let secure_only: bool = unsafe { msg_send![&*wv, hasOnlySecureContent] };
+    if secure_only { Tls::Secure } else { Tls::Mixed }
+}
+
+pub fn forget(v: &WebView) {
     let ptr = Retained::as_ptr(&v.webview()) as usize;
     WATCHED.with(|w| w.borrow_mut().remove(&ptr));
 }

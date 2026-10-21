@@ -81,6 +81,13 @@ Po **⌃⌘L** (alebo z Nastavení) Crow:
 - Dáta vkladané do HTML panelu sú escapované (`</` → `<\/`). Názvy stránok a adresy sa vykresľujú cez `textContent`, nie `innerHTML`, takže nemôžu vložiť skript.
 - Otvorenie súboru zo zoznamu stiahnutých je povolené len pre cesty, ktoré v zozname naozaj sú.
 
+## Certifikáty a zámok
+
+- Stránka s neplatným certifikátom (vypršaný, self-signed, iná doména, nedôveryhodná autorita) sa **nenačíta**. Crow neodpovedá na overovanie certifikátov, takže rozhoduje systémové overenie WebKitu; na Linuxe je politika TLS chýb výslovne nastavená na „zlyhať“. Výnimku pridať nejde.
+- Namiesto stránky sa v karte zobrazí upozornenie „Pripojenie nie je bezpečné“ s dôvodom (statická stránka bez IPC). Adresný riadok ukazuje odmietnutú adresu s červeným označením „Chyba certifikátu“.
+- Zámok sa zobrazí **len** keď WebKit pre načítanú stránku potvrdí overený certifikát (macOS `serverTrust`, Linux `tls_info` bez chýb), nikdy len podľa `https://` v adrese. Stránka s HTTP obsahom na HTTPS (macOS) má označenie „Čiastočne zabezpečené“.
+- Pravidlá blokovania sa pripoja k novej karte aj k oknu otvorenému cez `window.open` ešte pred prvou požiadavkou.
+
 ## Model hrozieb
 
 | Hrozba | Chránené? |

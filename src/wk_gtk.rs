@@ -19,7 +19,7 @@ use tao::{
     window::{Theme, Window},
 };
 use webkit2gtk::{
-    CacheModel, CookieManagerExt, DownloadExt, PolicyDecisionExt, PolicyDecisionType,
+    CacheModel, CookieManagerExt, TLSErrorsPolicy, DownloadExt, PolicyDecisionExt, PolicyDecisionType,
     ResponsePolicyDecisionExt, URIRequestExt, URIResponseExt, UserContentManagerExt, WebContext,
     WebContextExt, WebViewExt, WebsiteDataManagerExt, WebsiteDataTypes,
 };
@@ -30,8 +30,22 @@ use wry::{
 
 /// The shared ephemeral WebKitWebContext: nothing written to disk by WebKit.
 pub type Store = WebContext;
+/// Certificate failure callback: tab, refused URL, reasons.
+type TlsHandler = dyn Fn(u32, String, Vec<&'static str>);
 /// Tabs are created related to an existing view, which puts them in the shared context.
 pub struct Config(webkit2gtk::WebView);
+
+/// Engine-confirmed connection security of a committed page.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Tls {
+    /// Certificate validated by WebKit, no insecure subresources.
+    Secure,
+    /// Valid certificate, but HTTP content on the page (not detected on Linux).
+    #[allow(dead_code)]
+    Mixed,
+    /// No validated certificate (certificate errors, or not HTTPS).
+    Unverified,
+}
 
 #[allow(non_camel_case_types)]
 type GAsyncReadyCallback =
@@ -123,6 +137,7 @@ thread_local! {
     /// Downloads waiting for the user's answer (decide-destination is answered asynchronously).
     static ASKING: RefCell<Vec<(u32, webkit2gtk::Download, String)>> = const { RefCell::new(Vec::new()) };
     static STARTED: RefCell<Option<Rc<Started>>> = const { RefCell::new(None) };
+    static ON_TLS: RefCell<Option<Rc<TlsHandler>>> = const { RefCell::new(None) };
 }
 
 /// Hidden, never-loaded view owning an ephemeral context; views created related to it share
@@ -133,6 +148,10 @@ fn root_of(key: &'static std::thread::LocalKey<RefCell<Option<webkit2gtk::WebVie
             .get_or_insert_with(|| {
                 let ctx = WebContext::new_ephemeral();
                 ctx.set_cache_model(CacheModel::DocumentViewer);
+                // Explicit: certificate errors refuse the load, never an "ignore" fallback.
+                if let Some(m) = ctx.website_data_manager() {
+                    m.set_tls_errors_policy(TLSErrorsPolicy::Fail);
+                }
                 webkit2gtk::WebView::with_context(&ctx)
             })
             .clone()
@@ -356,9 +375,48 @@ pub const BLOCK_STATS: bool = false;
 
 pub fn on_blocked(_f: impl Fn() + 'static) {}
 
-pub fn watch_blocked(_v: &WebView, _tab: u32) {}
+/// Called when a navigation is refused because of the server certificate (tab, URL, reasons).
+pub fn on_tls_error(f: impl Fn(u32, String, Vec<&'static str>) + 'static) {
+    ON_TLS.with(|o| *o.borrow_mut() = Some(Rc::new(f)));
+}
 
-pub fn forget_blocked(_v: &WebView) {}
+fn tls_reasons(flags: gio::TlsCertificateFlags) -> Vec<&'static str> {
+    use gio::TlsCertificateFlags as F;
+    let all = [
+        (F::UNKNOWN_CA, "Certifikát nevydala dôveryhodná autorita"),
+        (F::BAD_IDENTITY, "Certifikát nepatrí tejto doméne"),
+        (F::NOT_ACTIVATED, "Certifikát ešte nie je platný"),
+        (F::EXPIRED, "Platnosť certifikátu vypršala"),
+        (F::REVOKED, "Certifikát bol zrušený"),
+        (F::INSECURE, "Certifikát používa nezabezpečený algoritmus"),
+        (F::GENERIC_ERROR, "Chyba pri overení certifikátu"),
+    ];
+    let r: Vec<_> = all.iter().filter(|(f, _)| flags.contains(*f)).map(|(_, m)| *m).collect();
+    if r.is_empty() { vec!["Certifikát sa nepodarilo overiť"] } else { r }
+}
+
+/// Certificate failures of `v` are reported as tab `tab`. The context's policy is FAIL (see
+/// `root_of`), so the load is already refused; returning true suppresses WebKit's own error page
+/// in favor of Crow's interstitial.
+pub fn watch(v: &WebView, tab: u32) {
+    v.webview().connect_load_failed_with_tls_errors(move |_, uri, _cert, flags| {
+        if let Some(f) = ON_TLS.with(|o| o.borrow().clone()) {
+            f(tab, uri.to_string(), tls_reasons(flags));
+        }
+        true
+    });
+}
+
+pub fn forget(_v: &WebView) {}
+
+/// TLS state of the committed page as verified by WebKit (never inferred from the URL).
+/// Mixed content is not reported by WebKitGTK.
+pub fn tls(v: &WebView) -> Tls {
+    match v.webview().tls_info() {
+        Some((_, flags)) if flags.is_empty() => Tls::Secure,
+        _ => Tls::Unverified,
+    }
+}
 
 pub fn take_blocked() -> Vec<(u32, u32)> {
     Vec::new()
