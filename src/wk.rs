@@ -69,6 +69,18 @@ pub fn new_store() -> Store {
     unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm()) }
 }
 
+/// Media playback of tab views: AirPlay routing allowed (`allowsAirPlayForMediaPlayback`) and no
+/// media type gated behind a user gesture (`WKAudiovisualMediaTypeNone` = 0), so a started video
+/// can be sent to an AirPlay device. Both are WebKit's macOS defaults; set explicitly so a changed
+/// default cannot silently disable them. Storage settings are untouched.
+#[cfg(target_os = "macos")]
+fn media_prefs(c: &WKWebViewConfiguration) {
+    unsafe {
+        let _: () = msg_send![c, setAllowsAirPlayForMediaPlayback: true];
+        let _: () = msg_send![c, setMediaTypesRequiringUserActionForPlayback: 0usize];
+    }
+}
+
 pub fn config(store: &Store, adblock: bool) -> Config {
     unsafe {
         let c = WKWebViewConfiguration::new(mtm());
@@ -76,13 +88,16 @@ pub fn config(store: &Store, adblock: bool) -> Config {
         if adblock {
             set_manager_rules(&c.userContentController(), true);
         }
+        media_prefs(&c);
         Config(c)
     }
 }
 
 /// window.open target: WebKit's own configuration keeps `window.opener` working.
 pub fn popup_config(features: NewWindowFeatures) -> Config {
-    Config(features.opener.target_configuration)
+    let c = features.opener.target_configuration;
+    media_prefs(&c);
+    Config(c)
 }
 
 /// Monterey's WebKit reports an old Safari version, so sites (e.g. Google) serve legacy layouts.
