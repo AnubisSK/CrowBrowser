@@ -10,6 +10,7 @@ use serde_json::json;
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
+    fmt::Write as _,
     path::{Path, PathBuf},
     rc::Rc,
     time::{Duration, Instant},
@@ -49,7 +50,7 @@ const MAX_DOWNLOADS: usize = 500;
 const BLOCK_BYTES: u64 = 50 * 1024;
 const BLOCK_MS: u64 = 50;
 
-const FIND_JS: &str = r#"(function (q, dir) {
+const FIND_JS: &str = r"(function (q, dir) {
   const sel = getSelection();
   if (!q) { sel.removeAllRanges(); return 0; }
   if (dir === 'new') sel.removeAllRanges();
@@ -58,7 +59,7 @@ const FIND_JS: &str = r#"(function (q, dir) {
   let n = 0, i = 0;
   while ((i = t.indexOf(s, i)) !== -1) { n++; i += s.length; }
   return ok ? n : 0;
-})"#;
+})";
 
 /// Runs in the page: tries <link rel=icon> candidates then /favicon.ico, re-encodes the first
 /// one that loads into a PNG data URL (only CORS-readable images survive the canvas).
@@ -286,30 +287,27 @@ impl TabCtx {
         let id = self.next();
         let rect = content_rect(&self.window, TABS_H + NAV_H);
         // Rules go on before WebKit navigates the popup (adoption as a tab happens later).
-        match self.build(
+        if let Ok(view) = self.build(
             id,
             None,
             wk::popup_config(features),
             rect,
             self.adblock.get(),
         ) {
-            Ok(view) => {
-                let response = wk::popup_response(&view);
-                PENDING.with(|p| p.borrow_mut().push((id, view)));
-                self.send(UserEvent::AdoptTab(id));
-                response
-            }
-            Err(_) => {
-                self.send(UserEvent::NewTab(url));
-                NewWindowResponse::Deny
-            }
+            let response = wk::popup_response(&view);
+            PENDING.with(|p| p.borrow_mut().push((id, view)));
+            self.send(UserEvent::AdoptTab(id));
+            response
+        } else {
+            self.send(UserEvent::NewTab(url));
+            NewWindowResponse::Deny
         }
     }
 
     /// Internal UI with `window.ipc`. Strict CSP: no network, no external scripts/styles/frames;
     /// only its own inline code. Tab views never get an IPC handler, so wry never injects
     /// `window.ipc` there (popups inherit the opener tab's configuration, also without IPC).
-    fn ui_view(&self, html: String, rect: Rect) -> Option<WebView> {
+    fn ui_view(&self, html: &str, rect: Rect) -> Option<WebView> {
         const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'\">";
         // Dictionaries + `t()` go in first, so the page's own script can use them right away.
         let i18n = include_str!("i18n.js")
@@ -556,7 +554,7 @@ impl Session {
 
     fn sync(&self, cfg: &Settings) {
         let cur = self.cur();
-        let url = cur.map(|t| t.url.as_str()).unwrap_or("");
+        let url = cur.map_or("", |t| t.url.as_str());
         let tabs: Vec<_> = self
             .tabs
             .iter()
@@ -594,7 +592,7 @@ impl Session {
         } else {
             String::new()
         };
-        let tab = self.cur().map_or(0, |t| t.blocked) as u64;
+        let tab = u64::from(self.cur().map_or(0, |t| t.blocked));
         let total = self.data.blocked_total;
         json!({
             "host": host,
@@ -725,7 +723,7 @@ impl App {
         let html = include_str!("lock.html")
             .replace("/*MODE*/", &js(mode))
             .replace("/*LOGO*/", include_str!("../assets/logo.svg"));
-        self.lock = self.ctx.ui_view(html, full_rect(&self.ctx.window));
+        self.lock = self.ctx.ui_view(&html, full_rect(&self.ctx.window));
     }
 
     /// Lock-screen error (`key` in `locales.json`), shown in the UI language.
@@ -804,9 +802,9 @@ impl App {
                 tab,
                 url,
                 name,
-            } => self.download_ask(key, tab, url, name),
-            UserEvent::DownloadStarted { url, path } => self.download_started(url, path),
-            UserEvent::DownloadDone { url, ok } => self.download_done(url, ok),
+            } => self.download_ask(key, tab, url, &name),
+            UserEvent::DownloadStarted { url, path } => self.download_started(url, &path),
+            UserEvent::DownloadDone { url, ok } => self.download_done(&url, ok),
             UserEvent::FindResult(r) => {
                 if let Some(s) = &self.s {
                     s.eval(&format!(
@@ -872,7 +870,7 @@ impl App {
                 for (id, n) in blocked {
                     if let Some(i) = s.tab_idx(id) {
                         s.tabs[i].blocked += n;
-                        s.data.blocked_total += n as u64;
+                        s.data.blocked_total += u64::from(n);
                         s.dirty = true;
                     }
                 }
@@ -880,7 +878,7 @@ impl App {
                 s.eval(&format!("setBlocked({n})"));
                 s.push_shield(&self.cfg);
             }
-            UserEvent::TlsError { tab, url, reasons } => self.tls_error(tab, url, reasons),
+            UserEvent::TlsError { tab, url, reasons } => self.tls_error(tab, url, &reasons),
             UserEvent::Fullscreen { tab, on } => {
                 let Some(s) = self.s.as_mut() else { return };
                 s.video_fullscreen = if on { Some(tab) } else { s.video_fullscreen.filter(|t| *t != tab) };
@@ -906,7 +904,7 @@ impl App {
                     s.refresh_panel(&self.cfg);
                 }
             }
-            UserEvent::Icon { tab, data } => self.icon(tab, data),
+            UserEvent::Icon { tab, data } => self.icon(tab, &data),
             UserEvent::Update { result, manual } => self.update_result(result, manual),
             UserEvent::UpdateSaved(path) => {
                 let Some(s) = self.s.as_mut() else { return };
@@ -953,7 +951,7 @@ impl App {
         self.next_tick = now + TICK;
         let Some(s) = self.s.as_mut() else { return };
         if self.cfg.unload > 0 {
-            let limit = Duration::from_secs(self.cfg.unload as u64 * 60);
+            let limit = Duration::from_secs(u64::from(self.cfg.unload) * 60);
             let mut changed = false;
             for (i, t) in s.tabs.iter_mut().enumerate() {
                 if i != s.active && t.view.is_some() && t.hidden_since.elapsed() >= limit {
@@ -1039,11 +1037,11 @@ impl App {
         self.ctx.adblock.set(self.cfg.adblock);
         // The vault is authoritative; the plain copy only serves the next lock screen.
         settings::store_language(&self.cfg.language);
-        *self.ctx.lang.borrow_mut() = self.cfg.language.clone();
+        self.ctx.lang.borrow_mut().clone_from(&self.cfg.language);
         let w = &self.ctx.window;
         wk::set_theme(w, theme_of(&self.cfg.theme));
         let html = include_str!("toolbar.html").to_string();
-        let Some(toolbar) = self.ctx.ui_view(html, toolbar_rect(w, TABS_H + NAV_H)) else {
+        let Some(toolbar) = self.ctx.ui_view(&html, toolbar_rect(w, TABS_H + NAV_H)) else {
             return self.lock_fail("window_failed");
         };
         self.lock = None;
@@ -1139,14 +1137,13 @@ impl App {
         if let Some(v) = s.video_fullscreen.take().and_then(|id| s.tab_idx(id)).and_then(|i| s.tabs[i].view.as_ref()) {
             let _ = v.evaluate_script("document.webkitExitFullscreen && document.webkitExitFullscreen()");
         }
-        if s.active != idx {
-            if let Some(t) = s.tabs.get_mut(s.active) {
+        if s.active != idx
+            && let Some(t) = s.tabs.get_mut(s.active) {
                 t.hidden_since = Instant::now();
                 if let Some(v) = &t.view {
                     let _ = v.set_visible(false);
                 }
             }
-        }
         s.active = idx;
         let rect = content_rect(&self.ctx.window, s.top());
         let tab = &mut s.tabs[idx];
@@ -1317,7 +1314,7 @@ impl App {
         }
         t.loading = false;
         if !url.is_empty() {
-            t.url = url.clone();
+            t.url.clone_from(&url);
         }
         // Lock only for a certificate WebKit validated, never from the "https://" prefix.
         t.tls = match (url.split(':').next(), &t.view) {
@@ -1362,14 +1359,14 @@ impl App {
         let t = &mut s.tabs[i];
         t.title = title;
         if let Some(e) = s.data.history.last_mut().filter(|e| e.url == t.url) {
-            e.title = t.title.clone();
+            e.title.clone_from(&t.title);
         }
         s.sync(&self.cfg);
     }
 
     /// WebKit refused the navigation (certificate). Shows a static interstitial in the tab (no
     /// IPC, no way to proceed); the address bar shows the refused URL marked as broken.
-    fn tls_error(&mut self, id: u32, url: String, reasons: Vec<&'static str>) {
+    fn tls_error(&mut self, id: u32, url: String, reasons: &[&'static str]) {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let t = &mut s.tabs[i];
@@ -1381,7 +1378,7 @@ impl App {
             t.url = url;
         }
         if let Some(v) = &t.view {
-            let _ = v.load_html(&interstitial(&s.lang.borrow(), &host_of(&t.url), &reasons));
+            let _ = v.load_html(&interstitial(&s.lang.borrow(), &host_of(&t.url), reasons));
         }
         if i == s.active {
             s.site = None;
@@ -1389,10 +1386,10 @@ impl App {
         s.sync(&self.cfg);
     }
 
-    fn icon(&mut self, id: u32, res: String) {
+    fn icon(&mut self, id: u32, res: &str) {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
-        let data: String = serde_json::from_str(&res).unwrap_or_default();
+        let data: String = serde_json::from_str(res).unwrap_or_default();
         if data.is_empty() {
             return; // still loading, polled again
         }
@@ -1558,13 +1555,12 @@ impl App {
             .view()
             .filter(|_| url.starts_with("https:"))
             .and_then(wk::cert_chain)
-            .map(|(chain, errors)| {
+            .map_or((Vec::new(), Vec::new()), |(chain, errors)| {
                 (
                     chain.iter().filter_map(|d| cert::summarize(d)).collect(),
                     errors,
                 )
-            })
-            .unwrap_or((Vec::new(), Vec::new()));
+            });
         let data = json!({
             "url": url,
             "host": host,
@@ -1585,15 +1581,15 @@ impl App {
         let h = if s.site_h > 0.0 { s.site_h } else { 260.0 };
         s.site = self
             .ctx
-            .ui_view(html, site_rect(&self.ctx.window, s.site_x, h));
+            .ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
     }
 
-    fn download_ask(&mut self, key: u32, tab: Option<u32>, url: String, name: String) {
+    fn download_ask(&mut self, key: u32, tab: Option<u32>, url: String, name: &str) {
         let Some(s) = self.s.as_mut() else {
             return wk::decide_download(key, false, &url, None);
         };
         let id = self.ctx.next();
-        let name = download::sanitize(&name);
+        let name = download::sanitize(name);
         let risk = download::risk(&name);
         s.asks.push(Ask {
             id,
@@ -1611,7 +1607,7 @@ impl App {
         }
     }
 
-    fn download_started(&mut self, url: String, path: PathBuf) {
+    fn download_started(&mut self, url: String, path: &Path) {
         let Some(s) = self.s.as_mut() else { return };
         let name = path
             .file_name()
@@ -1634,7 +1630,7 @@ impl App {
         s.refresh_panel(&self.cfg);
     }
 
-    fn download_done(&mut self, url: String, ok: bool) {
+    fn download_done(&mut self, url: &str, ok: bool) {
         let Some(s) = self.s.as_mut() else { return };
         let Some(d) = s
             .data
@@ -1698,7 +1694,9 @@ impl App {
             // Cookies were deleted while this export ran: it may still contain them. Export again.
             return self.persist(stronger(after, queued.unwrap_or(After::Nothing)));
         }
-        if !s.cookies_ok {
+        if s.cookies_ok {
+            s.data.cookies = cookies;
+        } else {
             // Import was never confirmed: keep vault cookies WebKit may not have received yet.
             let mut cookies = cookies;
             let missing: Vec<CookieRec> = s
@@ -1712,8 +1710,6 @@ impl App {
                 })
                 .collect();
             cookies.extend(missing);
-            s.data.cookies = cookies;
-        } else {
             s.data.cookies = cookies;
         }
         s.save_now(&self.cfg);
@@ -1967,7 +1963,7 @@ impl App {
                     let html = include_str!("panel.html").replace("/*DATA*/", &data);
                     s.panel = self
                         .ctx
-                        .ui_view(html, content_rect(&self.ctx.window, s.top()));
+                        .ui_view(&html, content_rect(&self.ctx.window, s.top()));
                     s.panel_section = arg.to_string();
                 }
                 s.sync(&self.cfg);
@@ -2186,7 +2182,7 @@ impl App {
                 let h = if s.site_h > 0.0 { s.site_h } else { 300.0 };
                 s.site = self
                     .ctx
-                    .ui_view(html, site_rect(&self.ctx.window, s.site_x, h));
+                    .ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
                 s.shield_open = true;
             }
             "get-adblock-stats" => s.push_shield(&self.cfg),
@@ -2201,7 +2197,7 @@ impl App {
                     return;
                 }
                 settings::store_language(&self.cfg.language);
-                *self.ctx.lang.borrow_mut() = self.cfg.language.clone();
+                self.ctx.lang.borrow_mut().clone_from(&self.cfg.language);
                 let script = format!("setLanguage({})", js(&self.cfg.language));
                 for v in std::iter::once(&s.toolbar).chain(s.panel.as_ref()).chain(s.site.as_ref()) {
                     let _ = v.evaluate_script(&script);
@@ -2329,7 +2325,10 @@ fn html_escape(s: &str) -> String {
 /// Static certificate-error page (rendered in the tab, which has no IPC), in the UI language.
 fn interstitial(lang: &str, host: &str, reasons: &[&str]) -> String {
     let tr = |key: &str| html_escape(&settings::tr(lang, key, &[]));
-    let items: String = reasons.iter().map(|r| format!("<li>{}</li>", tr(r))).collect();
+    let items = reasons.iter().fold(String::new(), |mut s, r| {
+        let _ = write!(s, "<li>{}</li>", tr(r));
+        s
+    });
     let host = if host.is_empty() { tr("this_site") } else { html_escape(host) };
     // Template escaped first, then the escaped host inserted in bold.
     let desc = tr("interstitial_desc").replace("{0}", &format!("<b>{host}</b>"));
@@ -2567,6 +2566,7 @@ fn to_url(input: &str, search_prefix: &str) -> String {
     }
     .to_ascii_lowercase();
     // Local dev servers and mDNS hosts usually have no TLS.
+    #[allow(clippy::case_sensitive_file_extension_comparisons)] // host is already lowercased, not a file
     let local =
         matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]") || host.ends_with(".local");
     if !input.contains(' ') && local {
@@ -2578,10 +2578,12 @@ fn to_url(input: &str, search_prefix: &str) -> String {
         for b in input.bytes() {
             match b {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    q.push(b as char)
+                    q.push(b as char);
                 }
                 b' ' => q.push('+'),
-                _ => q.push_str(&format!("%{b:02X}")),
+                _ => {
+                    let _ = write!(q, "%{b:02X}");
+                }
             }
         }
         q

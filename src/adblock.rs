@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Write as _,
     fs,
     path::PathBuf,
     sync::Mutex,
@@ -62,7 +63,7 @@ const MAX_RULES: usize = 150_000;
 /// Bump when the conversion changes, so cached compiled lists are rebuilt.
 const FORMAT: &str = "adblock-0.13/2";
 const MAX_LIST_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+const MAX_AGE: Duration = Duration::from_hours(168);
 
 /// One logical filter list. WebKit takes at most 150 000 rules per list and exceptions only
 /// cancel rules of their own list, so each source gets its own group; a group that is still too
@@ -150,7 +151,7 @@ fn marker_path(id: &str) -> PathBuf {
 
 fn modified_ms(p: &PathBuf) -> Option<u64> {
     let t = fs::metadata(p).and_then(|m| m.modified()).ok()?;
-    Some(t.duration_since(UNIX_EPOCH).ok()?.as_millis() as u64)
+    u64::try_from(t.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
 /// Panel data: sources (downloaded or not, when) and rule counts (main = all but hosts).
@@ -247,7 +248,10 @@ pub fn input_hash(g: &Group) -> Option<String> {
         h.update((text.len() as u64).to_le_bytes());
         h.update(text);
     }
-    Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Some(h.finalize().iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    }))
 }
 
 fn marker(id: &str) -> Option<Marker> {
@@ -362,7 +366,7 @@ pub fn fetch(s: &Source) -> Result<(), &'static str> {
         .arg(s.url)
         .status()
         .is_ok_and(|st| st.success());
-    let lines = if ok { fs::read_to_string(&part).map(|t| t.lines().count()).unwrap_or(0) } else { 0 };
+    let lines = if ok { fs::read_to_string(&part).map_or(0, |t| t.lines().count()) } else { 0 };
     if lines < 1000 {
         let _ = fs::remove_file(&part);
         return Err("fetch_failed");

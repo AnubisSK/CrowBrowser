@@ -198,6 +198,8 @@ fn keep_rules(id: &'static str, list: Retained<WKContentRuleList>) {
 }
 
 /// Compiles rule list `id` (stored by WebKit, reused via `load_rules`).
+/// Takes `json` by value to match the Linux backend, which hands it to GLib without copying.
+#[allow(clippy::needless_pass_by_value)]
 pub fn compile_rules(id: &'static str, json: String, done: impl Fn() + 'static) {
     let Some(store) = store() else { return };
     let block = RcBlock::new(move |list: *mut WKContentRuleList, err: *mut NSError| {
@@ -318,8 +320,8 @@ unsafe extern "C-unwind" fn nav_failed(
             Some(info) => msg_send![info, objectForKey: ns_string!("NSErrorFailingURLStringKey")],
             None => std::ptr::null_mut(),
         };
-        let url = (url as *mut NSString).as_ref().map(|u| u.to_string()).unwrap_or_default();
-        (domain.as_ref().map(|d| d.to_string()).unwrap_or_default(), code, url)
+        let url = url.cast::<NSString>().as_ref().map(std::string::ToString::to_string).unwrap_or_default();
+        (domain.as_ref().map(std::string::ToString::to_string).unwrap_or_default(), code, url)
     };
     let tab = tab_of(web_view);
     let (Some(tab), Some(reason)) = (tab, tls_reason(code).filter(|_| domain == "NSURLErrorDomain")) else { return };
@@ -342,10 +344,10 @@ fn set_tab(web_view: *mut AnyObject, tab: Option<u32>) {
     unsafe {
         objc2::ffi::objc_setAssociatedObject(
             web_view,
-            &TAB_KEY as *const u8 as *const c_void,
+            (&raw const TAB_KEY).cast::<c_void>(),
             ptr,
             objc2::ffi::OBJC_ASSOCIATION_RETAIN_NONATOMIC,
-        )
+        );
     };
 }
 
@@ -353,14 +355,14 @@ fn tab_of(web_view: *mut AnyObject) -> Option<u32> {
     if web_view.is_null() {
         return None;
     }
-    let v = unsafe { objc2::ffi::objc_getAssociatedObject(web_view, &TAB_KEY as *const u8 as *const c_void) };
-    unsafe { (v as *const NSString).as_ref() }?.to_string().parse().ok()
+    let v = unsafe { objc2::ffi::objc_getAssociatedObject(web_view, (&raw const TAB_KEY).cast::<c_void>()) };
+    unsafe { v.cast::<NSString>().as_ref() }?.to_string().parse().ok()
 }
 
 /// Adds `imp` for `sel` to the delegate's class unless the class already implements it.
 unsafe fn add_method(cls: &AnyClass, sel: Sel, imp: Imp, types: &std::ffi::CStr) {
     if cls.instance_method(sel).is_none() {
-        unsafe { objc2::ffi::class_addMethod(cls as *const AnyClass as *mut AnyClass, sel, imp, types.as_ptr()) };
+        unsafe { objc2::ffi::class_addMethod(std::ptr::from_ref::<AnyClass>(cls).cast_mut(), sel, imp, types.as_ptr()) };
     }
 }
 

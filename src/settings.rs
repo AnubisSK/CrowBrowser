@@ -55,20 +55,26 @@ impl Default for Settings {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 pub fn data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").unwrap_or_default();
     PathBuf::from(home).join("Library/Application Support/Crow")
 }
 
 /// `$XDG_DATA_HOME/crow`, default `~/.local/share/crow`.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(test)))]
 pub fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"))
         .join("crow")
+}
+
+/// Tests never touch the real profile: a per-process temp dir instead.
+#[cfg(test)]
+pub fn data_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("crow-test-{}", std::process::id()))
 }
 
 /// The lock screen is shown before the vault (and its settings) is decrypted, so the chosen
@@ -157,5 +163,51 @@ impl Settings {
             .find(|e| e.0 == self.search)
             .unwrap_or(&ENGINES[0])
             .2
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn set_accepts_valid_values() {
+        let mut s = Settings::default();
+        assert!(s.set("search", "google"));
+        assert_eq!(s.search_prefix(), "https://www.google.com/search?q=");
+        assert!(s.set("adblock", "off"));
+        assert!(!s.adblock);
+        assert!(s.set("zoom", " 1.5 "));
+        assert!((s.zoom - 1.5).abs() < f64::EPSILON);
+        assert!(s.set("language", "de"));
+    }
+
+    #[test]
+    fn set_rejects_invalid_values() {
+        let mut s = Settings::default();
+        assert!(!s.set("search", "evil"));
+        assert!(!s.set("zoom", "10"));
+        assert!(!s.set("unload", "-1"));
+        assert!(!s.set("language", "fr"));
+        assert!(!s.set("homepage", "a\nb"));
+        assert!(!s.set("unknown", "x"));
+        assert_eq!(s.search, "ddg");
+        assert_eq!(s.language, "sk");
+    }
+
+    #[test]
+    fn allowlist_matches_host_and_subdomains_only() {
+        let s = Settings { adblock_allow: vec!["example.com".into()], ..Settings::default() };
+        assert!(s.allowed("example.com"));
+        assert!(s.allowed("www.example.com"));
+        assert!(!s.allowed("badexample.com"));
+        assert!(!s.allowed(""));
+    }
+
+    #[test]
+    fn tr_falls_back_to_english_then_key() {
+        assert_eq!(tr("en", "up_to_date", &["1.0"]), "CrowBrowser 1.0 is the latest version");
+        assert_eq!(tr("xx", "up_to_date", &["1.0"]), "CrowBrowser 1.0 is the latest version");
+        assert_eq!(tr("sk", "no_such_key", &[]), "no_such_key");
     }
 }

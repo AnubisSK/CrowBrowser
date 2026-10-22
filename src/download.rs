@@ -28,7 +28,7 @@ fn executable(ext: &str) -> bool {
 
 /// Safe file name: no path parts, control or hidden characters, leading dots or padding, and
 /// before an executable extension every dot becomes "_" ("invoice.pdf.tar.exe" ->
-/// "invoice_pdf_tar.exe", "a.pdf..exe" -> "a_pdf__.exe"), so the only visible type is the real one.
+/// "invoice_pdf_tar.exe", "a.pdf..exe" -> "a_pdf_.exe"), so the only visible type is the real one.
 pub fn sanitize(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
     let clean: String = base.chars().filter(|c| !c.is_control() && !is_hidden(*c)).collect();
@@ -96,3 +96,48 @@ pub fn quarantine(path: &Path) {
 /// Linux has no quarantine attribute; downloads are written without the executable bit.
 #[cfg(target_os = "linux")]
 pub fn quarantine(_path: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_dot_executable_decoy_is_neutralized() {
+        assert_eq!(sanitize("faktura.pdf.tar.exe"), "faktura_pdf_tar.exe");
+        assert_eq!(sanitize("a.pdf..exe"), "a_pdf_.exe");
+        assert_eq!(risk("faktura_pdf_tar.exe").as_deref(), Some("exe"));
+    }
+
+    #[test]
+    fn non_executable_keeps_its_dots() {
+        assert_eq!(sanitize("archive.tar.gz"), "archive.tar.gz");
+        assert_eq!(risk("archive.tar.gz"), None);
+    }
+
+    #[test]
+    fn hidden_and_rtl_characters_are_removed() {
+        assert_eq!(sanitize("invoice\u{202E}gpj.exe"), "invoicegpj.exe");
+        assert_eq!(sanitize("a\u{200B}b\u{FEFF}.txt"), "ab.txt");
+        assert_eq!(sanitize("bad\u{0}\nname.txt"), "badname.txt");
+    }
+
+    #[test]
+    fn path_traversal_is_stripped() {
+        assert_eq!(sanitize("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize("..\\..\\Windows\\evil.bat"), "evil.bat");
+        assert_eq!(sanitize("...hidden"), "hidden");
+    }
+
+    #[test]
+    fn empty_name_falls_back_to_download() {
+        assert_eq!(sanitize(""), "download");
+        assert_eq!(sanitize("../"), "download");
+        assert_eq!(sanitize(" . . "), "download");
+        assert_eq!(sanitize("\u{202E}"), "download");
+    }
+
+    #[test]
+    fn long_name_is_truncated() {
+        assert_eq!(sanitize(&"a".repeat(500)).chars().count(), 200);
+    }
+}

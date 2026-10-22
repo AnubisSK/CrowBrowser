@@ -135,8 +135,7 @@ pub struct Vault {
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 fn path() -> PathBuf {
@@ -234,5 +233,72 @@ impl Vault {
 
     pub fn destroy() {
         let _ = fs::remove_file(path());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// All tests share the one vault file in the test data dir.
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    fn sample() -> VaultData {
+        let mut data = VaultData::default();
+        data.bookmarks.push(Bookmark { url: "https://example.com".into(), title: "Example".into() });
+        data.session.push("https://example.org".into());
+        data.blocked_total = 42;
+        data
+    }
+
+    fn assert_sample(data: &VaultData) {
+        assert_eq!(data.bookmarks.len(), 1);
+        assert_eq!(data.bookmarks[0].url, "https://example.com");
+        assert_eq!(data.bookmarks[0].title, "Example");
+        assert_eq!(data.session.as_slice(), ["https://example.org"]);
+        assert_eq!(data.blocked_total, 42);
+    }
+
+    #[test]
+    fn roundtrip_with_correct_password() {
+        let _g = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let v = Vault::create("correct horse");
+        v.save(&sample()).unwrap();
+        assert!(Vault::exists());
+        let bytes = fs::read(path()).unwrap();
+        assert_eq!(&bytes[..6], MAGIC);
+        assert!(!bytes.windows(11).any(|w| w == b"example.com"), "plaintext leaked");
+        let (v2, data) = Vault::unlock("correct horse").unwrap();
+        assert_sample(&data);
+        assert!(v2.verify("correct horse"));
+        Vault::destroy();
+    }
+
+    #[test]
+    fn wrong_password_fails() {
+        let _g = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let v = Vault::create("right");
+        v.save(&sample()).unwrap();
+        assert!(!v.verify("wrong"));
+        assert_eq!(Vault::unlock("wrong").err(), Some("wrong_password"));
+        Vault::destroy();
+    }
+
+    #[test]
+    fn rotate_key_reencrypts_under_new_password() {
+        let _g = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut v = Vault::create("old");
+        v.save(&sample()).unwrap();
+        let old_salt = v.salt;
+        v.rotate_key("new", &sample()).unwrap();
+        assert_ne!(v.salt, old_salt);
+        assert!(v.verify("new"));
+        assert!(!v.verify("old"));
+        assert!(!data_dir().join(".vault.tmp").exists());
+        assert_eq!(Vault::unlock("old").err(), Some("wrong_password"));
+        let (_, data) = Vault::unlock("new").unwrap();
+        assert_sample(&data);
+        Vault::destroy();
     }
 }

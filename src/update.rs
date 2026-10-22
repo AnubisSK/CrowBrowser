@@ -6,6 +6,7 @@ use crate::app::UserEvent;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    fmt::Write as _,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -112,7 +113,7 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// Installer for this OS/arch, only from this repo's release downloads.
-fn pick_asset(assets: Vec<RelAsset>) -> Option<Asset> {
+fn pick_asset(assets: &[RelAsset]) -> Option<Asset> {
     let prefix = format!("https://github.com/{REPO}/releases/download/");
     #[cfg(target_os = "macos")]
     let exts: Vec<&str> = vec![".dmg"];
@@ -151,7 +152,7 @@ fn pick_asset(assets: Vec<RelAsset>) -> Option<Asset> {
         .as_deref()
         .and_then(|d| d.strip_prefix("sha256:"))
         .filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
-        .map(|h| h.to_ascii_lowercase());
+        .map(str::to_ascii_lowercase);
     Some(Asset { name: a.name.clone(), url: a.browser_download_url.clone(), size: a.size, sha256 })
 }
 
@@ -191,7 +192,7 @@ fn latest() -> Result<Option<Info>, String> {
         version: r.tag_name.trim_start_matches(['v', 'V']).to_string(),
         notes: notes(&r.tag_name),
         page: r.html_url,
-        asset: pick_asset(r.assets),
+        asset: pick_asset(&r.assets),
     }))
 }
 
@@ -216,9 +217,9 @@ fn download_dir() -> PathBuf {
 /// the mode.
 pub fn private_file(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::PermissionsExt;
     fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
     // An existing file keeps its old mode: enforce it.
-    use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
 }
 
@@ -233,7 +234,10 @@ fn sha256_of(path: &Path) -> Option<String> {
         }
         h.update(&buf[..n]);
     }
-    Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Some(h.finalize().iter().fold(String::with_capacity(64), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    }))
 }
 
 /// Downloads the installer (user already confirmed), verifies its digest, then reveals it.
@@ -249,7 +253,7 @@ pub fn download(proxy: EventLoopProxy<UserEvent>, asset: Asset) {
             let _ = proxy.send_event(e);
         };
         send(UserEvent::DownloadStarted { url: asset.url.clone(), path: path.clone() });
-        let fetched = private_file(&part).ok().and_then(|_| {
+        let fetched = private_file(&part).ok().and_then(|()| {
             curl()
                 .args(["--max-time", "1800", "--max-filesize"])
                 .arg((asset.size.max(1) + 1024 * 1024).to_string())

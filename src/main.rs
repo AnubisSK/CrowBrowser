@@ -1,3 +1,15 @@
+#![warn(clippy::pedantic)]
+#![allow(
+    clippy::doc_markdown,
+    clippy::too_many_lines,
+    clippy::struct_excessive_bools,
+    clippy::many_single_char_names,
+    clippy::similar_names,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+
 mod adblock;
 mod app;
 mod cert;
@@ -100,12 +112,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run(move |event, _, control_flow| {
         match event {
             Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                app.handle(UserEvent::Menu("quit".into()))
+                app.handle(UserEvent::Menu("quit".into()));
             }
             Event::WindowEvent { event: WindowEvent::Resized(_), .. } => app.resize(),
             Event::WindowEvent { event: WindowEvent::Focused(on), .. } => app.focused(on),
             // macOS: links from other apps once Crow is the default browser.
-            Event::Opened { urls } => app.handle(UserEvent::OpenUrls(urls.iter().map(|u| u.to_string()).collect())),
+            Event::Opened { urls } => app.handle(UserEvent::OpenUrls(urls.iter().map(std::string::ToString::to_string).collect())),
             Event::UserEvent(e) => app.handle(e),
             Event::LoopDestroyed => app.shutdown(),
             _ => {}
