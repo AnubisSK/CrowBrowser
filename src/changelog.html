@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="{{@lang}}">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src data:;">
+<title>{{whats_new}} · Crow 0.1.1</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #18181b; --card: #222226; --line: #2f2f35; --fg: #e6e6e9; --mute: #9a9aa3; --accent: #5b8def; --ok: #3fb950;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; --bg: #f4f4f6; --card: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 40px 32px 64px; }
+  header { margin-bottom: 28px; }
+  h1 { font-size: 26px; font-weight: 600; }
+  .ver { display: inline-block; margin-left: 8px; padding: 2px 10px; border-radius: 12px; font-size: 13px; font-weight: 600; color: #fff; background: var(--accent); vertical-align: middle; }
+  .lead { color: var(--mute); margin-top: 6px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px; margin-bottom: 16px; }
+  h2 { font-size: 16px; font-weight: 600; margin-bottom: 10px; }
+  ul { padding-left: 20px; }
+  li + li { margin-top: 6px; }
+  li b { font-weight: 600; }
+  code { font: 12px ui-monospace, "SF Mono", Menlo, "DejaVu Sans Mono", monospace; background: rgba(127, 127, 127, .15); padding: 1px 5px; border-radius: 4px; }
+  footer { color: var(--mute); font-size: 12px; margin-top: 24px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>{{whats_new}} <span class="ver">0.1.1</span></h1>
+    <p class="lead">{{cl_lead}}</p>
+  </header>
+
+  <section>
+    <h2>{{cl_perf}}</h2>
+    <ul>
+      <li>{{cl_perf_1}}</li>
+      <li>{{cl_perf_2}}</li>
+      <li>{{cl_perf_3}}</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>{{cl_security}}</h2>
+    <ul>
+      <li>{{cl_sec_1}}</li>
+      <li>{{cl_sec_2}}</li>
+      <li>{{cl_sec_3}}</li>
+      <li>{{cl_sec_4}}</li>
+      <li>{{cl_sec_5}}</li>
+      <li>{{cl_sec_6}}</li>
+      <li>{{cl_sec_7}}</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>{{cl_downloads}}</h2>
+    <ul>
+      <li>{{cl_dl_1}}</li>
+      <li>{{cl_dl_2}}</li>
+      <li>{{cl_dl_3}}</li>
+      <li>{{cl_dl_4}}</li>
+      <li>{{cl_dl_5}}</li>
+      <li>{{cl_dl_6}}</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>{{cl_ui}}</h2>
+    <ul>
+      <li>{{cl_ui_i18n}}</li>
+      <li>{{cl_ui_1}}</li>
+      <li>{{cl_ui_2}}</li>
+      <li>{{cl_ui_3}}</li>
+      <li>{{cl_ui_4}}</li>
+      <li>{{cl_ui_5}}</li>
+      <li>{{cl_ui_6}}</li>
+    </ul>
+  </section>
+
+  <footer>{{cl_footer}}</footer>
+</main>
+</body>
+</html>
