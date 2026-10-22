@@ -12,6 +12,12 @@
     const s = String(dict[key] ?? L.en[key] ?? key ?? '');
     return s.replace(/\{(\d+)\}/g, (m, i) => (args[i] === undefined ? m : String(args[i])));
   };
+  // HTML entity escaping for markup contexts. `t()` output is only ever assigned via
+  // textContent / attributes; any future HTML template must use `t.html()` instead.
+  const escapeHtml = (v) => String(v).replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+  // Like `t()`, but every argument is HTML-escaped before it is substituted.
+  t.html = (key, ...args) => t(key, ...args.map(escapeHtml));
   // Plural forms: Slovak/Czech have one / few (2–4) / many, English/German one / other.
   // `shown` replaces `{0}` instead of `n` (e.g. a locale-formatted number).
   t.plural = (n, base, shown = n) => {

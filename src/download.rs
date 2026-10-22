@@ -12,12 +12,6 @@ const EXECUTABLE: &[&str] = &[
     "rpm", "apk", "flatpakref", "snap", "py", "pl", "rb", "php",
 ];
 
-/// Harmless-looking extensions used as decoys in front of a real one ("invoice.pdf.exe").
-const DECOY: &[&str] = &[
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "txt", "rtf", "csv", "jpg", "jpeg",
-    "png", "gif", "webp", "heic", "mp3", "mp4", "mov", "avi", "mkv", "wav", "zip", "rar", "7z", "html",
-];
-
 /// Invisible / direction-changing characters (U+202E can make "gpj.exe" look like "exe.jpg").
 fn is_hidden(c: char) -> bool {
     matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')
@@ -32,9 +26,9 @@ fn executable(ext: &str) -> bool {
     EXECUTABLE.contains(&ext)
 }
 
-/// Safe file name: no path parts, control or hidden characters, leading dots or padding, and a
-/// decoy extension before an executable one is neutralized ("invoice.pdf.exe" ->
-/// "invoice_pdf.exe"), so the visible name always ends with the real type.
+/// Safe file name: no path parts, control or hidden characters, leading dots or padding, and
+/// before an executable extension every dot becomes "_" ("invoice.pdf.tar.exe" ->
+/// "invoice_pdf_tar.exe", "a.pdf..exe" -> "a_pdf__.exe"), so the only visible type is the real one.
 pub fn sanitize(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("");
     let clean: String = base.chars().filter(|c| !c.is_control() && !is_hidden(*c)).collect();
@@ -42,10 +36,9 @@ pub fn sanitize(name: &str) -> String {
     let mut s = clean.trim_start_matches(['.', ' ']).trim_end_matches(['.', ' ']).to_string();
     if let Some((stem, ext)) = ext_of(&s)
         && executable(&ext)
-        && let Some((base, inner)) = stem.rsplit_once('.')
-        && DECOY.contains(&inner.trim().to_ascii_lowercase().as_str())
     {
-        s = format!("{}_{}.{}", base.trim_end(), inner.trim(), &s[stem.len() + 1..]);
+        let safe_stem = stem.replace('.', "_");
+        s = format!("{safe_stem}.{}", &s[stem.len() + 1..]);
     }
     let s: String = s.chars().take(200).collect();
     if s.is_empty() { "download".into() } else { s }

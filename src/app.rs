@@ -1898,6 +1898,7 @@ impl App {
                 }
             }
             "panel" => {
+                let arg = panel_section(arg);
                 s.site = None;
                 if s.panel.is_some() && s.panel_section == arg {
                     s.close_panel();
@@ -1915,7 +1916,7 @@ impl App {
                 s.sync(&self.cfg);
             }
             "panel-section" => {
-                s.panel_section = arg.to_string();
+                s.panel_section = panel_section(arg).to_string();
                 s.sync(&self.cfg);
             }
             "panel-close" => {
@@ -2422,6 +2423,13 @@ fn toolbar_rect(window: &Window, h: f64) -> Rect {
 
 fn content_rect(window: &Window, top: f64) -> Rect {
     rect(window, top, None)
+}
+
+/// Panel sections the UI may request over IPC; anything else opens the settings.
+const VALID_SECTIONS: &[&str] = &["settings", "history", "bookmarks", "downloads", "logins", "about", "update"];
+
+fn panel_section(arg: &str) -> &'static str {
+    VALID_SECTIONS.iter().find(|s| **s == arg).copied().unwrap_or("settings")
 }
 
 /// Address of the built-in changelog (also reachable as `about:changelog`).
