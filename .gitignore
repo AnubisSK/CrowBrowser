@@ -1,5 +1,6 @@
 /target/
 /dist/
+/penetracne_testovanie/
 .DS_Store
 **/.DS_Store
 *.tmp
