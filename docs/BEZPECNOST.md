@@ -68,7 +68,9 @@ Po **⌃⌘L** (alebo z Nastavení) Crow:
 - Kľúč je uložený v `Zeroizing<[u8; 32]>`, pri uvoľnení sa prepíše nulami.
 - Správa s heslom z obrazovky odomknutia sa po spracovaní prepíše nulami.
 - Pri zmene hesla sa prepíšu nulami staré aj nové heslo.
-- Cookies do trezora: naraz beží len jeden export z WebKitu, ďalšie požiadavky sa zaradia za neho. Export spustený pred mazaním cookies (odhlásenie, vymazanie) sa zahodí a zopakuje, takže starší zoznam neprepíše novší ani nevráti vymazané prihlásenie.
+- Cookies do trezora: naraz beží len jeden export z WebKitu, ďalšie požiadavky sa zaradia za neho. Export spustený pred mazaním cookies (odhlásenie, vymazanie) sa zahodí a zopakuje, takže starší zoznam neprepíše novší ani nevráti vymazané prihlásenie. Každé odomknutie má vlastný jedinečný token: oneskorený export zo zamknutej relácie sa do novej nikdy nezapíše.
+- Pri uvoľnení (zamknutie, nahradenie, orezanie) sa nulami prepíše aj história, obľúbené, zoznam stiahnutých a URL otvorených kariet, nielen cookies.
+- Zoznam zatvorených kariet (na ⌘⇧T) má najviac 50 položiek, zoznam stiahnutých najviac 500 (najstaršie dokončené idú preč).
 - Dešifrovaný obsah trezora sa drží v `Zeroizing` bufferi. Cookies (názov, hodnota, doména) sa prepíšu nulami vždy, keď sa ich zoznam nahradí alebo uvoľní (po exporte z WebKitu, importe, vymazaní, zamknutí). Posledná kópia cookies zostáva v pamäti počas behu, aby sa dali uložiť aj pri nečakanom ukončení. Kópie vo WebKite Crow vymazať nevie.
 - **Zmena hesla** (`Vault::rotate_key`): nová náhodná soľ, nový kľúč Argon2id, zápis do `.vault.tmp`, `sync_all` a premenovanie. Nový kľúč sa začne používať až po úspešnom zápise, inak zostáva pôvodné heslo na disku aj v pamäti.
 

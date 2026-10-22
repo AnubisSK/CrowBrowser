@@ -42,6 +42,9 @@ const FAV_TRIES: u8 = 8;
 const FAV_MAX: usize = 48 * 1024;
 const FAV_READ: &str = "window.__crowIcon || ''";
 const MAX_ALLOW: usize = 1000;
+/// Reopen-closed-tab memory and download list are bounded (oldest entries go first).
+const MAX_CLOSED_TABS: usize = 50;
+const MAX_DOWNLOADS: usize = 500;
 /// Shield estimates per blocked load (typical ad/tracker response size and request latency).
 const BLOCK_BYTES: u64 = 50 * 1024;
 const BLOCK_MS: u64 = 50;
@@ -112,8 +115,8 @@ pub enum UserEvent {
         ok: bool,
     },
     FindResult(String),
-    /// Exported cookies for a save; `u64` = cookie epoch when the export was requested.
-    Cookies(Vec<CookieRec>, After, u64),
+    /// Exported cookies for a save: session token and cookie epoch at request time.
+    Cookies(Vec<CookieRec>, After, u64, u64),
     /// Fresh cookie list for the site-info popover; `clear` = delete the site's cookies first.
     SiteCookies {
         cookies: Vec<CookieRec>,
@@ -404,6 +407,8 @@ struct Session {
     queued: Option<After>,
     /// Bumped whenever cookies are deleted; an export requested before that is stale.
     cookie_epoch: u64,
+    /// Identifies this unlocked session: async results of a locked (older) session are dropped.
+    token: u64,
     ready: bool,
     /// WebKit confirmed the cookie import (false if the session started on timeout).
     cookies_ok: bool,
@@ -618,6 +623,8 @@ pub struct App {
     quit_at: Option<Instant>,
     restore_by: Option<Instant>,
     update_checked: bool,
+    /// Source of `Session::token`: unique per unlock, never reused.
+    sessions: u64,
 }
 
 impl App {
@@ -672,6 +679,7 @@ impl App {
             quit_at: None,
             restore_by: None,
             update_checked: false,
+            sessions: 0,
         };
         app.show_lock();
         app
@@ -756,7 +764,7 @@ impl App {
                     ));
                 }
             }
-            UserEvent::Cookies(c, after, epoch) => self.saved(c, after, epoch),
+            UserEvent::Cookies(c, after, token, epoch) => self.saved(c, after, token, epoch),
             UserEvent::CookiesRestored => self.restored(true),
             UserEvent::SiteCookies { cookies, clear } => self.site_cookies(cookies, clear),
             UserEvent::VaultSessions { cookies, revoke } => self.vault_sessions(cookies, revoke),
@@ -987,7 +995,9 @@ impl App {
         });
         // If WebKit never answers, the session still opens (see `timer`).
         self.restore_by = Some(Instant::now() + RESTORE_TIMEOUT);
+        self.sessions += 1;
         self.s = Some(Session {
+            token: self.sessions,
             vault,
             data,
             store,
@@ -1030,7 +1040,7 @@ impl App {
         s.ready = true;
         let restore = self.cfg.startup == "last" && !s.data.session.is_empty();
         let urls = if restore {
-            s.data.session.clone()
+            s.data.session.to_vec()
         } else {
             vec![self.cfg.homepage.clone()]
         };
@@ -1129,6 +1139,9 @@ impl App {
         let mut tab = s.tabs.remove(idx);
         if tab.url.starts_with("http") {
             s.closed.push(tab.url.clone());
+            if s.closed.len() > MAX_CLOSED_TABS {
+                s.closed.remove(0);
+            }
         }
         tab.drop_view();
         s.dirty = true;
@@ -1503,6 +1516,11 @@ impl App {
             state: "active".into(),
             time: vault::now_ms(),
         });
+        // Oldest finished entries go first; running downloads are still looked up by URL.
+        while s.data.downloads.len() > MAX_DOWNLOADS {
+            let Some(i) = s.data.downloads.iter().position(|d| d.state != "active") else { break };
+            s.data.downloads.remove(i);
+        }
         s.dirty = true;
         s.toast(&format!("Sťahuje sa: {name}"));
         s.sync(&self.cfg);
@@ -1559,14 +1577,18 @@ impl App {
             return;
         }
         s.saving = true;
-        let (p, epoch) = (self.ctx.proxy.clone(), s.cookie_epoch);
+        let (p, token, epoch) = (self.ctx.proxy.clone(), s.token, s.cookie_epoch);
         wk::export_cookies(&s.store, move |c| {
-            let _ = p.send_event(UserEvent::Cookies(c, after, epoch));
+            let _ = p.send_event(UserEvent::Cookies(c, after, token, epoch));
         });
     }
 
-    fn saved(&mut self, cookies: Vec<CookieRec>, after: After, epoch: u64) {
+    fn saved(&mut self, cookies: Vec<CookieRec>, after: After, token: u64, epoch: u64) {
         let Some(s) = self.s.as_mut() else { return };
+        if token != s.token {
+            // Late export of a session that was locked meanwhile: never written into this one.
+            return;
+        }
         s.saving = false;
         let queued = s.queued.take();
         if epoch != s.cookie_epoch {

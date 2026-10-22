@@ -55,6 +55,54 @@ pub struct CookieRec {
     pub expires: Option<f64>,
 }
 
+// Decrypted vault contents are wiped from RAM when dropped (lock, replacement, trimming), not
+// just released to the allocator: browsing data per entry, session tokens per cookie.
+
+impl Drop for HistoryEntry {
+    fn drop(&mut self) {
+        self.url.zeroize();
+        self.title.zeroize();
+    }
+}
+
+impl Drop for Bookmark {
+    fn drop(&mut self) {
+        self.url.zeroize();
+        self.title.zeroize();
+    }
+}
+
+impl Drop for Download {
+    fn drop(&mut self) {
+        self.url.zeroize();
+        self.path.zeroize();
+    }
+}
+
+/// Open-tab URLs of the saved session; wiped on drop like the rest of the vault contents.
+#[derive(Serialize, Deserialize, Default, Clone)]
+#[serde(transparent)]
+pub struct Urls(Vec<String>);
+
+impl Drop for Urls {
+    fn drop(&mut self) {
+        self.0.iter_mut().for_each(Zeroize::zeroize);
+    }
+}
+
+impl std::ops::Deref for Urls {
+    type Target = Vec<String>;
+    fn deref(&self) -> &Vec<String> {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Urls {
+    fn deref_mut(&mut self) -> &mut Vec<String> {
+        &mut self.0
+    }
+}
+
 /// Session tokens live in `name`/`value`: wiped whenever a cookie list is replaced or dropped
 /// (after export, import into WebKit, deletion or locking).
 impl Drop for CookieRec {
@@ -72,7 +120,7 @@ pub struct VaultData {
     pub bookmarks: Vec<Bookmark>,
     pub downloads: Vec<Download>,
     pub cookies: Vec<CookieRec>,
-    pub session: Vec<String>,
+    pub session: Urls,
     pub active: usize,
     pub settings: Option<Settings>,
     /// Lifetime count of loads blocked by the ad blocker.

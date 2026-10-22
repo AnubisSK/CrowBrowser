@@ -460,6 +460,9 @@ pub fn forget(v: &WebView) {
     {
         layout.remove(&wv);
     }
+    // Tear down now (web process, DOM, JS context) even if something else still holds a ref;
+    // wry's own destroy on drop is then a no-op on an already destroyed widget.
+    unsafe { wv.destroy() };
 }
 
 /// TLS state of the committed page as verified by WebKit (never inferred from the URL).
