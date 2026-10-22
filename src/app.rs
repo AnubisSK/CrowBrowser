@@ -1121,14 +1121,14 @@ impl App {
         if tab.view.is_none() {
             let on = blocks(&self.cfg, &tab.url);
             let config = wk::config(&s.store, on);
-            let page = internal_page(&tab.url);
+            let page = internal_page(&tab.url, &self.cfg.language);
             let url = if page.is_some() { None } else { Some(tab.url.as_str()) };
             tab.view = self.ctx.build(tab.id, url, config, rect, on).ok();
             tab.blocking = Some(on);
             if let (Some(html), Some(v)) = (page, &tab.view) {
                 tab.internal = true;
                 tab.url = CHANGELOG_URL.into();
-                let _ = v.load_html(html);
+                let _ = v.load_html(&html);
             }
             if let Some(v) = &tab.view {
                 let _ = v.zoom(s.zoom);
@@ -1198,7 +1198,7 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         s.close_panel();
         if let Some(t) = s.tabs.get_mut(s.active)
-            && let Some(html) = internal_page(&url)
+            && let Some(html) = internal_page(&url, &self.cfg.language)
         {
             // Built-in page: shown under its own address, no request leaves the browser.
             t.url = CHANGELOG_URL.into();
@@ -1206,7 +1206,7 @@ impl App {
             t.tls = "";
             t.icon.clear();
             if let Some(v) = &t.view {
-                let _ = v.load_html(html);
+                let _ = v.load_html(&html);
             }
             return s.sync(&self.cfg);
         }
@@ -1792,8 +1792,8 @@ impl App {
             // page is rendered again.
             "reload" if s.cur().is_some_and(|t| t.tls_error || t.internal) => {
                 if let (Some(t), Some(v)) = (s.cur(), s.view()) {
-                    let _ = match internal_page(&t.url) {
-                        Some(html) => v.load_html(html),
+                    let _ = match internal_page(&t.url, &self.cfg.language) {
+                        Some(html) => v.load_html(&html),
                         None => v.load_url(&t.url),
                     };
                 }
@@ -1811,7 +1811,7 @@ impl App {
             "home" => self.navigate(self.cfg.homepage.clone()),
             "go" if !arg.trim().is_empty() => {
                 let input = arg.trim();
-                let url = if internal_page(input).is_some() { input.to_string() } else { to_url(input, self.cfg.search_prefix()) };
+                let url = if is_internal(input) { input.to_string() } else { to_url(input, self.cfg.search_prefix()) };
                 self.navigate(url);
             }
             "open" => self.navigate(arg.to_string()),
@@ -2146,6 +2146,12 @@ impl App {
                 for v in std::iter::once(&s.toolbar).chain(s.panel.as_ref()).chain(s.site.as_ref()) {
                     let _ = v.evaluate_script(&script);
                 }
+                // Built-in pages have no script: render them again in the new language.
+                for t in s.tabs.iter().filter(|t| t.internal) {
+                    if let (Some(v), Some(html)) = (&t.view, internal_page(&t.url, &self.cfg.language)) {
+                        let _ = v.load_html(&html);
+                    }
+                }
                 s.dirty = true;
                 self.persist(After::Nothing);
             }
@@ -2422,12 +2428,56 @@ fn content_rect(window: &Window, top: f64) -> Rect {
 const CHANGELOG_URL: &str = "crow:changelog";
 
 /// Built-in offline pages: static HTML with its own strict CSP and no script, loaded into the
-/// tab view (which has no IPC) instead of being fetched.
-fn internal_page(url: &str) -> Option<&'static str> {
-    match url.trim().to_ascii_lowercase().as_str() {
-        "crow:changelog" | "about:changelog" => Some(include_str!("changelog.html")),
-        _ => None,
+/// tab view (which has no IPC) instead of being fetched. Text is filled in `lang` here, so the
+/// tab never gets the dictionaries or `t()`.
+fn internal_page(url: &str, lang: &str) -> Option<String> {
+    is_internal(url).then(|| localize_page(include_str!("changelog.html"), lang))
+}
+
+fn is_internal(url: &str) -> bool {
+    matches!(url.trim().to_ascii_lowercase().as_str(), "crow:changelog" | "about:changelog")
+}
+
+/// Replaces `{{key}}` with the escaped translation (`**bold**` → `<b>`, `` `code` `` →
+/// `<code>`) and `{{@lang}}` with the language code.
+fn localize_page(src: &str, lang: &str) -> String {
+    let mut out = String::with_capacity(src.len() * 2);
+    let mut rest = src;
+    while let Some(i) = rest.find("{{") {
+        let Some(j) = rest[i..].find("}}") else { break };
+        out.push_str(&rest[..i]);
+        match &rest[i + 2..i + j] {
+            "@lang" => out.push_str(&html_escape(lang)),
+            key => out.push_str(&markup(&html_escape(&settings::tr(lang, key, &[])))),
+        }
+        rest = &rest[i + j + 2..];
     }
+    out.push_str(rest);
+    out
+}
+
+/// Inline markup of already escaped text: `**bold**` and `` `code` ``.
+fn markup(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 32);
+    for (i, part) in s.split("**").enumerate() {
+        let bold = i % 2 == 1;
+        if bold {
+            out.push_str("<b>");
+        }
+        for (j, p) in part.split('`').enumerate() {
+            if j % 2 == 1 {
+                out.push_str("<code>");
+                out.push_str(p);
+                out.push_str("</code>");
+            } else {
+                out.push_str(p);
+            }
+        }
+        if bold {
+            out.push_str("</b>");
+        }
+    }
+    out
 }
 
 fn to_url(input: &str, search_prefix: &str) -> String {
