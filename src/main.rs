@@ -1,6 +1,7 @@
 mod adblock;
 mod app;
 mod cert;
+mod default_browser;
 mod download;
 mod settings;
 mod update;
@@ -47,6 +48,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder.with_app_id(id);
     }
     let event_loop = builder.build();
+    // Links passed by the system or a launcher (`crow-browser %u`); only http(s) is opened.
+    let urls: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(target_os = "linux")]
+    {
+        use tao::platform::unix::EventLoopWindowTargetExtUnix;
+        if default_browser::forward_to_primary(event_loop.gtk_app(), &urls) {
+            return Ok(());
+        }
+        default_browser::listen(event_loop.gtk_app(), event_loop.create_proxy());
+    }
 
     #[cfg(target_os = "macos")]
     let _menu = {
@@ -82,6 +93,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut app = App::new(window, event_loop.create_proxy());
+    if !urls.is_empty() {
+        app.handle(UserEvent::OpenUrls(urls));
+    }
 
     event_loop.run(move |event, _, control_flow| {
         match event {
@@ -90,6 +104,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::WindowEvent { event: WindowEvent::Resized(_), .. } => app.resize(),
             Event::WindowEvent { event: WindowEvent::Focused(on), .. } => app.focused(on),
+            // macOS: links from other apps once Crow is the default browser.
+            Event::Opened { urls } => app.handle(UserEvent::OpenUrls(urls.iter().map(|u| u.to_string()).collect())),
             Event::UserEvent(e) => app.handle(e),
             Event::LoopDestroyed => app.shutdown(),
             _ => {}

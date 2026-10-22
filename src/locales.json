@@ -307,7 +307,17 @@
     "cl_ui_4": "**Video na celú obrazovku** (YouTube a iné prehrávače) aj na Linuxe a AirPlay na macOS.",
     "cl_ui_5": "**Kontrola aktualizácií** z GitHubu so zoznamom zmien a overeným stiahnutím inštalátora.",
     "cl_ui_6": "Stránka **O aplikácii** a táto stránka so zoznamom zmien (`crow:changelog`).",
-    "cl_footer": "Podrobnosti o bezpečnostných opravách sú v súbore `docs/BEZPECNOST.md`."
+    "cl_footer": "Podrobnosti o bezpečnostných opravách sú v súbore `docs/BEZPECNOST.md`.",
+
+    "general": "Všeobecné",
+    "default_browser": "Predvolený prehliadač",
+    "default_browser_yes": "Crow je tvoj predvolený prehliadač",
+    "default_browser_no": "Crow nie je tvoj predvolený prehliadač",
+    "default_browser_unavailable": "Dostupné len v nainštalovanej aplikácii",
+    "set_default": "Nastaviť ako predvolený",
+    "default_browser_set": "Crow je teraz tvoj predvolený prehliadač",
+    "default_browser_confirm": "Potvrď zmenu v systémovom dialógu",
+    "default_browser_failed": "Predvolený prehliadač sa nepodarilo nastaviť"
   },
   "cs": {
     "back": "Zpět",
@@ -617,7 +627,17 @@
     "cl_ui_4": "**Video na celou obrazovku** (YouTube a jiné přehrávače) i na Linuxu a AirPlay na macOS.",
     "cl_ui_5": "**Kontrola aktualizací** z GitHubu se seznamem změn a ověřeným stažením instalátoru.",
     "cl_ui_6": "Stránka **O aplikaci** a tato stránka se seznamem změn (`crow:changelog`).",
-    "cl_footer": "Podrobnosti o bezpečnostních opravách jsou v souboru `docs/BEZPECNOST.md`."
+    "cl_footer": "Podrobnosti o bezpečnostních opravách jsou v souboru `docs/BEZPECNOST.md`.",
+
+    "general": "Obecné",
+    "default_browser": "Výchozí prohlížeč",
+    "default_browser_yes": "Crow je váš výchozí prohlížeč",
+    "default_browser_no": "Crow není váš výchozí prohlížeč",
+    "default_browser_unavailable": "Dostupné jen v nainstalované aplikaci",
+    "set_default": "Nastavit jako výchozí",
+    "default_browser_set": "Crow je nyní váš výchozí prohlížeč",
+    "default_browser_confirm": "Potvrďte změnu v systémovém dialogu",
+    "default_browser_failed": "Výchozí prohlížeč se nepodařilo nastavit"
   },
   "en": {
     "back": "Back",
@@ -927,7 +947,17 @@
     "cl_ui_4": "**Full-screen video** (YouTube and other players) on Linux too, and AirPlay on macOS.",
     "cl_ui_5": "**Update checks** from GitHub with a changelog and a verified installer download.",
     "cl_ui_6": "The **About** page and this changelog page (`crow:changelog`).",
-    "cl_footer": "Details about the security fixes are in `docs/BEZPECNOST.md`."
+    "cl_footer": "Details about the security fixes are in `docs/BEZPECNOST.md`.",
+
+    "general": "General",
+    "default_browser": "Default browser",
+    "default_browser_yes": "Crow is your default browser",
+    "default_browser_no": "Crow is not your default browser",
+    "default_browser_unavailable": "Only available in the installed app",
+    "set_default": "Set as default",
+    "default_browser_set": "Crow is now your default browser",
+    "default_browser_confirm": "Confirm the change in the system dialog",
+    "default_browser_failed": "Could not set the default browser"
   },
   "de": {
     "back": "Zurück",
@@ -1237,6 +1267,16 @@
     "cl_ui_4": "**Video im Vollbild** (YouTube und andere Player) auch unter Linux und AirPlay unter macOS.",
     "cl_ui_5": "**Updateprüfung** über GitHub mit Änderungsliste und überprüftem Download des Installationsprogramms.",
     "cl_ui_6": "Die Seite **Über** und diese Seite mit der Änderungsliste (`crow:changelog`).",
-    "cl_footer": "Details zu den Sicherheitskorrekturen stehen in `docs/BEZPECNOST.md`."
+    "cl_footer": "Details zu den Sicherheitskorrekturen stehen in `docs/BEZPECNOST.md`.",
+
+    "general": "Allgemein",
+    "default_browser": "Standardbrowser",
+    "default_browser_yes": "Crow ist dein Standardbrowser",
+    "default_browser_no": "Crow ist nicht dein Standardbrowser",
+    "default_browser_unavailable": "Nur in der installierten App verfügbar",
+    "set_default": "Als Standard festlegen",
+    "default_browser_set": "Crow ist jetzt dein Standardbrowser",
+    "default_browser_confirm": "Bestätige die Änderung im Systemdialog",
+    "default_browser_failed": "Der Standardbrowser konnte nicht festgelegt werden"
   }
 }

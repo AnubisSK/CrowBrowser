@@ -189,6 +189,24 @@
           h('button', { class: 'btn', onclick: () => send('adblock-update') }, t('update_btn')))));
   }
 
+  // Default browser: status badge + button; the result arrives as `setDefaultBrowser(status)`.
+  function defaultBrowserRow() {
+    const badge = h('span', { class: 'badge' });
+    const btn = h('button', { class: 'btn primary' }, t('set_default'));
+    btn.onclick = () => { btn.disabled = true; send('set-as-default-browser'); };
+    const paint = (st) => {
+      badge.classList.toggle('on', !!(st && st.is_default));
+      badge.textContent = !st ? t('checking') : !st.available ? t('default_browser_unavailable')
+        : t(st.is_default ? 'default_browser_yes' : 'default_browser_no');
+      btn.hidden = !!(st && (st.is_default || !st.available));
+      btn.disabled = !st;
+    };
+    window.setDefaultBrowser = (st) => { D.defaultBrowser = st; paint(st); };
+    paint(D.defaultBrowser);
+    send('get-default-browser-status');
+    return row(t('default_browser'), null, h('div', { style: 'display:flex;gap:8px;align-items:center' }, badge, btn));
+  }
+
   const views = {
     settings() {
       const home = h('input', { type: 'text', spellcheck: 'false' });
@@ -212,6 +230,8 @@
 
       return [
         header(t('settings')),
+        h('h2', {}, t('general')),
+        h('section', {}, defaultBrowserRow()),
         h('h2', {}, t('search')),
         h('section', {}, row(t('default_search'), t('default_search_desc'), select('search', D.engines))),
         h('h2', {}, t('startup')),

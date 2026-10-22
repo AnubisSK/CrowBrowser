@@ -1,5 +1,5 @@
 use crate::{
-    adblock, cert, download,
+    adblock, cert, default_browser, download,
     settings::{self, ENGINES, Settings},
     update,
     vault::{self, Bookmark, CookieRec, Download, HistoryEntry, MAX_HISTORY, Vault, VaultData},
@@ -166,6 +166,13 @@ pub enum UserEvent {
         manual: bool,
     },
     UpdateSaved(Option<PathBuf>),
+    /// Links handed over by the system (Crow as default browser / command line).
+    OpenUrls(Vec<String>),
+    /// Default-browser status; `note` = `locales.json` key after a registration attempt.
+    DefaultBrowser {
+        status: default_browser::Status,
+        note: Option<&'static str>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -438,6 +445,8 @@ struct Session {
     update_busy: bool,
     /// UI language (shared with `TabCtx::lang`) for backend notifications.
     lang: Rc<RefCell<String>>,
+    /// Last known default-browser status (None = not checked yet).
+    default_browser: Option<default_browser::Status>,
 }
 
 impl Session {
@@ -620,6 +629,7 @@ impl Session {
             "downloads": downloads,
             "allow": cfg.adblock_allow,
             "adblockLists": adblock::status(),
+            "defaultBrowser": self.default_browser,
             "version": update::CURRENT,
             "update": self.update,
             "updateBusy": self.update_busy,
@@ -646,6 +656,8 @@ pub struct App {
     update_checked: bool,
     /// Source of `Session::token`: unique per unlock, never reused.
     sessions: u64,
+    /// Links received while locked or before the session restored, opened afterwards.
+    incoming: Vec<String>,
 }
 
 impl App {
@@ -702,6 +714,7 @@ impl App {
             restore_by: None,
             update_checked: false,
             sessions: 0,
+            incoming: Vec::new(),
         };
         app.show_lock();
         app
@@ -758,6 +771,10 @@ impl App {
         for v in self.lock.iter().chain(self.s.as_ref().map(|s| &s.toolbar)) {
             let _ = v.evaluate_script(&js);
         }
+        // Back from the macOS confirmation dialog / system settings: refresh the status.
+        if on && self.s.as_ref().is_some_and(|s| s.panel.is_some() && s.panel_section == "settings") {
+            default_browser::query(self.ctx.proxy.clone(), false);
+        }
     }
 
     pub fn handle(&mut self, ev: UserEvent) {
@@ -770,6 +787,17 @@ impl App {
             UserEvent::PageLoad { tab, started, url } => self.page_load(tab, started, url),
             UserEvent::Title { tab, title } => self.title(tab, title),
             UserEvent::NewTab(url) => self.open_tab(url),
+            UserEvent::OpenUrls(urls) => self.open_external(urls),
+            UserEvent::DefaultBrowser { status, note } => {
+                let Some(s) = self.s.as_mut() else { return };
+                s.default_browser = Some(status);
+                if let Some(key) = note {
+                    s.note(key, &[]);
+                }
+                if let Some(p) = &s.panel {
+                    let _ = p.evaluate_script(&format!("setDefaultBrowser({})", json!(status)));
+                }
+            }
             UserEvent::AdoptTab(id) => self.adopt(id),
             UserEvent::DownloadAsk {
                 key,
@@ -1058,6 +1086,7 @@ impl App {
             update: None,
             update_bar: false,
             update_busy: false,
+            default_browser: None,
         });
     }
 
@@ -1087,6 +1116,9 @@ impl App {
         }
         s.active = active;
         self.activate(active);
+        for url in std::mem::take(&mut self.incoming) {
+            self.open_tab(url);
+        }
         if self.cfg.updates && !self.update_checked {
             self.update_checked = true;
             update::check(self.ctx.proxy.clone(), false);
@@ -1148,6 +1180,31 @@ impl App {
         s.tabs.insert(at, Tab::new(self.ctx.next(), url, None));
         s.dirty = true;
         self.activate(at);
+    }
+
+    /// Links from other apps: only http(s), each in a new tab; queued until the vault is
+    /// unlocked and the session restored.
+    fn open_external(&mut self, urls: Vec<String>) {
+        let urls = urls.into_iter().filter_map(|u| {
+            let u = u.trim();
+            let l = u.to_ascii_lowercase();
+            ((l.starts_with("http://") || l.starts_with("https://"))
+                && u.len() <= MAX_EXTERNAL_URL
+                && !u.chars().any(char::is_control))
+            .then(|| u.to_string())
+        });
+        if self.s.as_ref().is_some_and(|s| s.ready) {
+            for url in urls {
+                self.open_tab(url);
+            }
+        } else {
+            for url in urls {
+                if self.incoming.len() < MAX_INCOMING {
+                    self.incoming.push(url);
+                }
+            }
+        }
+        self.ctx.window.set_focus();
     }
 
     fn adopt(&mut self, id: u32) {
@@ -2135,6 +2192,8 @@ impl App {
             "get-adblock-stats" => s.push_shield(&self.cfg),
             "site-clear" => self.request_site_cookies(true),
             "get-vault-sessions" => self.request_sessions(None),
+            "get-default-browser-status" => default_browser::query(self.ctx.proxy.clone(), false),
+            "set-as-default-browser" => default_browser::query(self.ctx.proxy.clone(), true),
             // UI language: vault setting + plain copy for the lock screen, then every open UI
             // view re-renders its text without reloading.
             "set-language" => {
@@ -2424,6 +2483,10 @@ fn toolbar_rect(window: &Window, h: f64) -> Rect {
 fn content_rect(window: &Window, top: f64) -> Rect {
     rect(window, top, None)
 }
+
+/// Links accepted from the system: longest URL and how many wait for the unlock.
+const MAX_EXTERNAL_URL: usize = 8192;
+const MAX_INCOMING: usize = 16;
 
 /// Panel sections the UI may request over IPC; anything else opens the settings.
 const VALID_SECTIONS: &[&str] = &["settings", "history", "bookmarks", "downloads", "logins", "about", "update"];
