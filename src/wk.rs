@@ -95,6 +95,22 @@ fn media_prefs(c: &WKWebViewConfiguration) {
     }
 }
 
+/// Web storage of tab views: localStorage lives in memory in the non-persistent store
+/// (IndexedDB and service workers have no switch and are on). WebKit's default; set explicitly
+/// via the private `_localStorageEnabled` key (guarded) so a changed default cannot break sites
+/// that hydrate from storage.
+#[cfg(target_os = "macos")]
+fn storage_prefs(c: &WKWebViewConfiguration) {
+    unsafe {
+        let prefs: *mut AnyObject = msg_send![c, preferences];
+        let Some(prefs) = prefs.as_ref() else { return };
+        let ok: Bool = msg_send![prefs, respondsToSelector: sel!(_setLocalStorageEnabled:)];
+        if ok.as_bool() {
+            let _: () = msg_send![prefs, _setLocalStorageEnabled: true];
+        }
+    }
+}
+
 /// WebKit runs element fullscreen in its own window on macOS: nothing for the app to resize.
 pub fn on_fullscreen(_f: impl Fn(u32, bool) + 'static) {}
 
@@ -106,6 +122,7 @@ pub fn config(store: &Store, adblock: bool) -> Config {
             set_manager_rules(&c.userContentController(), true);
         }
         media_prefs(&c);
+        storage_prefs(&c);
         Config(c)
     }
 }
@@ -114,6 +131,7 @@ pub fn config(store: &Store, adblock: bool) -> Config {
 pub fn popup_config(features: NewWindowFeatures) -> Config {
     let c = features.opener.target_configuration;
     media_prefs(&c);
+    storage_prefs(&c);
     Config(c)
 }
 

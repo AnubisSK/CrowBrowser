@@ -435,11 +435,14 @@ pub fn on_fullscreen(f: impl Fn(u32, bool) + 'static) {
 }
 
 /// Enables the Fullscreen API on the view; returning false keeps WebKit's default handler,
-/// which fullscreens the toplevel GTK (tao) window.
+/// which fullscreens the toplevel GTK (tao) window. Web storage (in memory, the context is
+/// ephemeral) is enabled explicitly too, for sites that hydrate from it.
 fn watch_fullscreen(v: &WebView, tab: u32) {
     let wv = v.webview();
     if let Some(s) = WebViewExt::settings(&wv) {
         s.set_enable_fullscreen(true);
+        s.set_enable_html5_local_storage(true);
+        s.set_enable_html5_database(true);
     }
     let notify = move |on: bool| {
         if let Some(f) = ON_FULLSCREEN.with(|o| o.borrow().clone()) {

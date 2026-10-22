@@ -25,10 +25,11 @@ Type=Application
 Name=Crow
 GenericName=Webový prehliadač
 Comment=Ľahký, súkromný a šifrovaný webový prehliadač
-Exec=$BIN
+Exec=$BIN %u
 Icon=$ID
 Terminal=false
 Categories=Network;WebBrowser;
+MimeType=x-scheme-handler/http;x-scheme-handler/https;
 StartupWMClass=$ID
 EOF
 command -v update-desktop-database >/dev/null && update-desktop-database "$DATA/applications" 2>/dev/null || true
