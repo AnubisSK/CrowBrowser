@@ -403,16 +403,16 @@ pub fn on_tls_error(f: impl Fn(u32, String, Vec<&'static str>) + 'static) {
 fn tls_reasons(flags: gio::TlsCertificateFlags) -> Vec<&'static str> {
     use gio::TlsCertificateFlags as F;
     let all = [
-        (F::UNKNOWN_CA, "Certifikát nevydala dôveryhodná autorita"),
-        (F::BAD_IDENTITY, "Certifikát nepatrí tejto doméne"),
-        (F::NOT_ACTIVATED, "Certifikát ešte nie je platný"),
-        (F::EXPIRED, "Platnosť certifikátu vypršala"),
-        (F::REVOKED, "Certifikát bol zrušený"),
-        (F::INSECURE, "Certifikát používa nezabezpečený algoritmus"),
-        (F::GENERIC_ERROR, "Chyba pri overení certifikátu"),
+        (F::UNKNOWN_CA, "cert_err_unknown_ca"),
+        (F::BAD_IDENTITY, "cert_err_bad_identity"),
+        (F::NOT_ACTIVATED, "cert_err_not_activated"),
+        (F::EXPIRED, "cert_err_expired"),
+        (F::REVOKED, "cert_err_revoked"),
+        (F::INSECURE, "cert_err_insecure"),
+        (F::GENERIC_ERROR, "cert_err_generic"),
     ];
     let r: Vec<_> = all.iter().filter(|(f, _)| flags.contains(*f)).map(|(_, m)| *m).collect();
-    if r.is_empty() { vec!["Certifikát sa nepodarilo overiť"] } else { r }
+    if r.is_empty() { vec!["cert_err_unverified"] } else { r }
 }
 
 /// Certificate failures of `v` are reported as tab `tab`. The context's policy is FAIL (see
@@ -588,13 +588,13 @@ pub fn cert_chain(v: &WebView) -> Option<(Vec<Vec<u8>>, Vec<&'static str>)> {
     }
     use gio::TlsCertificateFlags as F;
     let errors = [
-        (F::UNKNOWN_CA, "Certifikát nevydala dôveryhodná autorita"),
-        (F::BAD_IDENTITY, "Certifikát nepatrí tejto doméne"),
-        (F::NOT_ACTIVATED, "Certifikát ešte nie je platný"),
-        (F::EXPIRED, "Platnosť certifikátu vypršala"),
-        (F::REVOKED, "Certifikát bol zrušený"),
-        (F::INSECURE, "Certifikát používa nezabezpečený algoritmus"),
-        (F::GENERIC_ERROR, "Chyba pri overení certifikátu"),
+        (F::UNKNOWN_CA, "cert_err_unknown_ca"),
+        (F::BAD_IDENTITY, "cert_err_bad_identity"),
+        (F::NOT_ACTIVATED, "cert_err_not_activated"),
+        (F::EXPIRED, "cert_err_expired"),
+        (F::REVOKED, "cert_err_revoked"),
+        (F::INSECURE, "cert_err_insecure"),
+        (F::GENERIC_ERROR, "cert_err_generic"),
     ];
     let errors = errors.iter().filter(|(f, _)| flags.contains(*f)).map(|(_, m)| *m).collect();
     Some((chain, errors))
@@ -797,7 +797,15 @@ pub fn ui_html(html: String) -> String {
         ("⌘", "Ctrl+"),
         ("Zobraziť vo Finderi", "Zobraziť v priečinku"),
         ("ukáže vo Finderi", "ukáže v správcovi súborov"),
+        ("Zobrazit ve Finderu", "Zobrazit ve složce"),
+        ("zobrazí ve Finderu", "zobrazí ve správci souborů"),
+        ("Show in Finder", "Show in folder"),
+        ("shown in Finder", "shown in the file manager"),
+        ("Im Finder zeigen", "Im Ordner zeigen"),
+        ("im Finder angezeigt", "im Dateimanager angezeigt"),
         ("⌥klik", "Alt+klik"),
+        ("⌥click", "Alt+click"),
+        ("⌥Klick", "Alt+Klick"),
         ("~/Library/Application Support/Crow/", "~/.local/share/crow/"),
     ];
     let mut html = html;

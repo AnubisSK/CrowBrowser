@@ -1,6 +1,6 @@
 use crate::{
     adblock, cert, download,
-    settings::{ENGINES, Settings},
+    settings::{self, ENGINES, Settings},
     update,
     vault::{self, Bookmark, CookieRec, Download, HistoryEntry, MAX_HISTORY, Vault, VaultData},
     wk,
@@ -154,7 +154,8 @@ pub enum UserEvent {
         reasons: Vec<&'static str>,
     },
     /// Result of a filter-list download the user asked for.
-    RulesNote(String),
+    /// Manual list refresh finished: failed lists as (`locales.json` key, list name).
+    RulesNote(Vec<(&'static str, &'static str)>),
     /// Result of `FAV_READ` in a tab (JSON string).
     Icon {
         tab: u32,
@@ -187,6 +188,8 @@ struct TabCtx {
     next_id: Rc<Cell<u32>>,
     /// Global ad-block switch, for popups created inside WebKit callbacks.
     adblock: Rc<Cell<bool>>,
+    /// UI language, baked into every UI view (also before unlock, see `settings::stored_language`).
+    lang: Rc<RefCell<String>>,
 }
 
 impl TabCtx {
@@ -301,7 +304,12 @@ impl TabCtx {
     /// `window.ipc` there (popups inherit the opener tab's configuration, also without IPC).
     fn ui_view(&self, html: String, rect: Rect) -> Option<WebView> {
         const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'\">";
-        let html = html.replacen("<head>", &format!("<head>{CSP}"), 1);
+        // Dictionaries + `t()` go in first, so the page's own script can use them right away.
+        let i18n = include_str!("i18n.js")
+            .replace("/*LOCALES*/", include_str!("locales.json"))
+            .replace("/*LANG*/", &js(&self.lang.borrow()))
+            .replace("</", "<\\/");
+        let html = html.replacen("<head>", &format!("<head>{CSP}<script>{i18n}</script>"), 1);
         let p = self.proxy.clone();
         let b = wk::ui_builder()
             .with_html(wk::ui_html(html))
@@ -341,6 +349,8 @@ struct Tab {
     tls: &'static str,
     /// Showing the certificate-error interstitial for `url`.
     tls_error: bool,
+    /// Showing a built-in page (`url` = `crow:…`), rendered in the tab without network or IPC.
+    internal: bool,
 }
 
 /// Every way a tab disappears (close, session lock, app exit) releases its view the same way.
@@ -365,6 +375,7 @@ impl Tab {
             blocked: 0,
             tls: "",
             tls_error: false,
+            internal: false,
         }
     }
 
@@ -384,9 +395,8 @@ impl Tab {
             .split("://")
             .nth(1)
             .and_then(|r| r.split('/').next());
-        host.filter(|h| !h.is_empty())
-            .unwrap_or("Nová karta")
-            .to_string()
+        // Empty = "new tab", worded by the toolbar in the UI language.
+        host.filter(|h| !h.is_empty()).unwrap_or("").to_string()
     }
 }
 
@@ -426,6 +436,8 @@ struct Session {
     update: Option<update::Info>,
     update_bar: bool,
     update_busy: bool,
+    /// UI language (shared with `TabCtx::lang`) for backend notifications.
+    lang: Rc<RefCell<String>>,
 }
 
 impl Session {
@@ -485,6 +497,15 @@ impl Session {
 
     fn toast(&self, msg: &str) {
         self.eval(&format!("toast({})", js(msg)));
+    }
+
+    fn tr(&self, key: &str, args: &[&str]) -> String {
+        settings::tr(&self.lang.borrow(), key, args)
+    }
+
+    /// Notification from `locales.json`, formatted in the current UI language.
+    fn note(&self, key: &str, args: &[&str]) {
+        self.toast(&self.tr(key, args));
     }
 
     fn loaded(&self) -> impl Iterator<Item = &WebView> {
@@ -668,6 +689,7 @@ impl App {
             proxy,
             next_id: Rc::new(Cell::new(1)),
             adblock: Rc::new(Cell::new(true)),
+            lang: Rc::new(RefCell::new(settings::stored_language())),
         };
         let mut app = Self {
             ctx,
@@ -693,9 +715,10 @@ impl App {
         self.lock = self.ctx.ui_view(html, full_rect(&self.ctx.window));
     }
 
-    fn lock_fail(&self, msg: &str) {
+    /// Lock-screen error (`key` in `locales.json`), shown in the UI language.
+    fn lock_fail(&self, key: &str) {
         if let Some(l) = &self.lock {
-            let _ = l.evaluate_script(&format!("fail({})", js(msg)));
+            let _ = l.evaluate_script(&format!("fail(t({}))", js(key)));
         }
     }
 
@@ -839,9 +862,14 @@ impl App {
                 // WebKit fullscreens the window itself; this makes the view fill it.
                 self.resize();
             }
-            UserEvent::RulesNote(msg) => {
+            UserEvent::RulesNote(errors) => {
                 if let Some(s) = &self.s {
-                    s.toast(&msg);
+                    if errors.is_empty() {
+                        s.note("adblock_lists_updated", &[]);
+                    } else {
+                        let msg: Vec<_> = errors.iter().map(|&(k, name)| s.tr(k, &[name])).collect();
+                        s.toast(&msg.join(", "));
+                    }
                 }
             }
             UserEvent::RulesReady => {
@@ -862,7 +890,7 @@ impl App {
                         s.update_bar = false;
                         self.resize();
                     }
-                    None => s.toast("Aktualizáciu sa nepodarilo stiahnuť alebo overiť"),
+                    None => s.note("update_download_failed", &[]),
                 }
                 if let Some(s) = &self.s {
                     s.sync(&self.cfg);
@@ -956,13 +984,13 @@ impl App {
             },
             "create" if !Vault::exists() => {
                 if arg.chars().count() < 8 {
-                    return self.lock_fail("Heslo musí mať aspoň 8 znakov");
+                    return self.lock_fail("pw_too_short");
                 }
                 let vault = Vault::create(arg);
                 let data = VaultData::default();
                 match vault.save(&data) {
                     Ok(()) => self.start(vault, data),
-                    Err(_) => self.lock_fail("Trezor sa nepodarilo uložiť"),
+                    Err(_) => self.lock_fail("vault_save_failed"),
                 }
             }
             "reset" => {
@@ -981,11 +1009,14 @@ impl App {
             .or_else(Settings::take_legacy)
             .unwrap_or_default();
         self.ctx.adblock.set(self.cfg.adblock);
+        // The vault is authoritative; the plain copy only serves the next lock screen.
+        settings::store_language(&self.cfg.language);
+        *self.ctx.lang.borrow_mut() = self.cfg.language.clone();
         let w = &self.ctx.window;
         wk::set_theme(w, theme_of(&self.cfg.theme));
         let html = include_str!("toolbar.html").to_string();
         let Some(toolbar) = self.ctx.ui_view(html, toolbar_rect(w, TABS_H + NAV_H)) else {
-            return self.lock_fail("Nepodarilo sa vytvoriť okno");
+            return self.lock_fail("window_failed");
         };
         self.lock = None;
         let store = wk::new_store();
@@ -997,6 +1028,7 @@ impl App {
         self.restore_by = Some(Instant::now() + RESTORE_TIMEOUT);
         self.sessions += 1;
         self.s = Some(Session {
+            lang: self.ctx.lang.clone(),
             token: self.sessions,
             vault,
             data,
@@ -1089,11 +1121,15 @@ impl App {
         if tab.view.is_none() {
             let on = blocks(&self.cfg, &tab.url);
             let config = wk::config(&s.store, on);
-            tab.view = self
-                .ctx
-                .build(tab.id, Some(&tab.url), config, rect, on)
-                .ok();
+            let page = internal_page(&tab.url);
+            let url = if page.is_some() { None } else { Some(tab.url.as_str()) };
+            tab.view = self.ctx.build(tab.id, url, config, rect, on).ok();
             tab.blocking = Some(on);
+            if let (Some(html), Some(v)) = (page, &tab.view) {
+                tab.internal = true;
+                tab.url = CHANGELOG_URL.into();
+                let _ = v.load_html(html);
+            }
             if let Some(v) = &tab.view {
                 let _ = v.zoom(s.zoom);
             }
@@ -1161,6 +1197,19 @@ impl App {
     fn navigate(&mut self, url: String) {
         let Some(s) = self.s.as_mut() else { return };
         s.close_panel();
+        if let Some(t) = s.tabs.get_mut(s.active)
+            && let Some(html) = internal_page(&url)
+        {
+            // Built-in page: shown under its own address, no request leaves the browser.
+            t.url = CHANGELOG_URL.into();
+            t.internal = true;
+            t.tls = "";
+            t.icon.clear();
+            if let Some(v) = &t.view {
+                let _ = v.load_html(html);
+            }
+            return s.sync(&self.cfg);
+        }
         if let Some(t) = s.tabs.get_mut(s.active) {
             match &t.view {
                 // Address bar (and TLS badge) follow the finished load, not the request.
@@ -1178,14 +1227,15 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let t = &mut s.tabs[i];
-        // The interstitial itself (about:blank) keeps the refused URL and the broken state.
-        let interstitial = t.tls_error && (url.is_empty() || url == "about:blank");
+        // The interstitial / built-in page itself (about:blank) keeps the shown URL and state.
+        let interstitial = (t.tls_error || t.internal) && (url.is_empty() || url == "about:blank");
         // Allowlist follows the page being loaded: switched before its subresources are requested.
         if !url.is_empty() && !interstitial {
             apply_rules(&self.cfg, t, &url);
         }
         if started && !interstitial {
             t.tls_error = false;
+            t.internal = false;
         }
         if !started && interstitial {
             t.loading = false;
@@ -1274,7 +1324,7 @@ impl App {
             t.url = url;
         }
         if let Some(v) = &t.view {
-            let _ = v.load_html(&interstitial(&host_of(&t.url), &reasons));
+            let _ = v.load_html(&interstitial(&s.lang.borrow(), &host_of(&t.url), &reasons));
         }
         if i == s.active {
             s.site = None;
@@ -1315,8 +1365,8 @@ impl App {
                     self.resize();
                 }
             }
-            Ok(None) if manual => s.toast(&format!("Crow {} je najnovšia verzia", update::CURRENT)),
-            Err(e) if manual => s.toast(&format!("Kontrola aktualizácií zlyhala: {e}")),
+            Ok(None) if manual => s.note("up_to_date", &[update::CURRENT]),
+            Err(e) if manual => s.note("update_check_failed", &[&s.tr(&e, &[])]),
             _ => {}
         }
         if let Some(s) = &self.s {
@@ -1367,7 +1417,7 @@ impl App {
                 s.data.cookies.retain(|c| site_of(&c.domain) != site);
             }
             s.save_now(&self.cfg);
-            s.toast(&format!("Odhlásené: {site}"));
+            s.note("signed_out", &[&site]);
             s.sync(&self.cfg);
             // Once WebKit has deleted them, send the panel the fresh list.
             let p = self.ctx.proxy.clone();
@@ -1522,7 +1572,7 @@ impl App {
             s.data.downloads.remove(i);
         }
         s.dirty = true;
-        s.toast(&format!("Sťahuje sa: {name}"));
+        s.note("downloading_prefix", &[&name]);
         s.sync(&self.cfg);
         s.refresh_panel(&self.cfg);
     }
@@ -1544,11 +1594,7 @@ impl App {
         }
         let name = d.path.rsplit('/').next().unwrap_or("").to_string();
         s.dirty = true;
-        s.toast(&if ok {
-            format!("Stiahnuté: {name}")
-        } else {
-            format!("Sťahovanie zlyhalo: {name}")
-        });
+        s.note(if ok { "download_complete" } else { "download_failed" }, &[&name]);
         s.sync(&self.cfg);
         s.refresh_panel(&self.cfg);
     }
@@ -1712,7 +1758,7 @@ impl App {
                     return;
                 };
                 if asset.sha256.is_none() {
-                    return s.toast("Inštalátor nemá kontrolný súčet, stiahni ho z GitHubu ručne");
+                    return s.note("installer_no_checksum", &[]);
                 }
                 s.update_busy = true;
                 update::download(self.ctx.proxy.clone(), asset);
@@ -1742,10 +1788,14 @@ impl App {
                 };
                 self.activate(i);
             }
-            // Reload on the certificate interstitial retries the refused URL itself.
-            "reload" if s.cur().is_some_and(|t| t.tls_error) => {
+            // Reload on the certificate interstitial retries the refused URL itself; a built-in
+            // page is rendered again.
+            "reload" if s.cur().is_some_and(|t| t.tls_error || t.internal) => {
                 if let (Some(t), Some(v)) = (s.cur(), s.view()) {
-                    let _ = v.load_url(&t.url);
+                    let _ = match internal_page(&t.url) {
+                        Some(html) => v.load_html(html),
+                        None => v.load_url(&t.url),
+                    };
                 }
             }
             "back" | "forward" | "reload" | "stop" => {
@@ -1760,7 +1810,8 @@ impl App {
             }
             "home" => self.navigate(self.cfg.homepage.clone()),
             "go" if !arg.trim().is_empty() => {
-                let url = to_url(arg.trim(), self.cfg.search_prefix());
+                let input = arg.trim();
+                let url = if internal_page(input).is_some() { input.to_string() } else { to_url(input, self.cfg.search_prefix()) };
                 self.navigate(url);
             }
             "open" => self.navigate(arg.to_string()),
@@ -1788,7 +1839,7 @@ impl App {
                 for v in s.loaded() {
                     let _ = v.zoom(s.zoom);
                 }
-                s.toast(&format!("Priblíženie {} %", (s.zoom * 100.0).round()));
+                s.note("zoom_level", &[&(s.zoom * 100.0).round().to_string()]);
             }
             "find" if arg.is_empty() => self.set_find(true),
             "find" => {
@@ -1824,10 +1875,10 @@ impl App {
                 let bms = &mut s.data.bookmarks;
                 if let Some(i) = bms.iter().position(|b| b.url == url) {
                     bms.remove(i);
-                    s.toast("Odstránené z obľúbených");
+                    s.note("bookmark_removed", &[]);
                 } else {
                     bms.push(Bookmark { url, title });
-                    s.toast("Pridané do obľúbených");
+                    s.note("bookmark_added", &[]);
                 }
                 s.dirty = true;
                 s.sync(&self.cfg);
@@ -1923,7 +1974,7 @@ impl App {
                     .iter()
                     .filter(|s| s.enabled(easylist, hosts))
                     .collect();
-                s.toast("Sťahujem zoznamy reklám…");
+                s.note("adblock_lists_downloading", &[]);
                 refresh_rules(self.ctx.proxy.clone(), all, true);
             }
             // Global switch; takes effect immediately on all loaded tabs.
@@ -1931,11 +1982,7 @@ impl App {
                 self.cfg.adblock = !self.cfg.adblock;
                 self.ctx.adblock.set(self.cfg.adblock);
                 s.apply_rules_all(&self.cfg);
-                s.toast(if self.cfg.adblock {
-                    "Blokovanie reklám zapnuté"
-                } else {
-                    "Blokovanie reklám vypnuté"
-                });
+                s.note(if self.cfg.adblock { "adblock_enabled" } else { "adblock_disabled" }, &[]);
                 s.dirty = true;
                 self.adblock_changed();
             }
@@ -1965,7 +2012,7 @@ impl App {
                         list.push(host.clone());
                         true
                     }
-                    None => return s.toast("Zoznam výnimiek je plný"),
+                    None => return s.note("allowlist_full", &[]),
                 };
                 s.apply_rules_all(&self.cfg);
                 for t in s.tabs.iter().filter(|t| {
@@ -1977,11 +2024,7 @@ impl App {
                         let _ = v.reload();
                     }
                 }
-                s.toast(&if allowed {
-                    format!("Blokovanie vypnuté pre {host}")
-                } else {
-                    format!("Blokovanie zapnuté pre {host}")
-                });
+                s.note(if allowed { "adblock_off_for_host" } else { "adblock_on_for_host" }, &[&host]);
                 s.dirty = true;
                 self.adblock_changed();
             }
@@ -2040,9 +2083,9 @@ impl App {
                     return;
                 };
                 let (ok, msg) = if !s.vault.verify(&r.old) {
-                    (false, "Nesprávne aktuálne heslo")
+                    (false, "pw_wrong_current")
                 } else if r.new.chars().count() < 8 {
-                    (false, "Nové heslo musí mať aspoň 8 znakov")
+                    (false, "new_pw_too_short")
                 } else {
                     // Transactional (`rotate_key`): the new vault must be on disk (tmp + fsync +
                     // rename) before it replaces the in-memory key or the UI reports success.
@@ -2051,18 +2094,18 @@ impl App {
                     match s.vault.rotate_key(&r.new, &s.data) {
                         Ok(()) => {
                             s.dirty = false;
-                            (true, "Heslo bolo zmenené")
+                            (true, "pw_changed")
                         }
                         Err(e) => {
                             eprintln!("password change: vault save failed: {e}");
-                            (false, "Heslo sa nepodarilo uložiť, platí pôvodné")
+                            (false, "pw_save_failed")
                         }
                     }
                 };
                 r.old.zeroize();
                 r.new.zeroize();
                 if let Some(p) = &s.panel {
-                    let _ = p.evaluate_script(&format!("pwResult({ok},{})", js(msg)));
+                    let _ = p.evaluate_script(&format!("pwResult({ok},{})", js(&s.tr(msg, &[]))));
                 }
             }
             "site-info" => {
@@ -2091,6 +2134,21 @@ impl App {
             "get-adblock-stats" => s.push_shield(&self.cfg),
             "site-clear" => self.request_site_cookies(true),
             "get-vault-sessions" => self.request_sessions(None),
+            // UI language: vault setting + plain copy for the lock screen, then every open UI
+            // view re-renders its text without reloading.
+            "set-language" => {
+                if !self.cfg.set("language", arg) {
+                    return;
+                }
+                settings::store_language(&self.cfg.language);
+                *self.ctx.lang.borrow_mut() = self.cfg.language.clone();
+                let script = format!("setLanguage({})", js(&self.cfg.language));
+                for v in std::iter::once(&s.toolbar).chain(s.panel.as_ref()).chain(s.site.as_ref()) {
+                    let _ = v.evaluate_script(&script);
+                }
+                s.dirty = true;
+                self.persist(After::Nothing);
+            }
             "delete-vault-session" => {
                 let site = arg.trim().to_ascii_lowercase();
                 if !site.is_empty()
@@ -2133,16 +2191,12 @@ fn refresh_rules(
         let send = |e| {
             let _ = proxy.send_event(e);
         };
-        let errors: Vec<String> = fetch
+        let errors: Vec<_> = fetch
             .iter()
-            .filter_map(|s| adblock::fetch(s).err())
+            .filter_map(|s| adblock::fetch(s).err().map(|k| (k, s.name)))
             .collect();
         if manual && !fetch.is_empty() {
-            send(UserEvent::RulesNote(if errors.is_empty() {
-                "Zoznamy reklám aktualizované".into()
-            } else {
-                errors.join(", ")
-            }));
+            send(UserEvent::RulesNote(errors));
         }
         for id in adblock::LEGACY {
             send(UserEvent::RulesOff(id));
@@ -2206,15 +2260,17 @@ fn html_escape(s: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// Static certificate-error page (rendered in the tab, which has no IPC).
-fn interstitial(host: &str, reasons: &[&str]) -> String {
-    let items: String = reasons
-        .iter()
-        .map(|r| format!("<li>{}</li>", html_escape(r)))
-        .collect();
-    let host = html_escape(if host.is_empty() { "tento web" } else { host });
+/// Static certificate-error page (rendered in the tab, which has no IPC), in the UI language.
+fn interstitial(lang: &str, host: &str, reasons: &[&str]) -> String {
+    let tr = |key: &str| html_escape(&settings::tr(lang, key, &[]));
+    let items: String = reasons.iter().map(|r| format!("<li>{}</li>", tr(r))).collect();
+    let host = if host.is_empty() { tr("this_site") } else { html_escape(host) };
+    // Template escaped first, then the escaped host inserted in bold.
+    let desc = tr("interstitial_desc").replace("{0}", &format!("<b>{host}</b>"));
+    let (title, hint, back) = (tr("not_private_title"), tr("interstitial_hint"), tr("back_to_safety"));
+    let lang = html_escape(lang);
     format!(
-        r#"<!doctype html><html><head><meta charset="utf-8"><title>Pripojenie nie je bezpečné</title>
+        r#"<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><title>{title}</title>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
 <style>
 :root {{ color-scheme: dark; }}
@@ -2229,11 +2285,11 @@ ul {{ color: #e5534b; padding-left: 20px; line-height: 1.6; }}
 button {{ margin-top: 16px; font: inherit; color: #fff; background: #5b8def; border: 0; border-radius: 8px; padding: 8px 16px; }}
 </style></head><body><main>
 <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l10 18H2z"/><path d="M12 10v4M12 17.5v.01"/></svg>
-<h1>Pripojenie nie je bezpečné</h1>
-<p>Crow zablokoval načítanie <b>{host}</b>, pretože certifikát servera sa nepodarilo overiť. Niekto sa môže pokúšať odchytiť údaje, ktoré na tento web posielaš (napríklad heslá alebo čísla kariet).</p>
+<h1>{title}</h1>
+<p>{desc}</p>
 <ul>{items}</ul>
-<p>Stránku nie je možné otvoriť. Ak ide o tvoj vlastný server, oprav jeho certifikát.</p>
-<button onclick="history.back()">Späť do bezpečia</button>
+<p>{hint}</p>
+<button onclick="history.back()">{back}</button>
 </main></body></html>"#
     )
 }
@@ -2360,6 +2416,18 @@ fn toolbar_rect(window: &Window, h: f64) -> Rect {
 
 fn content_rect(window: &Window, top: f64) -> Rect {
     rect(window, top, None)
+}
+
+/// Address of the built-in changelog (also reachable as `about:changelog`).
+const CHANGELOG_URL: &str = "crow:changelog";
+
+/// Built-in offline pages: static HTML with its own strict CSP and no script, loaded into the
+/// tab view (which has no IPC) instead of being fetched.
+fn internal_page(url: &str) -> Option<&'static str> {
+    match url.trim().to_ascii_lowercase().as_str() {
+        "crow:changelog" | "about:changelog" => Some(include_str!("changelog.html")),
+        _ => None,
+    }
 }
 
 fn to_url(input: &str, search_prefix: &str) -> String {

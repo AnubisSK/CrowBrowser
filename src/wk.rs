@@ -274,12 +274,12 @@ pub fn on_tls_error(f: impl Fn(u32, String, Vec<&'static str>) + 'static) {
 /// trust evaluation rejects bad certificates; this only tells the user why the page did not load.
 fn tls_reason(code: isize) -> Option<&'static str> {
     Some(match code {
-        -1201 => "Certifikát má neplatný dátum (vypršal alebo ešte neplatí)",
-        -1202 => "Certifikát nie je dôveryhodný pre túto doménu",
-        -1203 => "Certifikát nevydala dôveryhodná autorita",
-        -1204 => "Certifikát ešte nie je platný",
-        -1200 => "Zabezpečené pripojenie sa nepodarilo nadviazať",
-        -1205 | -1206 => "Server vyžaduje klientsky certifikát",
+        -1201 => "cert_err_bad_date",
+        -1202 => "cert_err_untrusted",
+        -1203 => "cert_err_unknown_ca",
+        -1204 => "cert_err_not_activated",
+        -1200 => "cert_err_tls_failed",
+        -1205 | -1206 => "cert_err_client_cert",
         _ => return None,
     })
 }
@@ -525,7 +525,7 @@ pub fn cert_chain(v: &WebView) -> Option<(Vec<Vec<u8>>, Vec<&'static str>)> {
         }
     }
     let secure_only: bool = unsafe { msg_send![&*wv, hasOnlySecureContent] };
-    let errors = if secure_only { Vec::new() } else { vec!["Stránka obsahuje aj nezabezpečený (HTTP) obsah"] };
+    let errors = if secure_only { Vec::new() } else { vec!["cert_err_mixed"] };
     Some((chain, errors))
 }
 

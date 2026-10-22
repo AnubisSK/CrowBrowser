@@ -347,11 +347,12 @@ pub fn remove(hosts: bool) {
 }
 
 /// Downloads one list (blocking); replaces the cached copy only if it looks valid.
-pub fn fetch(s: &Source) -> Result<(), String> {
+/// Errors are `locales.json` keys taking the list name.
+pub fn fetch(s: &Source) -> Result<(), &'static str> {
     let _ = fs::create_dir_all(data_dir());
     let part = path(&format!("{}.part", s.file));
     if update::private_file(&part).is_err() {
-        return Err(format!("{} sa nepodarilo uložiť", s.name));
+        return Err("save_failed");
     }
     let ok = update::curl()
         .args(["--max-time", "120", "--max-filesize"])
@@ -364,7 +365,7 @@ pub fn fetch(s: &Source) -> Result<(), String> {
     let lines = if ok { fs::read_to_string(&part).map(|t| t.lines().count()).unwrap_or(0) } else { 0 };
     if lines < 1000 {
         let _ = fs::remove_file(&part);
-        return Err(format!("{} sa nepodarilo stiahnuť", s.name));
+        return Err("fetch_failed");
     }
-    fs::rename(&part, path(s.file)).map_err(|_| format!("{} sa nepodarilo uložiť", s.name))
+    fs::rename(&part, path(s.file)).map_err(|_| "save_failed")
 }

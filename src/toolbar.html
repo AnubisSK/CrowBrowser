@@ -146,51 +146,51 @@
   </div>
   <div id="tabrow" class="row">
     <div id="tabs"></div>
-    <button id="newtab" title="Nová karta (⌘T)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+    <button id="newtab" data-i18n-title="new_tab" data-hint=" (⌘T)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
   </div>
   <div id="nav" class="row">
-    <button id="back" title="Späť (⌘[)"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
-    <button id="forward" title="Vpred (⌘])"><svg viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg></button>
-    <button id="reload" title="Obnoviť (⌘R)">
+    <button id="back" data-i18n-title="back" data-hint=" (⌘[)"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <button id="forward" data-i18n-title="forward" data-hint=" (⌘])"><svg viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg></button>
+    <button id="reload" data-i18n-title="reload" data-hint=" (⌘R)">
       <svg class="r" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
       <svg class="s" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
     </button>
-    <button id="home" title="Domov (⌘⇧H)"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></button>
+    <button id="home" data-i18n-title="home" data-hint=" (⌘⇧H)"><svg viewBox="0 0 24 24"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h5v-6h4v6h5V10"/></svg></button>
     <div class="urlwrap">
-      <span id="sec"><svg class="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><svg class="warn" viewBox="0 0 24 24"><path d="M12 3l10 18H2z"/><path d="M12 10v4M12 17.5v.01"/></svg><span class="txt">Nezabezpečené</span></span>
-      <input id="url" spellcheck="false" autocomplete="off" placeholder="Hľadať alebo zadať adresu">
-      <button id="login" title="Prihlásený na tomto webe (správa prihlásení)"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg></button>
-      <button id="star" title="Obľúbené (⌘D)"><svg viewBox="0 0 24 24"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg></button>
+      <span id="sec"><svg class="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg><svg class="warn" viewBox="0 0 24 24"><path d="M12 3l10 18H2z"/><path d="M12 10v4M12 17.5v.01"/></svg><span class="txt" data-i18n="http_insecure"></span></span>
+      <input id="url" spellcheck="false" autocomplete="off" data-i18n-ph="search_or_enter_url">
+      <button id="login" data-i18n-title="logged_in"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg></button>
+      <button id="star" data-i18n-title="bookmark_page" data-hint=" (⌘D)"><svg viewBox="0 0 24 24"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg></button>
     </div>
-    <button id="shield" title="Blokovanie reklám"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span id="shieldn"></span></button>
-    <button id="bms" title="Obľúbené stránky (⌘⌥B)"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
-    <button id="hist" title="História (⌘Y)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></button>
-    <button id="dl" title="Stiahnuté (⌘⌥L)"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></button>
-    <button id="settings" title="Nastavenia (⌘,)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+    <button id="shield" data-i18n-title="adblock"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span id="shieldn"></span></button>
+    <button id="bms" data-i18n-title="bookmarks" data-hint=" (⌘⌥B)"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
+    <button id="hist" data-i18n-title="history" data-hint=" (⌘Y)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></button>
+    <button id="dl" data-i18n-title="downloads" data-hint=" (⌘⌥L)"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></button>
+    <button id="settings" data-i18n-title="settings" data-hint=" (⌘,)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
   </div>
   <div id="find" class="row">
-    <input id="fq" spellcheck="false" autocomplete="off" placeholder="Hľadať na stránke">
+    <input id="fq" spellcheck="false" autocomplete="off" data-i18n-ph="find_in_page">
     <span id="fcount"></span>
-    <button id="fprev" title="Predchádzajúci (⌘⇧G)"><svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6"/></svg></button>
-    <button id="fnext" title="Ďalší (⌘G)"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+    <button id="fprev" data-i18n-title="find_prev" data-hint=" (⌘⇧G)"><svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6"/></svg></button>
+    <button id="fnext" data-i18n-title="find_next" data-hint=" (⌘G)"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
     <div class="spacer"></div>
-    <button id="fclose" title="Zavrieť (Esc)"><svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
+    <button id="fclose" data-i18n-title="close" data-hint=" (Esc)"><svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg></button>
   </div>
   <div id="ask" class="row">
     <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>
     <span id="askrisk"></span>
     <span id="asktext"></span>
     <div class="spacer"></div>
-    <button id="askno" class="txt">Zrušiť</button>
-    <button id="askyes" class="txt primary">Uložiť</button>
+    <button id="askno" class="txt" data-i18n="deny"></button>
+    <button id="askyes" class="txt primary" data-i18n="allow"></button>
   </div>
   <div id="upd" class="row">
     <svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
     <span id="updtext"></span>
     <div class="spacer"></div>
-    <button id="updnotes" class="txt">Čo je nové</button>
-    <button id="updlater" class="txt">Neskôr</button>
-    <button id="updget" class="txt primary">Stiahnuť</button>
+    <button id="updnotes" class="txt" data-i18n="whats_new"></button>
+    <button id="updlater" class="txt" data-i18n="later"></button>
+    <button id="updget" class="txt primary" data-i18n="download"></button>
   </div>
   <div id="bar"></div>
   <div id="toast"></div>
@@ -268,23 +268,23 @@
     if (drag && drag.on) { pendingState = st; S = st; return; }
     S = st;
     const tabs = $('tabs');
-    tabs.replaceChildren(...st.tabs.map((t, i) => {
+    tabs.replaceChildren(...st.tabs.map((tab, i) => {
       const el = document.createElement('div');
-      el.className = 'tab' + (i === st.active ? ' on' : '') + (t.loading ? ' loading' : '') + (t.asleep ? ' asleep' : '');
-      el.dataset.id = t.id;
-      el.title = t.title;
+      el.className = 'tab' + (i === st.active ? ' on' : '') + (tab.loading ? ' loading' : '') + (tab.asleep ? ' asleep' : '');
+      el.dataset.id = tab.id;
+      el.title = tab.title || t('new_tab');
       const dot = document.createElement('span'); dot.className = 'dot';
-      const title = document.createElement('span'); title.className = 't'; title.textContent = t.title;
-      const x = document.createElement('span'); x.className = 'x'; x.textContent = '×';
-      x.onclick = (e) => { e.stopPropagation(); send('close-tab:' + t.id); };
+      const title = document.createElement('span'); title.className = 't'; title.textContent = tab.title || t('new_tab');
+      const x = document.createElement('span'); x.className = 'x'; x.textContent = '×'; x.title = t('close_tab');
+      x.onclick = (e) => { e.stopPropagation(); send('close-tab:' + tab.id); };
       el.onmousedown = (e) => {
         if (e.button !== 0 || e.target === x) return;
-        drag = { id: t.id, x: e.clientX, on: false };
-        send('select:' + t.id);
+        drag = { id: tab.id, x: e.clientX, on: false };
+        send('select:' + tab.id);
       };
-      el.onauxclick = (e) => { if (e.button === 1) send('close-tab:' + t.id); };
-      if (t.icon && t.icon.startsWith('data:image/png;base64,')) {
-        const fav = document.createElement('img'); fav.className = 'fav'; fav.src = t.icon; fav.draggable = false; fav.alt = '';
+      el.onauxclick = (e) => { if (e.button === 1) send('close-tab:' + tab.id); };
+      if (tab.icon && tab.icon.startsWith('data:image/png;base64,')) {
+        const fav = document.createElement('img'); fav.className = 'fav'; fav.src = tab.icon; fav.draggable = false; fav.alt = '';
         el.append(fav);
       }
       el.append(dot, title, x);
@@ -298,22 +298,22 @@
     wrap.classList.toggle('https', tls === 'secure');
     wrap.classList.toggle('http', warn);
     $('sec').querySelector('.txt').textContent =
-      tls === 'mixed' ? 'Čiastočne zabezpečené' : tls === 'broken' ? 'Chyba certifikátu' : 'Nezabezpečené';
+      t(tls === 'mixed' ? 'partially_secure' : tls === 'broken' ? 'certificate_error' : 'http_insecure');
     if (warn) requestAnimationFrame(() => wrap.style.setProperty('--secw', ($('sec').offsetWidth + 12) + 'px'));
-    $('sec').title = tls ? 'Zobraziť informácie o stránke' : '';
+    $('sec').title = tls ? t('site_info') : '';
     const a = st.ask;
     document.body.classList.toggle('asking', !!a);
     if (a) {
       let from = a.url; try { from = new URL(a.url).host || a.url.split(':')[0] + ':'; } catch {}
-      $('asktext').textContent = 'Stiahnuť „' + a.name + '“ z ' + from + '?' + (a.more ? ' (+' + a.more + ' ďalšie)' : '');
+      $('asktext').textContent = t('download_prompt', a.name, from) + (a.more ? ' ' + t('download_more', a.more) : '');
       // Executable/script types: explicit warning badge next to the question.
-      $('askrisk').textContent = a.risk ? '⚠ ' + a.risk : '';
+      $('askrisk').textContent = a.risk ? '⚠ ' + t('dangerous_file_warning') + ' (.' + a.risk + ')' : '';
       $('askrisk').classList.toggle('show', !!a.risk);
     }
     const u = st.update;
     document.body.classList.toggle('updating', !!u);
     if (u) {
-      $('updtext').textContent = u.busy ? 'Sťahuje sa Crow ' + u.version + '…' : 'Je dostupná nová verzia Crow ' + u.version;
+      $('updtext').textContent = t(u.busy ? 'update_downloading' : 'update_available', u.version);
       $('updget').disabled = !!u.busy;
       $('updget').style.display = u.asset ? '' : 'none';
     }
@@ -323,8 +323,8 @@
     const blocking = st.adblock && !st.siteAllowed;
     $('shield').classList.toggle('blocking', blocking);
     $('shield').classList.toggle('off', !blocking);
-    $('shield').title = (!st.adblock ? 'Blokovanie reklám: vypnuté všade' : st.siteAllowed ? 'Blokovanie reklám: vypnuté pre ' + st.host : 'Blokovanie reklám: zapnuté')
-      + ' (klik: štatistiky, ⌥klik: zapnúť/vypnúť všade)';
+    $('shield').title = t('adblock') + ': ' + (!st.adblock ? t('adblock_off_everywhere') : st.siteAllowed ? t('adblock_off_for', st.host) : t('adblock_on'))
+      + ' (' + t('shield_hint') + ')';
     setBlocked(st.blocked || 0);
     $('dl').classList.toggle('busy', st.downloads > 0);
     for (const [id, sec] of [['bms', 'bookmarks'], ['hist', 'history'], ['dl', 'downloads'], ['settings', 'settings']])
@@ -343,10 +343,13 @@
 
   function focusUrl() { url.focus(); url.select(); }
 
+  // Language switched in Settings: static labels are redone by i18n.js, dynamic ones here.
+  window.onLanguage = () => render(S);
+
   function toast(msg) {
-    const t = $('toast');
-    t.textContent = msg; t.classList.add('show');
-    clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove('show'), 2200);
+    const el = $('toast');
+    el.textContent = msg; el.classList.add('show');
+    clearTimeout(el._h); el._h = setTimeout(() => el.classList.remove('show'), 2200);
   }
 
   // Find in page
@@ -355,8 +358,7 @@
   function openFind() { document.body.classList.add('finding'); fq.focus(); fq.select(); if (fq.value) findSend('new'); }
   function closeFind() { document.body.classList.remove('finding'); $('fcount').textContent = ''; }
   function findCount(n) {
-    const w = n === 1 ? 'výsledok' : n >= 2 && n <= 4 ? 'výsledky' : 'výsledkov';
-    $('fcount').textContent = fq.value ? (n ? n + ' ' + w : 'Žiadne výsledky') : '';
+    $('fcount').textContent = fq.value ? (n ? t.plural(n, 'find_result') : t('find_none')) : '';
   }
   fq.oninput = () => findSend('new');
   fq.onkeydown = (e) => {

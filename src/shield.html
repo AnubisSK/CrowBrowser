@@ -66,50 +66,50 @@
     s.append(p);
     return s;
   }
-  const num = (n) => n.toLocaleString('sk');
+  const num = (n) => n.toLocaleString(currentLanguage());
   function bytes(b) {
-    if (b < 1024 * 1024) return (b / 1024).toLocaleString('sk', { maximumFractionDigits: 0 }) + ' kB';
-    if (b < 1024 ** 3) return (b / 1024 ** 2).toLocaleString('sk', { maximumFractionDigits: 1 }) + ' MB';
-    return (b / 1024 ** 3).toLocaleString('sk', { maximumFractionDigits: 2 }) + ' GB';
+    if (b < 1024 * 1024) return (b / 1024).toLocaleString(currentLanguage(), { maximumFractionDigits: 0 }) + ' kB';
+    if (b < 1024 ** 3) return (b / 1024 ** 2).toLocaleString(currentLanguage(), { maximumFractionDigits: 1 }) + ' MB';
+    return (b / 1024 ** 3).toLocaleString(currentLanguage(), { maximumFractionDigits: 2 }) + ' GB';
   }
   function time(ms) {
     if (ms < 1000) return ms + ' ms';
     const s = ms / 1000;
-    if (s < 60) return s.toLocaleString('sk', { maximumFractionDigits: 1 }) + ' s';
-    if (s < 3600) return (s / 60).toLocaleString('sk', { maximumFractionDigits: 1 }) + ' min';
-    return (s / 3600).toLocaleString('sk', { maximumFractionDigits: 1 }) + ' h';
+    if (s < 60) return s.toLocaleString(currentLanguage(), { maximumFractionDigits: 1 }) + ' s';
+    if (s < 3600) return (s / 60).toLocaleString(currentLanguage(), { maximumFractionDigits: 1 }) + ' min';
+    return (s / 3600).toLocaleString(currentLanguage(), { maximumFractionDigits: 1 }) + ' h';
   }
   const tile = (value, label, big) => h('div', { class: 'tile' + (big ? ' big' : '') }, h('div', { class: 'num' }, value), h('div', { class: 'lbl' }, label));
 
   function render() {
     const on = D.is_enabled && !D.allowed;
-    const sw = h('div', { class: 'sw' + (on ? ' on' : '') + (D.host || !D.is_enabled ? '' : ' dis'), role: 'switch', title: on ? 'Vypnúť pre tento web' : 'Zapnúť' });
+    const sw = h('div', { class: 'sw' + (on ? ' on' : '') + (D.host || !D.is_enabled ? '' : ' dis'), role: 'switch', title: t(on ? 'disable_for_site' : 'enable') });
     sw.onclick = () => {
       if (!D.is_enabled) send('toggle-adblock');
       else if (D.host) send('adblock-allow:' + D.host);
     };
-    const state = !D.is_enabled ? 'Blokovanie je vypnuté všade' : D.allowed ? 'Vypnuté pre tento web' : 'Reklamy a sledovače sa blokujú';
+    const state = t(!D.is_enabled ? 'blocking_off_everywhere' : D.allowed ? 'off_for_site' : 'blocking_active');
     const out = [h('header', { class: on ? 'on' : '' }, shield(),
-      h('div', { class: 'who' }, h('div', { class: 'host' }, D.host || 'Táto stránka'), h('div', { class: 'state' }, state)), sw)];
+      h('div', { class: 'who' }, h('div', { class: 'host' }, D.host || t('this_page')), h('div', { class: 'state' }, state)), sw)];
     if (D.available) {
       out.push(h('div', { class: 'grid' },
-        tile(num(D.tab_blocked), 'Zablokované reklamy a sledovače na tejto stránke', true),
-        tile(bytes(D.tab_bytes), 'Ušetrené dáta'),
-        tile(time(D.tab_ms), 'Ušetrený čas')));
+        tile(num(D.tab_blocked), t('trackers_blocked'), true),
+        tile(bytes(D.tab_bytes), t('data_saved')),
+        tile(time(D.tab_ms), t('time_saved'))));
       out.push(h('div', { class: 'note' },
-        'Celkovo: ' + num(D.total_blocked) + ' zablokovaných · ' + bytes(D.total_bytes) + ' · ' + time(D.total_ms) +
-        '. Dáta a čas sú odhad (50 kB a 50 ms na požiadavku).'));
+        t('shield_total', num(D.total_blocked), bytes(D.total_bytes), time(D.total_ms))));
     } else {
-      out.push(h('div', { class: 'note', style: 'padding-top:12px' }, 'Počet zablokovaných požiadaviek WebKitGTK neposkytuje, blokovanie však funguje.'));
+      out.push(h('div', { class: 'note', style: 'padding-top:12px' }, t('shield_unavailable')));
     }
     out.push(h('footer', {},
-      h('button', { class: 'btn', onclick: () => send('toggle-adblock') }, D.is_enabled ? 'Vypnúť všade' : 'Zapnúť všade'),
+      h('button', { class: 'btn', onclick: () => send('toggle-adblock') }, t(D.is_enabled ? 'disable_everywhere' : 'enable_everywhere')),
       h('div', { class: 'spacer' }),
-      h('button', { class: 'btn', onclick: () => send('site-settings') }, 'Nastavenia')));
+      h('button', { class: 'btn', onclick: () => send('site-settings') }, t('settings'))));
     card.replaceChildren(...out);
     requestAnimationFrame(() => send('site-size:' + Math.ceil(document.body.scrollHeight)));
   }
   function update(d) { D = d; render(); }
+  window.onLanguage = () => render();
 
   document.onkeydown = (e) => { if (e.key === 'Escape') send('site-close'); };
   window.onblur = () => send('site-close');

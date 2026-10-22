@@ -51,10 +51,11 @@ pub fn sanitize(name: &str) -> String {
     if s.is_empty() { "download".into() } else { s }
 }
 
-/// Warning for the download prompt when the (sanitized) name is an executable/script type.
+/// Extension of an executable/script type (lowercase), for the warning in the download prompt
+/// (worded by the UI in its language).
 pub fn risk(name: &str) -> Option<String> {
     let (_, ext) = ext_of(name)?;
-    executable(&ext).then(|| format!("Spustiteľný súbor (.{ext})"))
+    executable(&ext).then_some(ext)
 }
 
 /// Free path for `name` (sanitized) in `dir`: "file (1).ext", "file (2).ext", …

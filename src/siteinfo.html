@@ -84,29 +84,29 @@
     const leaf = D.certs[0];
     // "Secure" only when the engine validated the certificate (D.tls), never from the scheme.
     const bad = D.tls !== 'secure' || D.errors.length > 0 || (leaf && leaf.expired);
-    const out = [h('header', {}, h('div', { class: 'host', title: D.url }, D.host || D.url), h('button', { id: 'x', title: 'Zavrieť (Esc)', onclick: () => send('site-close') }, '✕'))];
+    const out = [h('header', {}, h('div', { class: 'host', title: D.url }, D.host || D.url), h('button', { id: 'x', title: t('close') + ' (Esc)', onclick: () => send('site-close') }, '✕'))];
 
     const conn = h('div', { class: 'sec' });
     if (https && !bad) {
-      conn.append(rowEl(I.lock, 'ok', 'Pripojenie je zabezpečené', 'Údaje, ktoré na tento web odošleš (napríklad heslá alebo čísla kariet), sú počas prenosu šifrované.'));
+      conn.append(rowEl(I.lock, 'ok', t('https_secure'), t('https_secure_desc')));
     } else if (https) {
-      conn.append(rowEl(I.warn, D.tls === 'mixed' ? 'warn' : 'bad', D.tls === 'mixed' ? 'Pripojenie nie je úplne zabezpečené' : 'Certifikát nebol overený',
-        D.errors.join(' · ') || (D.tls === 'mixed' ? 'Stránka obsahuje aj nezabezpečený (HTTP) obsah.' : 'Crow pre túto stránku nemá overený certifikát. Nezadávaj sem heslá ani platobné údaje.')));
+      conn.append(rowEl(I.warn, D.tls === 'mixed' ? 'warn' : 'bad', t(D.tls === 'mixed' ? 'partially_secure' : 'cert_not_verified'),
+        D.errors.map(e => t(e)).join(' · ') || t(D.tls === 'mixed' ? 'cert_err_mixed' : 'cert_unverified_desc')));
     } else if (http) {
-      conn.append(rowEl(I.warn, 'bad', 'Pripojenie nie je zabezpečené', 'Stránka nepoužíva HTTPS. Nezadávaj sem heslá ani platobné údaje, ktokoľvek v sieti ich môže vidieť alebo zmeniť.'));
+      conn.append(rowEl(I.warn, 'bad', t('connection_insecure'), t('http_desc')));
     } else {
-      conn.append(rowEl(I.shield, '', 'Interná alebo lokálna stránka', D.url));
+      conn.append(rowEl(I.shield, '', t('internal_page'), D.url));
     }
     if (leaf) {
       const det = h('div', { id: 'cert' },
         h('dl', {},
-          h('dt', {}, 'Vydaný pre'), h('dd', {}, who(leaf.subject_cn, leaf.subject_o)),
-          h('dt', {}, 'Vydal'), h('dd', {}, who(leaf.issuer_cn, leaf.issuer_o)),
-          h('dt', {}, 'Platný od'), h('dd', {}, leaf.not_before),
-          h('dt', {}, 'Platný do'), h('dd', { class: leaf.expired ? 'bad' : '' }, leaf.not_after + (leaf.expired ? ' (neplatný)' : '')),
+          h('dt', {}, t('issued_to')), h('dd', {}, who(leaf.subject_cn, leaf.subject_o)),
+          h('dt', {}, t('issued_by')), h('dd', {}, who(leaf.issuer_cn, leaf.issuer_o)),
+          h('dt', {}, t('valid_from')), h('dd', {}, leaf.not_before),
+          h('dt', {}, t('valid_to')), h('dd', { class: leaf.expired ? 'bad' : '' }, leaf.not_after + (leaf.expired ? ' ' + t('cert_invalid_mark') : '')),
           h('dt', {}, 'SHA-256'), h('dd', { class: 'fp' }, leaf.sha256)),
-        D.certs.length > 1 ? h('div', { class: 'chain' }, 'Reťazec certifikátov:', ...D.certs.slice(1).map(c => h('div', {}, who(c.subject_cn, c.subject_o)))) : null);
-      const r = rowEl(I.cert, '', bad ? 'Certifikát nie je platný' : 'Certifikát je platný', 'Vydal: ' + who(leaf.issuer_cn, leaf.issuer_o), h('span', { class: 'chev' }, icon(I.chev)));
+        D.certs.length > 1 ? h('div', { class: 'chain' }, t('cert_chain'), ...D.certs.slice(1).map(c => h('div', {}, who(c.subject_cn, c.subject_o)))) : null);
+      const r = rowEl(I.cert, '', t(bad ? 'cert_invalid' : 'cert_valid'), t('issued_by') + ': ' + who(leaf.issuer_cn, leaf.issuer_o), h('span', { class: 'chev' }, icon(I.chev)));
       r.classList.add('click');
       r.onclick = () => { r.classList.toggle('open'); det.classList.toggle('show'); size(); };
       conn.append(r, det);
@@ -115,16 +115,16 @@
 
     const site = h('div', { class: 'sec' });
     if (http || https) {
-      site.append(rowEl(I.cookie, '', 'Cookies a údaje stránky',
-        D.cookies ? 'Počet cookies: ' + D.cookies + ' (' + D.host + ')' : 'Žiadne cookies pre ' + D.host,
-        D.cookies ? h('button', { class: 'btn danger', onclick: () => send('site-clear') }, 'Vymazať') : null));
+      site.append(rowEl(I.cookie, '', t('site_data'),
+        D.cookies ? t('cookie_count', D.cookies, D.host) : t('no_cookies_for', D.host),
+        D.cookies ? h('button', { class: 'btn danger', onclick: () => send('site-clear') }, t('clear_data')) : null));
     }
     const on = D.adblock && !D.allowed;
-    site.append(rowEl(I.shield, on ? 'ok' : '', 'Blokovanie reklám a sledovačov',
-      !D.adblock ? 'Vypnuté všade' : D.allowed ? 'Vypnuté pre ' + D.host : 'Zapnuté',
+    site.append(rowEl(I.shield, on ? 'ok' : '', t('adblock_full'),
+      !D.adblock ? t('off_everywhere') : D.allowed ? t('off_for', D.host) : t('switch_on'),
       D.adblock && (http || https)
-        ? h('button', { class: 'btn', onclick: () => send('adblock-allow:' + D.host) }, D.allowed ? 'Zapnúť tu' : 'Vypnúť tu')
-        : h('button', { class: 'btn', onclick: () => send('site-settings') }, 'Nastavenia')));
+        ? h('button', { class: 'btn', onclick: () => send('adblock-allow:' + D.host) }, t(D.allowed ? 'enable_here' : 'disable_here'))
+        : h('button', { class: 'btn', onclick: () => send('site-settings') }, t('settings'))));
     out.push(site);
     card.replaceChildren(...out);
     size();
@@ -132,6 +132,7 @@
 
   function size() { requestAnimationFrame(() => send('site-size:' + Math.ceil(document.body.scrollHeight))); }
   function update(d) { D = d; render(); }
+  window.onLanguage = () => render();
 
   document.onkeydown = (e) => { if (e.key === 'Escape') send('site-close'); };
   window.onblur = () => send('site-close');

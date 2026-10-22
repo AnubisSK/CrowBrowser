@@ -55,11 +55,11 @@
     <h1 id="h"></h1>
     <p id="d"></p>
     <input type="password" id="pw" autofocus>
-    <input type="password" id="pw2" placeholder="Zopakuj heslo">
+    <input type="password" id="pw2" data-i18n-ph="repeat_password">
     <button class="primary" id="go" type="submit"></button>
     <div class="err" id="err"></div>
-    <p class="warn" id="warn">Heslo sa nikam neukladá. Ak ho zabudneš, dáta sa nedajú obnoviť.</p>
-    <button class="link" id="reset" type="button">Zabudol som heslo – vymazať všetky dáta</button>
+    <p class="warn" id="warn" data-i18n="pw_not_saved_warning"></p>
+    <button class="link" id="reset" type="button" data-i18n="forgot_password"></button>
   </form>
 <script>
   const MODE = /*MODE*/;
@@ -67,12 +67,10 @@
   const send = (m) => window.ipc.postMessage(m);
   const create = MODE === 'create';
 
-  $('h').textContent = create ? 'Vitaj v Crow' : 'Crow je zamknutý';
-  $('d').textContent = create
-    ? 'Nastav heslo. Šifruje históriu, obľúbené, cookies a prihlásenia (Argon2id + XChaCha20-Poly1305).'
-    : 'Zadaj heslo na odomknutie histórie, cookies a prihlásení.';
-  $('pw').placeholder = create ? 'Nové heslo (min. 8 znakov)' : 'Heslo';
-  $('go').textContent = create ? 'Vytvoriť trezor' : 'Odomknúť';
+  $('h').textContent = t(create ? 'welcome' : 'locked');
+  $('d').textContent = t(create ? 'create_desc' : 'unlock_desc');
+  $('pw').placeholder = t(create ? 'new_password_hint' : 'master_password');
+  $('go').textContent = t(create ? 'create_vault' : 'unlock');
   $('pw2').style.display = create ? '' : 'none';
   $('warn').style.display = create ? '' : 'none';
   $('reset').style.display = create ? 'none' : '';
@@ -87,13 +85,13 @@
     e.preventDefault();
     const pw = $('pw').value;
     if (create) {
-      if ([...pw].length < 8) return fail('Heslo musí mať aspoň 8 znakov');
-      if (pw !== $('pw2').value) return fail('Heslá sa nezhodujú');
+      if ([...pw].length < 8) return fail(t('pw_too_short'));
+      if (pw !== $('pw2').value) return fail(t('pw_mismatch'));
     }
     if (!pw) return;
     $('err').textContent = '';
     $('go').disabled = true;
-    $('go').textContent = create ? 'Vytváram…' : 'Odomykám…';
+    $('go').textContent = t(create ? 'creating' : 'unlocking');
     // let the label repaint before key derivation blocks the UI thread
     setTimeout(() => send((create ? 'create:' : 'unlock:') + pw), 60);
   };
@@ -101,7 +99,7 @@
   function fail(msg) {
     $('err').textContent = msg;
     $('go').disabled = false;
-    $('go').textContent = create ? 'Vytvoriť trezor' : 'Odomknúť';
+    $('go').textContent = t(create ? 'create_vault' : 'unlock');
     $('pw').value = ''; $('pw2').value = ''; $('pw').focus();
     const c = $('card'); c.classList.remove('shake'); void c.offsetWidth; c.classList.add('shake');
   }
@@ -110,8 +108,8 @@
   reset.onclick = () => {
     if (!reset.classList.contains('armed')) {
       reset.classList.add('armed');
-      reset.textContent = 'Naozaj? Klikni znova – história, cookies aj prihlásenia sa vymažú';
-      setTimeout(() => { reset.classList.remove('armed'); reset.textContent = 'Zabudol som heslo – vymazať všetky dáta'; }, 4000);
+      reset.textContent = t('forgot_confirm');
+      setTimeout(() => { reset.classList.remove('armed'); reset.textContent = t('forgot_password'); }, 4000);
       return;
     }
     send('reset');

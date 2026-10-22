@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, sync::OnceLock};
 
 pub const ENGINES: &[(&str, &str, &str)] = &[
     ("ddg", "DuckDuckGo", "https://duckduckgo.com/?q="),
@@ -29,7 +29,12 @@ pub struct Settings {
     pub adblock_easylist: bool,
     /// Download and use the StevenBlack hosts list.
     pub adblock_hosts: bool,
+    /// UI language (`LANGUAGES`).
+    pub language: String,
 }
+
+/// UI languages with dictionaries in `locales.json`.
+pub const LANGUAGES: &[&str] = &["sk", "cs", "en", "de"];
 
 impl Default for Settings {
     fn default() -> Self {
@@ -45,6 +50,7 @@ impl Default for Settings {
             adblock_allow: Vec::new(),
             adblock_easylist: true,
             adblock_hosts: true,
+            language: "sk".into(),
         }
     }
 }
@@ -63,6 +69,37 @@ pub fn data_dir() -> PathBuf {
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"))
         .join("crow")
+}
+
+/// The lock screen is shown before the vault (and its settings) is decrypted, so the chosen
+/// language is also kept in plain `data_dir()/language`: just the code, nothing else.
+pub fn stored_language() -> String {
+    let v = fs::read_to_string(data_dir().join("language")).unwrap_or_default();
+    let v = v.trim();
+    if LANGUAGES.contains(&v) { v.into() } else { "sk".into() }
+}
+
+/// UI dictionaries shared with `i18n.js`, parsed once on first use.
+fn locales() -> &'static serde_json::Value {
+    static L: OnceLock<serde_json::Value> = OnceLock::new();
+    L.get_or_init(|| serde_json::from_str(include_str!("locales.json")).unwrap_or_default())
+}
+
+/// Backend text in `lang`, like `t()` in i18n.js: English fallback, then the key itself;
+/// `{0}`, `{1}` … are replaced by `args`.
+pub fn tr(lang: &str, key: &str, args: &[&str]) -> String {
+    let l = locales();
+    let s = [lang, "en"].iter().find_map(|c| l[*c][key].as_str()).unwrap_or(key);
+    args.iter()
+        .enumerate()
+        .fold(s.to_string(), |s, (i, a)| s.replace(&format!("{{{i}}}"), a))
+}
+
+pub fn store_language(code: &str) {
+    if LANGUAGES.contains(&code) && stored_language() != code {
+        let _ = fs::create_dir_all(data_dir());
+        let _ = fs::write(data_dir().join("language"), code);
+    }
 }
 
 impl Settings {
@@ -95,6 +132,7 @@ impl Settings {
             "updates" if matches!(v, "on" | "off") => self.updates = v == "on",
             "adblock_easylist" if matches!(v, "on" | "off") => self.adblock_easylist = v == "on",
             "adblock_hosts" if matches!(v, "on" | "off") => self.adblock_hosts = v == "on",
+            "language" if LANGUAGES.contains(&v) => self.language = v.into(),
             "zoom" => match v.parse::<f64>() {
                 Ok(z) if (0.25..=3.0).contains(&z) => self.zoom = z,
                 _ => return false,

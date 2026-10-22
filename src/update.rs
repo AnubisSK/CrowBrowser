@@ -96,11 +96,11 @@ fn api<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
         .args(["--max-time", "20", "-H", "Accept: application/vnd.github+json"])
         .arg(format!("https://api.github.com/repos/{REPO}/{path}"))
         .output()
-        .map_err(|_| "curl nie je dostupný".to_string())?;
+        .map_err(|_| "update_err_curl".to_string())?;
     if !out.status.success() {
-        return Err("na GitHube nie je vydanie alebo neodpovedá".into());
+        return Err("update_err_github".into());
     }
-    serde_json::from_slice(&out.stdout).map_err(|_| "Neplatná odpoveď GitHubu".into())
+    serde_json::from_slice(&out.stdout).map_err(|_| "update_err_response".into())
 }
 
 /// "v1.2.3-beta" → (1, 2, 3)
@@ -182,7 +182,7 @@ fn latest() -> Result<Option<Info>, String> {
         return Ok(None);
     }
     let (Some(new), Some(cur)) = (parse_version(&r.tag_name), parse_version(CURRENT)) else {
-        return Err("Neznámy formát verzie".into());
+        return Err("update_err_version".into());
     };
     if new <= cur {
         return Ok(None);

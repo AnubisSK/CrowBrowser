@@ -164,9 +164,9 @@ impl Vault {
     }
 
     pub fn unlock(password: &str) -> Result<(Self, VaultData), &'static str> {
-        let bytes = fs::read(path()).map_err(|_| "Trezor sa nedá načítať")?;
+        let bytes = fs::read(path()).map_err(|_| "vault_unreadable")?;
         if bytes.len() < HEADER + NONCE + 16 || &bytes[..6] != MAGIC {
-            return Err("Trezor je poškodený");
+            return Err("vault_corrupt");
         }
         let salt: [u8; 16] = bytes[6..HEADER].try_into().unwrap();
         let key = derive(password, &salt);
@@ -175,9 +175,9 @@ impl Vault {
                 XNonce::from_slice(&bytes[HEADER..HEADER + NONCE]),
                 Payload { msg: &bytes[HEADER + NONCE..], aad: &bytes[..HEADER] },
             )
-            .map_err(|_| "Nesprávne heslo")?;
+            .map_err(|_| "wrong_password")?;
         let plain = Zeroizing::new(plain);
-        let data = serde_json::from_slice(&plain).map_err(|_| "Trezor je poškodený")?;
+        let data = serde_json::from_slice(&plain).map_err(|_| "vault_corrupt")?;
         Ok((Self { salt, key }, data))
     }
 

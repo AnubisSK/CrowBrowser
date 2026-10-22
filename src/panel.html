@@ -18,7 +18,9 @@
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; }
   body { display: flex; background: var(--bg); color: var(--fg); font: 13px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; }
-  nav { width: 200px; flex: none; background: var(--side); border-right: 1px solid var(--line); padding: 20px 10px; user-select: none; -webkit-user-select: none; }
+  nav { width: 200px; flex: none; background: var(--side); border-right: 1px solid var(--line); padding: 20px 10px; user-select: none; -webkit-user-select: none; display: flex; flex-direction: column; }
+  #news { margin-top: auto; padding: 8px 12px; border-radius: 8px; color: var(--mute); font-size: 12px; cursor: pointer; }
+  #news:hover { background: var(--hover); color: var(--accent); }
   nav button {
     display: flex; align-items: center; gap: 10px; width: 100%; height: 34px; padding: 0 12px; margin-bottom: 2px;
     border: 0; border-radius: 8px; background: transparent; color: var(--fg); font: inherit; text-align: left;
@@ -85,12 +87,13 @@
 </head>
 <body>
 <nav>
-  <button data-s="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg>Nastavenia</button>
-  <button data-s="history"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>História</button>
-  <button data-s="bookmarks"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>Obľúbené</button>
-  <button data-s="downloads"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Stiahnuté</button>
-  <button data-s="logins"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg>Prihlásenia</button>
-  <button data-s="about"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg>O aplikácii</button>
+  <button data-s="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.2 4.2l2.8 2.8M17 17l2.8 2.8M1 12h4M19 12h4M4.2 19.8 7 17M17 7l2.8-2.8"/></svg><span data-i18n="settings"></span></button>
+  <button data-s="history"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg><span data-i18n="history"></span></button>
+  <button data-s="bookmarks"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg><span data-i18n="bookmarks"></span></button>
+  <button data-s="downloads"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg><span data-i18n="downloads"></span></button>
+  <button data-s="logins"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg><span data-i18n="logins"></span></button>
+  <button data-s="about"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg><span data-i18n="about"></span></button>
+  <div id="news" role="link" title="crow:changelog"></div>
 </nav>
 <main><div class="wrap" id="root"></div></main>
 <div id="toast"></div>
@@ -99,7 +102,7 @@
   let section = D.section || 'settings';
   let query = '';
   const send = (m) => window.ipc.postMessage(m);
-  const set = (k, v) => { send('set:' + k + '=' + v); D.settings[k] = v; toast('Uložené'); };
+  const set = (k, v) => { send('set:' + k + '=' + v); D.settings[k] = v; toast(t('saved')); };
   const root = document.getElementById('root');
 
   function h(tag, props = {}, ...kids) {
@@ -111,9 +114,9 @@
     return el;
   }
 
-  function toast(t, err) {
+  function toast(msg, err) {
     const el = document.getElementById('toast');
-    el.textContent = t; el.classList.toggle('err', !!err); el.classList.add('show');
+    el.textContent = msg; el.classList.toggle('err', !!err); el.classList.add('show');
     clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('show'), 1800);
   }
 
@@ -121,7 +124,7 @@
     const b = h('button', { class: 'btn danger' }, label);
     b.onclick = () => {
       if (!b._armed) {
-        b._armed = true; b.textContent = 'Naozaj?';
+        b._armed = true; b.textContent = t('confirm_sure');
         setTimeout(() => { b._armed = false; b.textContent = label; }, 3000);
         return;
       }
@@ -150,39 +153,40 @@
   }
 
   const row = (label, sub, control) => h('div', { class: 'row' }, h('div', {}, label, sub ? h('small', {}, sub) : null), control);
-  const header = (title, ...extra) => h('header', {}, h('h1', {}, title), ...extra, h('button', { id: 'close', title: 'Zavrieť (Esc)', onclick: () => send('panel-close') }, '✕'));
+  const header = (title, ...extra) => h('header', {}, h('h1', {}, title), ...extra, h('button', { id: 'close', title: t('close') + ' (Esc)', onclick: () => send('panel-close') }, '✕'));
 
   function host(u) { try { return new URL(u).host; } catch { return u; } }
-  function fmtTime(t) { return new Date(t).toLocaleTimeString('sk', { hour: '2-digit', minute: '2-digit' }); }
-  function fmtDay(t) {
-    const d = new Date(t), today = new Date();
+  // Timestamps are `ms`, never `t`: that name is the translation function.
+  function fmtTime(ms) { return new Date(ms).toLocaleTimeString(currentLanguage(), { hour: '2-digit', minute: '2-digit' }); }
+  function fmtDay(ms) {
+    const d = new Date(ms), today = new Date();
     const y = new Date(); y.setDate(today.getDate() - 1);
-    if (d.toDateString() === today.toDateString()) return 'Dnes';
-    if (d.toDateString() === y.toDateString()) return 'Včera';
-    return d.toLocaleDateString('sk', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    if (d.toDateString() === today.toDateString()) return t('today');
+    if (d.toDateString() === y.toDateString()) return t('yesterday');
+    return d.toLocaleDateString(currentLanguage(), { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   }
   const openUrl = (u, e) => send((e && (e.metaKey || e.ctrlKey) ? 'open-new:' : 'open:') + u);
 
   // Ad-block filter lists: sources (downloaded when), rule counts per WebKit list, toggles.
   function adblockLists() {
     const L = D.adblockLists || { sources: [] };
-    const n = (x) => (x || 0).toLocaleString('sk');
+    const n = (x) => (x || 0).toLocaleString(currentLanguage());
     const src = (file) => L.sources.find(s => s.file === file) || {};
-    const when = (s) => s.time ? 'stiahnutý ' + fmtDay(s.time) + ' ' + fmtTime(s.time) : 'nestiahnutý';
-    const count = (l) => l ? n(l.rules) + ' pravidiel' + (l.lists > 1 ? ' v ' + l.lists + ' zoznamoch' : '') + (l.truncated ? ' (' + n(l.dropped) + ' kozmetických sa nezmestilo)' : '') : 'pripravuje sa…';
+    const when = (s) => s.time ? t('list_downloaded', fmtDay(s.time) + ' ' + fmtTime(s.time)) : t('list_not_downloaded');
+    const count = (l) => l ? t.plural(l.rules, 'rules', n(l.rules)) + (l.lists > 1 ? ' ' + t('in_lists', l.lists) : '') + (l.truncated ? ' (' + t('cosmetic_dropped', n(l.dropped)) + ')' : '') : t('preparing');
     const item = (title, sub, ...controls) => h('div', { class: 'item' },
       h('div', { class: 'main' }, h('div', { class: 'title' }, title), h('div', { class: 'sub' }, sub)), ...controls);
     return h('div', { class: 'row', style: 'display:block' },
-      h('div', {}, 'Zoznamy blokovania', h('small', {}, 'Filtre v syntaxi Adblock Plus (EasyList), aktualizujú sa raz týždenne')),
+      h('div', {}, t('adblock_lists'), h('small', {}, t('adblock_lists_desc'))),
       h('div', { class: 'list', style: 'margin-top:10px' },
-        item('Hlavný zoznam: ' + count(L.main),
-          'Vstavaný (' + n(L.builtin) + ' domén) + blocklist.txt' + (D.settings.adblock_easylist ? ' + EasyList (' + when(src('easylist.txt')) + ') + EasyPrivacy (' + when(src('easyprivacy.txt')) + ')' : '')),
-        item('EasyList a EasyPrivacy', 'easylist.to: reklamy a sledovače', seg('adblock_easylist', [['on', 'Zapnuté'], ['off', 'Vypnuté']])),
-        item('StevenBlack hosts: ' + (D.settings.adblock_hosts ? count(L.hosts) : 'vypnutý'),
-          D.settings.adblock_hosts ? 'Reklamy a malvér, ' + when(src('hosts-stevenblack.txt')) : 'github.com/StevenBlack/hosts',
-          seg('adblock_hosts', [['on', 'Zapnutý'], ['off', 'Vypnutý']])),
-        item('Aktualizovať zoznamy teraz', 'Stiahne zapnuté zoznamy znova a prekompiluje pravidlá na pozadí',
-          h('button', { class: 'btn', onclick: () => send('adblock-update') }, 'Aktualizovať'))));
+        item(t('main_list', count(L.main)),
+          t('builtin_list', n(L.builtin)) + ' + blocklist.txt' + (D.settings.adblock_easylist ? ' + EasyList (' + when(src('easylist.txt')) + ') + EasyPrivacy (' + when(src('easyprivacy.txt')) + ')' : '')),
+        item(t('easylist_title'), t('easylist_desc'), seg('adblock_easylist', [['on', t('switch_on')], ['off', t('switch_off')]])),
+        item('StevenBlack hosts: ' + (D.settings.adblock_hosts ? count(L.hosts) : t('list_disabled')),
+          D.settings.adblock_hosts ? t('hosts_desc', when(src('hosts-stevenblack.txt'))) : 'github.com/StevenBlack/hosts',
+          seg('adblock_hosts', [['on', t('list_on')], ['off', t('list_off')]])),
+        item(t('update_lists_now'), t('update_lists_desc'),
+          h('button', { class: 'btn', onclick: () => send('adblock-update') }, t('update_btn')))));
   }
 
   const views = {
@@ -192,121 +196,117 @@
       home.onchange = () => set('homepage', home.value);
       home.onkeydown = (e) => { if (e.key === 'Enter') home.blur(); };
 
-      const pw = ['Aktuálne heslo', 'Nové heslo (min. 8 znakov)', 'Zopakuj nové heslo'].map(p => h('input', { type: 'password', placeholder: p }));
-      const pwBtn = h('button', { class: 'btn primary' }, 'Zmeniť heslo');
+      const pw = ['current_password', 'new_password_hint', 'repeat_new_password'].map(p => h('input', { type: 'password', placeholder: t(p) }));
+      const pwBtn = h('button', { class: 'btn primary' }, t('change_password'));
       pwBtn.onclick = () => {
-        if (pw[1].value !== pw[2].value) return toast('Nové heslá sa nezhodujú', true);
-        if ([...pw[1].value].length < 8) return toast('Nové heslo musí mať aspoň 8 znakov', true);
-        pwBtn.disabled = true; pwBtn.textContent = 'Mením…';
+        if (pw[1].value !== pw[2].value) return toast(t('new_pw_mismatch'), true);
+        if ([...pw[1].value].length < 8) return toast(t('new_pw_too_short'), true);
+        pwBtn.disabled = true; pwBtn.textContent = t('changing');
         setTimeout(() => send('change-pw:' + JSON.stringify({ old: pw[0].value, new: pw[1].value })), 60);
       };
       window.pwResult = (ok, msg) => {
-        pwBtn.disabled = false; pwBtn.textContent = 'Zmeniť heslo';
+        pwBtn.disabled = false; pwBtn.textContent = t('change_password');
         toast(msg, !ok);
         if (ok) pw.forEach(i => i.value = '');
       };
 
       return [
-        header('Nastavenia'),
-        h('h2', {}, 'Vyhľadávanie'),
-        h('section', {}, row('Predvolený vyhľadávač', 'Použije sa pri písaní do adresného riadku', select('search', D.engines))),
-        h('h2', {}, 'Spustenie'),
+        header(t('settings')),
+        h('h2', {}, t('search')),
+        h('section', {}, row(t('default_search'), t('default_search_desc'), select('search', D.engines))),
+        h('h2', {}, t('startup')),
         h('section', {},
-          row('Domovská stránka', 'Tlačidlo Domov (⌘⇧H) a nové karty', home),
-          row('Pri spustení otvoriť', null, seg('startup', [['home', 'Domovskú stránku'], ['last', 'Posledné karty']]))),
-        h('h2', {}, 'Vzhľad'),
+          row(t('homepage'), t('homepage_desc'), home),
+          row(t('on_startup'), null, seg('startup', [['home', t('startup_home')], ['last', t('startup_last')]]))),
+        h('h2', {}, t('appearance')),
         h('section', {},
-          row('Motív', null, seg('theme', [['dark', 'Tmavý'], ['light', 'Svetlý'], ['system', 'Systém']])),
-          row('Predvolené priblíženie', '⌘+ / ⌘− / ⌘0', select('zoom', [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2].map(z => [z, Math.round(z * 100) + ' %'])))),
-        h('h2', {}, 'Výkon'),
+          row(t('language'), t('language_hint'), languageSelect()),
+          row(t('theme'), null, seg('theme', [['dark', t('theme_dark')], ['light', t('theme_light')], ['system', t('theme_system')]])),
+          row(t('default_zoom'), '⌘+ / ⌘− / ⌘0', select('zoom', [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2].map(z => [z, Math.round(z * 100) + ' %'])))),
+        h('h2', {}, t('performance')),
         h('section', {},
-          row('Uspávať neaktívne karty po', 'Uvoľní pamäť skrytých kariet; po kliknutí sa znova načítajú',
-            select('unload', [[1, '1 minúte'], [5, '5 minútach'], [15, '15 minútach'], [30, '30 minútach'], [60, '1 hodine'], [0, 'Nikdy']]))),
-        h('h2', {}, 'Ochrana súkromia'),
+          row(t('unload_after'), t('unload_desc'),
+            select('unload', [[1, t('unload_minute', 1)], [5, t('unload_minutes', 5)], [15, t('unload_minutes', 15)], [30, t('unload_minutes', 30)], [60, t('unload_hour')], [0, t('never')]]))),
+        h('h2', {}, t('privacy')),
         h('section', {},
-          row('Blokovanie reklám a sledovačov', 'Blokuje sa priamo v sieťovej vrstve WebKitu. Vlastný zoznam: ~/Library/Application Support/Crow/blocklist.txt',
-            seg('adblock', [['on', 'Zapnuté'], ['off', 'Vypnuté']])),
+          row(t('adblock_full'), t('adblock_desc', '~/Library/Application Support/Crow/blocklist.txt'),
+            seg('adblock', [['on', t('switch_on')], ['off', t('switch_off')]])),
           adblockLists(),
-          row('Výnimky blokovania', D.allow.length ? null : 'Žiadne. Pre aktuálny web ich pridáš kliknutím na štít v paneli',
+          row(t('whitelist'), D.allow.length ? null : t('whitelist_empty'),
             D.allow.length ? h('div', {}, ...D.allow.map(d => {
-              const b = h('button', { class: 'btn', title: 'Odstrániť výnimku' }, d + ' ×');
+              const b = h('button', { class: 'btn', title: t('remove_exception') }, d + ' ×');
               b.onclick = () => { send('adblock-allow:' + d); b.remove(); };
               return b;
             })) : null),
-          row('Vymazať históriu', null, confirmBtn('Vymazať', () => { send('clear:history'); toast('História vymazaná'); })),
-          row('Vymazať cookies a prihlásenia', 'Odhlási ťa zo všetkých webov', confirmBtn('Vymazať', () => { send('clear:cookies'); toast('Cookies vymazané'); })),
-          row('Vymazať zoznam stiahnutých', 'Súbory na disku zostanú', confirmBtn('Vymazať', () => { send('clear:downloads'); toast('Zoznam vymazaný'); }))),
-        h('h2', {}, 'Šifrovanie'),
+          row(t('clear_history'), null, confirmBtn(t('clear_data'), () => { send('clear:history'); toast(t('history_cleared')); })),
+          row(t('clear_cookies'), t('clear_cookies_desc'), confirmBtn(t('clear_data'), () => { send('clear:cookies'); toast(t('cookies_cleared')); })),
+          row(t('clear_downloads'), t('clear_downloads_desc'), confirmBtn(t('clear_data'), () => { send('clear:downloads'); toast(t('list_cleared')); }))),
+        h('h2', {}, t('encryption')),
         h('section', {},
-          row('Šifrovaný trezor', 'História, obľúbené, cookies, prihlásenia a karty sú šifrované heslom (Argon2id + XChaCha20-Poly1305)',
-            h('button', { class: 'btn', onclick: () => send('lock') }, 'Zamknúť teraz (⌃⌘L)')),
+          row(t('vault_title'), t('vault_desc'),
+            h('button', { class: 'btn', onclick: () => send('lock') }, t('lock') + ' (⌃⌘L)')),
           h('div', { class: 'pw' }, ...pw, pwBtn)),
-        h('h2', {}, 'Aktualizácie'),
+        h('h2', {}, t('updates')),
         h('section', {},
           row('Crow Browser ' + D.version, null,
-            h('button', { class: 'btn', onclick: () => { send('update-check'); toast('Kontrolujem…'); } }, 'Skontrolovať aktualizácie')),
-          row('Automaticky kontrolovať aktualizácie', 'Po odomknutí sa opýta GitHubu na novú verziu. Inštalátor sa stiahne len na tvoj pokyn',
-            seg('updates', [['on', 'Zapnuté'], ['off', 'Vypnuté']]))),
+            h('button', { class: 'btn', onclick: () => { send('update-check'); toast(t('checking')); } }, t('check_updates'))),
+          row(t('auto_updates'), t('auto_updates_desc'),
+            seg('updates', [['on', t('switch_on')], ['off', t('switch_off')]]))),
       ];
     },
 
     about() {
       const REPO = 'https://github.com/AnubisSK/CrowBrowser';
       const link = (label, url) => h('button', { class: 'btn', onclick: () => send('open-new:' + url) }, label);
-      const p = (t) => h('div', { class: 'row' }, h('div', {}, t));
+      const p = (text) => h('div', { class: 'row' }, h('div', {}, text));
       return [
-        header('O aplikácii'),
+        header(t('about')),
         h('section', {},
-          row('Crow Browser ' + D.version, 'Ľahký, súkromný a šifrovaný webový prehliadač pre macOS a Linux', link('GitHub', REPO)),
-          row('Autor', 'AnubisSVK (GitHub: AnubisSK)', link('Profil', 'https://github.com/AnubisSK')),
-          row('Licencia', 'GNU General Public License v3.0, slobodný a otvorený softvér', link('Text licencie', REPO + '/blob/main/LICENSE'))),
-        h('h2', {}, 'Prečo Crow'),
+          row('Crow Browser ' + D.version, t('about_desc'), link('GitHub', REPO)),
+          row(t('author'), 'AnubisSVK (GitHub: AnubisSK)', link(t('profile'), 'https://github.com/AnubisSK')),
+          row(t('license'), t('license_desc'), link(t('license_text'), REPO + '/blob/main/LICENSE'))),
+        h('h2', {}, t('why_crow')),
+        h('section', {}, ...['why_1', 'why_2', 'why_3', 'why_4', 'why_5'].map(k => p(t(k)))),
+        h('h2', {}, t('technologies')),
         h('section', {},
-          p('Veľké prehliadače zaberajú stovky megabajtov pamäte a starší hardvér nestíhajú. Crow vznikol pre MacBook Air 2015 (Intel Core i5, 4 GB RAM) s macOS 12 Monterey, aby sa aj na ňom dalo pohodlne a bezpečne prehliadať web.'),
-          p('Ľahký: hlavný proces okolo 35 MB RAM, neaktívne karty sa automaticky uspávajú.'),
-          p('Šifrovaný: história, obľúbené, cookies, karty aj nastavenia sú na disku zašifrované heslom (Argon2id + XChaCha20-Poly1305).'),
-          p('Bez reklám a sledovačov: blokujú sa priamo v sieťovej vrstve WebKitu. Žiadna telemetria.'),
-          p('Bezpečný: stiahnuté súbory sa nikdy nespúšťajú samé, adresný riadok sa nedá podvrhnúť počas načítavania.')),
-        h('h2', {}, 'Technológie'),
-        h('section', {},
-          row('Engine', 'Systémový WebKit (macOS) / WebKitGTK 4.1 (Linux), žiadny Chromium ani Electron', null),
-          row('Jazyk a knižnice', 'Rust · tao · wry · mimalloc · argon2 · chacha20poly1305 · zeroize', null)),
+          row(t('engine'), t('engine_desc'), null),
+          row(t('lang_libs'), 'Rust · tao · wry · mimalloc · argon2 · chacha20poly1305 · zeroize', null)),
       ];
     },
 
     update() {
       const u = D.update;
-      if (!u) return [header('Aktualizácia'), h('section', {},
-        row('Crow ' + D.version + ' je najnovšia verzia', null,
-          h('button', { class: 'btn', onclick: () => send('update-check') }, 'Skontrolovať znova')))];
+      if (!u) return [header(t('update_title')), h('section', {},
+        row(t('up_to_date', D.version), null,
+          h('button', { class: 'btn', onclick: () => send('update-check') }, t('check_again'))))];
       const get = u.asset
-        ? h('button', { class: 'btn primary', onclick: () => send('update-get') }, D.updateBusy ? 'Sťahuje sa…' : 'Stiahnuť inštalátor')
-        : h('button', { class: 'btn', onclick: () => send('open-new:' + u.page) }, 'Otvoriť na GitHube');
+        ? h('button', { class: 'btn primary', onclick: () => send('update-get') }, D.updateBusy ? t('downloading') : t('download_installer'))
+        : h('button', { class: 'btn', onclick: () => send('open-new:' + u.page) }, t('open_github'));
       if (D.updateBusy) get.disabled = true;
       const list = h('div', { class: 'list' });
-      if (!u.notes.length) list.append(h('div', { class: 'empty' }, 'Zoznam zmien nie je k dispozícii'));
+      if (!u.notes.length) list.append(h('div', { class: 'empty' }, t('no_notes')));
       for (const n of u.notes) list.append(h('div', { class: 'item' },
         h('div', { class: 'main', onclick: () => send('open-new:' + n.url), title: n.url },
           h('div', { class: 'title' }, n.msg), h('div', { class: 'sub' }, n.sha))));
       return [
-        header('Aktualizácia'),
+        header(t('update_title')),
         h('section', {},
-          row('Crow ' + u.version + ' je dostupný', 'Nainštalovaná verzia: ' + D.version +
-            (u.asset ? ' · ' + u.asset.name + ' (' + (u.asset.size / 1048576).toFixed(1) + ' MB). Po stiahnutí sa ukáže vo Finderi, nespustí sa.' : ''), get)),
-        h('h2', {}, 'Čo je nové'),
+          row(t('update_ready', u.version), t('installed_version', D.version) +
+            (u.asset ? ' · ' + u.asset.name + ' (' + (u.asset.size / 1048576).toLocaleString(currentLanguage(), { maximumFractionDigits: 1 }) + ' MB). ' + t('installer_note') : ''), get)),
+        h('h2', {}, t('whats_new')),
         list,
       ];
     },
 
     history() {
-      const search = h('input', { type: 'search', placeholder: 'Hľadať v histórii' });
+      const search = h('input', { type: 'search', placeholder: t('search_history') });
       search.value = query;
       search.oninput = () => { query = search.value; renderList(); };
       const listWrap = h('div');
       function renderList() {
         const q = query.toLowerCase();
         const items = D.history.filter(e => !q || e.url.toLowerCase().includes(q) || (e.title || '').toLowerCase().includes(q));
-        if (!items.length) return listWrap.replaceChildren(h('div', { class: 'list' }, h('div', { class: 'empty' }, q ? 'Nič sa nenašlo' : 'História je prázdna')));
+        if (!items.length) return listWrap.replaceChildren(h('div', { class: 'list' }, h('div', { class: 'empty' }, t(q ? 'nothing_found' : 'history_empty'))));
         const out = []; let day = null, list = null;
         for (const e of items.slice(0, 1000)) {
           const d = fmtDay(e.time);
@@ -315,67 +315,77 @@
             h('span', { class: 'time' }, fmtTime(e.time)),
             h('div', { class: 'main', onclick: (ev) => openUrl(e.url, ev), title: e.url },
               h('div', { class: 'title' }, e.title || host(e.url)), h('div', { class: 'sub' }, e.url)),
-            h('button', { class: 'del', title: 'Odstrániť', onclick: () => send('hist-del:' + e.time) }, '×')));
+            h('button', { class: 'del', title: t('remove'), onclick: () => send('hist-del:' + e.time) }, '×')));
         }
         listWrap.replaceChildren(...out);
       }
       renderList();
       setTimeout(() => search.focus(), 0);
-      return [header('História', search, confirmBtn('Vymazať všetko', () => send('clear:history'))), listWrap];
+      return [header(t('history'), search, confirmBtn(t('clear_all'), () => send('clear:history'))), listWrap];
     },
 
     bookmarks() {
       const list = h('div', { class: 'list' });
-      if (!D.bookmarks.length) list.append(h('div', { class: 'empty' }, 'Zatiaľ žiadne obľúbené. Pridáš ich hviezdičkou v adresnom riadku alebo ⌘D.'));
+      if (!D.bookmarks.length) list.append(h('div', { class: 'empty' }, t('bookmarks_empty')));
       for (const b of D.bookmarks) list.append(h('div', { class: 'item' },
         h('div', { class: 'main', onclick: (ev) => openUrl(b.url, ev), title: b.url },
           h('div', { class: 'title' }, b.title || host(b.url)), h('div', { class: 'sub' }, b.url)),
-        h('button', { class: 'del', title: 'Odstrániť', onclick: () => send('bm-del:' + b.url) }, '×')));
-      return [header('Obľúbené'), list];
+        h('button', { class: 'del', title: t('remove'), onclick: () => send('bm-del:' + b.url) }, '×')));
+      return [header(t('bookmarks')), list];
     },
 
     // Sites with cookies in the vault. Data is sanitized in Rust: no cookie values, no passwords.
     logins() {
-      const list = h('div', { class: 'list' }, h('div', { class: 'empty' }, 'Načítava sa…'));
+      const list = h('div', { class: 'list' }, h('div', { class: 'empty' }, t('loading')));
       window.setSessions = (rows) => {
         if (section !== 'logins') return;
-        if (!rows.length) return list.replaceChildren(h('div', { class: 'empty' }, 'Žiadne uložené prihlásenia ani cookies'));
+        if (!rows.length) return list.replaceChildren(h('div', { class: 'empty' }, t('no_sessions')));
         list.replaceChildren(...rows.map(r => {
           const row = h('div', { class: 'item' },
             h('span', { class: 'fdot' + (r.has_session ? ' on' : '') }),
             h('div', { class: 'main', onclick: (ev) => openUrl('https://' + r.domain, ev), title: r.domain },
               h('div', { class: 'title' }, r.domain),
-              h('div', { class: 'sub' }, (r.last_used ? 'Naposledy ' + fmtDay(r.last_used) + ' ' + fmtTime(r.last_used) : 'Bez histórie') + ' · cookies: ' + r.cookies)),
-            h('span', { class: 'user', title: 'Crow neukladá mená ani heslá' }, r.username || '—'),
-            h('span', { class: 'badge' + (r.has_session ? ' on' : '') }, r.has_session ? 'Aktívna relácia' : 'Len cookies'),
-            confirmBtn('Odhlásiť a vymazať', () => { send('delete-vault-session:' + r.domain); row.remove(); }));
+              h('div', { class: 'sub' }, (r.last_used ? t('last_used', fmtDay(r.last_used) + ' ' + fmtTime(r.last_used)) : t('no_history')) + ' · ' + t('cookies_count', r.cookies))),
+            h('span', { class: 'user', title: t('no_names_stored') }, r.username || '—'),
+            h('span', { class: 'badge' + (r.has_session ? ' on' : '') }, t(r.has_session ? 'active_session' : 'cookies_only')),
+            confirmBtn(t('revoke'), () => { send('delete-vault-session:' + r.domain); row.remove(); }));
           return row;
         }));
       };
       send('get-vault-sessions');
       return [
-        header('Prihlásenia a relácie'),
+        header(t('active_sessions')),
         h('p', { class: 'note', style: 'color:var(--mute);margin:-8px 4px 14px;font-size:12px' },
-          'Weby, na ktorých máš uložené cookies (šifrovane v trezore). „Aktívna relácia“ = web má prihlasovacie cookie. Odhlásenie vymaže cookies webu z trezora aj z prehliadača. Crow neukladá heslá ani mená.'),
+          t('sessions_note')),
         list,
       ];
     },
 
     downloads() {
-      const label = { active: 'Sťahuje sa…', done: 'Hotovo', failed: 'Zlyhalo' };
+      const label = { active: t('downloading'), done: t('dl_done'), failed: t('dl_failed') };
       const list = h('div', { class: 'list' });
-      if (!D.downloads.length) list.append(h('div', { class: 'empty' }, 'Žiadne stiahnuté súbory'));
+      if (!D.downloads.length) list.append(h('div', { class: 'empty' }, t('no_downloads')));
       for (const d of D.downloads) {
         const name = d.path.split('/').pop();
         list.append(h('div', { class: 'item' },
           h('div', { class: 'main', onclick: () => d.state === 'done' && send('reveal-file:' + d.path), title: d.path },
             h('div', { class: 'title' }, name), h('div', { class: 'sub' }, host(d.url) + ' · ' + fmtDay(d.time) + ' ' + fmtTime(d.time))),
           h('span', { class: 'state ' + d.state }, label[d.state] || d.state),
-          d.state === 'done' ? h('button', { class: 'btn', onclick: () => send('reveal-file:' + d.path) }, 'Zobraziť vo Finderi') : null));
+          d.state === 'done' ? h('button', { class: 'btn', onclick: () => send('reveal-file:' + d.path) }, t('show_in_finder')) : null));
       }
-      return [header('Stiahnuté', confirmBtn('Vymazať zoznam', () => send('clear:downloads'))), list];
+      return [header(t('downloads'), confirmBtn(t('clear_list'), () => send('clear:downloads'))), list];
     },
   };
+
+  // UI language (sent as `set-language:<code>`, stored in the vault; all UI views switch at once).
+  function languageSelect() {
+    const s = h('select', { id: 'lang-select' });
+    for (const [v, label] of [['sk', 'Slovenčina'], ['cs', 'Čeština'], ['en', 'English'], ['de', 'Deutsch']])
+      s.add(new Option(label, v, false, v === currentLanguage()));
+    s.onchange = () => send('set-language:' + s.value);
+    return s;
+  }
+  window.onLanguage = () => { news.textContent = t('whats_new_version', D.version); render(); };
 
   function render() {
     document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.s === section));
@@ -390,6 +400,10 @@
   }
 
   document.querySelectorAll('nav button').forEach(b => b.onclick = () => { show(b.dataset.s); send('panel-section:' + b.dataset.s); });
+  // Built-in offline changelog, opened in a new tab (no network, no IPC there).
+  const news = document.getElementById('news');
+  news.textContent = t('whats_new_version', D.version);
+  news.onclick = () => send('open-new:crow:changelog');
   document.onkeydown = (e) => { if (e.key === 'Escape' && !['INPUT', 'SELECT'].includes(document.activeElement.tagName)) send('panel-close'); };
   render();
 </script>

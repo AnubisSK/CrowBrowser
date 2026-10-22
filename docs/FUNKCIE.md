@@ -168,6 +168,10 @@ Podporované vyhľadávače: **DuckDuckGo** (predvolený), **Google**, **Bing**,
 - Do panela sa neposielajú hodnoty ani názvy cookies. Crow neukladá heslá ani mená, preto je stĺpec používateľa prázdny.
 - Ak si na aktuálnom webe prihlásený, v adresnom riadku je ikona kľúča. Klik na ňu otvorí tento panel.
 
+## Čo je nové
+
+- Zoznam zmien aktuálnej verzie je vstavaný a funguje bez pripojenia: odkaz **Čo je nové** dole v bočnom menu panela, alebo adresa `crow:changelog` (aj `about:changelog`) v adresnom riadku. Stránka nemá skripty ani prístup k sieti.
+
 ## Video na celú obrazovku
 
 - Tlačidlo celej obrazovky vo videách (YouTube a iné prehrávače, Fullscreen API) funguje. Na macOS WebKit zobrazí video vo vlastnom okne na celú obrazovku, na Linuxe sa okno Crow prepne na celú obrazovku a video ho vyplní (panel sa skryje). **Esc** alebo tlačidlo v prehrávači to ukončí, rovnako prepnutie na inú kartu.
@@ -187,6 +191,7 @@ Otvoríš ich cez **⌘,** alebo ⚙. Panel má bočné menu: **Nastavenia · Hi
 | Vyhľadávanie | Predvolený vyhľadávač | DuckDuckGo, Google, Bing, Brave Search, Startpage, Ecosia | DuckDuckGo |
 | Spustenie | Domovská stránka | ľubovoľná URL | `https://duckduckgo.com` |
 | Spustenie | Pri spustení otvoriť | Domovskú stránku / Posledné karty | Posledné karty |
+| Vzhľad | Jazyk | Slovenčina / Čeština / English / Deutsch (prepne sa hneď vo všetkých častiach rozhrania) | Slovenčina |
 | Vzhľad | Motív | Tmavý / Svetlý / Systém | Tmavý |
 | Vzhľad | Predvolené priblíženie | 50 % – 200 % | 100 % |
 | Výkon | Uspávať neaktívne karty po | 1 / 5 / 15 / 30 / 60 min / Nikdy | 5 min |
