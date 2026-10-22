@@ -35,8 +35,11 @@ Cieľový hardvér: MacBook Air 2015 (Intel Core i5 Broadwell, 4 GB RAM), macOS 
 cargo run                       # debug spustenie
 cargo build --release           # optimalizovaný build
 ./scripts/bundle.sh             # target/Crow.app s ikonou
-./scripts/make_dmg.sh           # dist/Crow-<verzia>.dmg (inštalátor)
-./scripts/make_dmg.sh --skip-build   # len znova zabalí existujúcu .app
+./scripts/make_dmg.sh           # dist/Crow-<verzia>-universal.dmg (Apple Silicon + Intel)
+./scripts/make_dmg.sh arm64     # dist/Crow-<verzia>-arm64.dmg (Apple Silicon)
+./scripts/make_dmg.sh x86_64    # dist/Crow-<verzia>-x86_64.dmg (Intel)
+./scripts/make_dmg.sh all       # všetky tri DMG
+./scripts/make_dmg.sh all --skip-build   # len znova zabalí existujúce binárky
 ```
 
 Požiadavky: Rust (stable, edícia 2024), Xcode Command Line Tools.

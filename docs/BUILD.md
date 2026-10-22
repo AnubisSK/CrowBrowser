@@ -14,8 +14,8 @@
 | `cargo run` | debug build a spustenie (ikona v Docku sa nastaví za behu) | ~4 min prvýkrát, potom sekundy |
 | `cargo build --release` | `target/release/crow-browser` (~1,8 MB) | ~5–6 min |
 | `./scripts/bundle.sh` | `target/Crow.app` s ikonou, Info.plist a ad-hoc podpisom | ~6 min |
-| `./scripts/make_dmg.sh` | `dist/Crow-<verzia>.dmg` (inštalátor) | ~6 min |
-| `./scripts/make_dmg.sh --skip-build` | len znova zabalí existujúcu `.app` do DMG | ~20 s |
+| `./scripts/make_dmg.sh [arm64\|x86_64\|universal\|all]` | `dist/Crow-<verzia>-<arch>.dmg` (inštalátor), predvolene `universal` | ~6 min na architektúru |
+| `./scripts/make_dmg.sh <arch> --skip-build` | len znova zabalí existujúce binárky z `target/<triple>/release` do DMG | ~20 s na DMG |
 
 \* na MacBooku Air 2015 (i5 Broadwell, 4 GB RAM)
 
@@ -40,13 +40,16 @@
 
 ## `scripts/make_dmg.sh`
 
-1. (voliteľne) spustí `bundle.sh`
-2. pripraví obsah: `Crow.app`, odkaz na `/Applications`, `.background/background.tiff`
-3. vytvorí zapisovateľný obraz (HFS+) a pripojí ho
-4. cez AppleScript vo Finderi nastaví okno: ikony 112 px, okno 660 × 400, bez panela nástrojov, pozadie, pozície ikon (Crow vľavo, Aplikácie vpravo). Uloží sa do `.DS_Store`.
-5. pridá `.VolumeIcon.icns` a nastaví príznak vlastnej ikony. Robí sa to až po kroku s Finderom, pretože Finder pri prepise `.DS_Store` ikonu zmaže.
-6. odpojí obraz a skomprimuje ho (UDZO, zlib-9) do `dist/`
-7. nastaví ikonu samotného `.dmg` súboru (platí len lokálne)
+Architektúra ako prvý argument: `arm64` (Apple Silicon), `x86_64` (Intel), `universal` (predvolené, `lipo` z oboch) alebo `all` (všetky tri DMG z jednej dvojice buildov). Updater si z release vyberie DMG podľa názvu: `arm64` / `x86_64` len pre danú architektúru, `universal` pre obe.
+
+1. (okrem `--skip-build`) `MACOSX_DEPLOYMENT_TARGET=12.0 cargo build --release --target <aarch64|x86_64>-apple-darwin`, pri `universal` spojí binárky cez `lipo`
+2. spustí `bundle.sh <binárka>`
+3. pripraví obsah: `Crow.app`, odkaz na `/Applications`, `.background/background.tiff`
+4. vytvorí zapisovateľný obraz (HFS+) a pripojí ho
+5. cez AppleScript vo Finderi nastaví okno: ikony 112 px, okno 660 × 400, bez panela nástrojov, pozadie, pozície ikon (Crow vľavo, Aplikácie vpravo). Uloží sa do `.DS_Store`.
+6. pridá `.VolumeIcon.icns` a nastaví príznak vlastnej ikony. Robí sa to až po kroku s Finderom, pretože Finder pri prepise `.DS_Store` ikonu zmaže.
+7. odpojí obraz a skomprimuje ho (UDZO, zlib-9) do `dist/`
+8. nastaví ikonu samotného `.dmg` súboru (platí len lokálne)
 
 > Pri prvom spustení môže macOS požiadať o povolenie, aby Terminál ovládal Finder. Bez neho DMG funguje, ale okno nebude mať pozadie ani rozloženie.
 
