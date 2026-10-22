@@ -22,7 +22,7 @@ mkdir -p "$(dirname "$DESKTOP")"
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Crow
+Name=CrowBrowser
 GenericName=Webový prehliadač
 Comment=Ľahký, súkromný a šifrovaný webový prehliadač
 Exec=$BIN %u

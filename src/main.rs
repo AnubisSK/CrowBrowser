@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let window = WindowBuilder::new()
-        .with_title("Crow")
+        .with_title("CrowBrowser")
         .with_inner_size(LogicalSize::new(1200.0, 800.0))
         .with_min_inner_size(LogicalSize::new(480.0, 320.0));
     // macOS: transparent title bar, traffic lights over the tab row.
@@ -188,18 +188,18 @@ fn build_menu() -> Result<Menu, muda::Error> {
 
     let menu = Menu::with_items(&[
         &Submenu::with_items(
-            "Crow",
+            "CrowBrowser",
             true,
             &[
                 &item("panel:settings", "Settings…", cmd, Code::Comma),
                 &sep(),
-                &item("lock", "Lock Crow", Modifiers::META | Modifiers::CONTROL, Code::KeyL),
+                &item("lock", "Lock CrowBrowser", Modifiers::META | Modifiers::CONTROL, Code::KeyL),
                 &sep(),
                 &PredefinedMenuItem::hide(None),
                 &PredefinedMenuItem::hide_others(None),
                 &PredefinedMenuItem::show_all(None),
                 &sep(),
-                &item("quit", "Quit Crow", cmd, Code::KeyQ),
+                &item("quit", "Quit CrowBrowser", cmd, Code::KeyQ),
             ],
         )?,
         &Submenu::with_items(

@@ -268,7 +268,7 @@
           h('div', { class: 'pw' }, ...pw, pwBtn)),
         h('h2', {}, t('updates')),
         h('section', {},
-          row('Crow Browser ' + D.version, null,
+          row('CrowBrowser ' + D.version, null,
             h('button', { class: 'btn', onclick: () => { send('update-check'); toast(t('checking')); } }, t('check_updates'))),
           row(t('auto_updates'), t('auto_updates_desc'),
             seg('updates', [['on', t('switch_on')], ['off', t('switch_off')]]))),
@@ -282,7 +282,7 @@
       return [
         header(t('about')),
         h('section', {},
-          row('Crow Browser ' + D.version, t('about_desc'), link('GitHub', REPO)),
+          row('CrowBrowser ' + D.version, t('about_desc'), link('GitHub', REPO)),
           row(t('author'), 'AnubisSVK (GitHub: AnubisSK)', link(t('profile'), 'https://github.com/AnubisSK')),
           row(t('license'), t('license_desc'), link(t('license_text'), REPO + '/blob/main/LICENSE'))),
         h('h2', {}, t('why_crow')),

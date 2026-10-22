@@ -2,6 +2,7 @@
 name = "crow-browser"
 version = "0.1.1"
 edition = "2024"
+description = "CrowBrowser – lightweight, private WebKit browser for macOS and Linux"
 
 [dependencies]
 tao = "0.37"
