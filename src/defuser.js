@@ -1,9 +1,9 @@
 (function () {
   'use strict';
-  // Sites whose app code (web components, Turbo frames, fetch-driven hydration) must see the
-  // native fetch, Function.prototype.toString and layout getters, and that run no anti-adblock
-  // walls: nothing is patched there.
-  if (/(^|\.)github\.com$/i.test(location.hostname)) return;
+  // Sites whose app code (web components, Turbo frames, fetch-driven hydration, Gmail's "adn ads"
+  // message containers) must see the native fetch, Function.prototype.toString and layout
+  // getters, and that run no anti-adblock walls: nothing is patched there.
+  if (/(^|\.)(github\.com|google\.com)$/i.test(location.hostname)) return;
   // Every replaced function reports the source of the native one it stands for, so
   // `Function.prototype.toString`, `__lookupGetter__(...).toString()` and `.name` checks see
   // "[native code]" (the toString override masks itself the same way).

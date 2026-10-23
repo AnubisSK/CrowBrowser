@@ -8,7 +8,7 @@
 
 use crate::{settings::data_dir, update};
 use adblock::{
-    content_blocking::{CbRule, CbType},
+    content_blocking::{CbAction, CbRule, CbTrigger, CbType},
     lists::{FilterFormat, FilterSet, ParseOptions},
 };
 use serde::{Deserialize, Serialize};
@@ -61,7 +61,7 @@ pub const DEFUSER: &str = include_str!("defuser.js");
 /// WebKit's content-blocker limit per rule list.
 const MAX_RULES: usize = 150_000;
 /// Bump when the conversion changes, so cached compiled lists are rebuilt.
-const FORMAT: &str = "adblock-0.13/2";
+const FORMAT: &str = "adblock-0.13/3";
 const MAX_LIST_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_AGE: Duration = Duration::from_hours(168);
 
@@ -283,13 +283,48 @@ pub fn forget(id: &str) {
     let _ = fs::remove_file(marker_path(id));
 }
 
+/// `*domain` of every `@@||domain^$generichide` exception: the content-blocking conversion
+/// drops these, so generic hiding (`##.ads`) would also hit e.g. Gmail's `div.adn.ads` message.
+fn generichide_domains(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.lines().filter_map(|l| {
+        let (pat, opts) = l.trim().strip_prefix("@@||")?.split_once('$')?;
+        opts.split(',').any(|o| matches!(o, "generichide" | "ghide")).then_some(())?;
+        let d = pat.strip_suffix('^').unwrap_or(pat);
+        let plain = !d.is_empty() && d.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+        plain.then(|| format!("*{}", d.to_ascii_lowercase()))
+    })
+}
+
+/// One exception cancelling generic cosmetic rules on `domains` (and their subdomains).
+fn generichide_rule(mut domains: Vec<String>) -> Option<CbRule> {
+    domains.sort();
+    domains.dedup();
+    (!domains.is_empty()).then(|| CbRule {
+        action: CbAction { typ: CbType::IgnorePreviousRules, selector: None },
+        trigger: CbTrigger { url_filter: ".*".into(), if_domain: Some(domains), ..Default::default() },
+    })
+}
+
+/// Generic cosmetic rules first, then the generichide exception, then the rest: an exception
+/// only cancels the rules before it, so network and site-specific rules stay in force there.
+fn with_generichide(part: Vec<CbRule>, ghide: Option<&CbRule>) -> Vec<CbRule> {
+    let Some(ghide) = ghide else { return part };
+    let (mut out, rest): (Vec<_>, Vec<_>) = part
+        .into_iter()
+        .partition(|r| matches!(r.action.typ, CbType::CssDisplayNone) && r.trigger.if_domain.is_none());
+    out.push(ghide.clone());
+    out.extend(rest);
+    out
+}
+
 /// Splits converted rules into WebKit lists of at most `MAX_RULES` without losing integrity:
 /// every part ends with all exceptions (they only cancel rules of their own list); network
 /// rules are placed before cosmetic ones, so only cosmetic rules are dropped if even
 /// `max_parts` lists are not enough.
-fn pack(rules: Vec<CbRule>, max_parts: usize) -> (Vec<Vec<CbRule>>, usize) {
-    if rules.len() <= MAX_RULES {
-        return (vec![rules], 0);
+fn pack(rules: Vec<CbRule>, max_parts: usize, ghide: Option<&CbRule>) -> (Vec<Vec<CbRule>>, usize) {
+    let extra = usize::from(ghide.is_some());
+    if rules.len() + extra <= MAX_RULES {
+        return (vec![with_generichide(rules, ghide)], 0);
     }
     let (mut ignore, mut cosmetic, mut network) = (Vec::new(), Vec::new(), Vec::new());
     for r in rules {
@@ -299,7 +334,7 @@ fn pack(rules: Vec<CbRule>, max_parts: usize) -> (Vec<Vec<CbRule>>, usize) {
             _ => network.push(r),
         }
     }
-    let room = MAX_RULES.saturating_sub(ignore.len()).max(1);
+    let room = MAX_RULES.saturating_sub(ignore.len() + extra).max(1);
     let total = network.len() + cosmetic.len();
     let mut parts: Vec<Vec<CbRule>> = Vec::new();
     for r in network.into_iter().chain(cosmetic) {
@@ -314,9 +349,13 @@ fn pack(rules: Vec<CbRule>, max_parts: usize) -> (Vec<Vec<CbRule>>, usize) {
         }
     }
     let kept: usize = parts.iter().map(Vec::len).sum();
-    for p in &mut parts {
-        p.extend(ignore.iter().cloned());
-    }
+    let parts = parts
+        .into_iter()
+        .map(|mut p| {
+            p.extend(ignore.iter().cloned());
+            with_generichide(p, ghide)
+        })
+        .collect();
     (parts, total - kept)
 }
 
@@ -324,11 +363,14 @@ fn pack(rules: Vec<CbRule>, max_parts: usize) -> (Vec<Vec<CbRule>>, usize) {
 /// list (off the main thread; large transient allocation, freed when done).
 pub fn build(g: &Group) -> Option<Vec<String>> {
     let mut set = FilterSet::new(true); // debug = keep raw lines, required by the conversion
+    let mut ghide = Vec::new();
     for (text, format) in inputs(g)? {
+        ghide.extend(generichide_domains(&text));
         set.add_filter_list(text, ParseOptions { format, ..Default::default() });
     }
     let (rules, used) = set.into_content_blocking().ok()?;
-    let (parts, dropped) = pack(rules, g.parts.len());
+    let ghide = generichide_rule(ghide);
+    let (parts, dropped) = pack(rules, g.parts.len(), ghide.as_ref());
     let rules = parts.iter().map(Vec::len).sum();
     set_stats(g.key, Some(ListStats { filters: used.len(), rules, parts: parts.len(), dropped }));
     parts.iter().map(|p| serde_json::to_string(p).ok()).collect()
