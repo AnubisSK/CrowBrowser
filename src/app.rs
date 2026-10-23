@@ -1896,10 +1896,13 @@ impl App {
                 };
                 self.activate(i);
             }
-            // Reload on the certificate interstitial retries the refused URL itself; a built-in
-            // page is rendered again.
-            "reload" if s.cur().is_some_and(|t| t.tls_error || t.internal) => {
-                if let (Some(t), Some(v)) = (s.cur(), s.view()) {
+            // Reload on the certificate interstitial or the crash page loads the URL itself (a
+            // plain reload would only repeat the local page); a built-in page is rendered again.
+            "reload" if s.cur().is_some_and(|t| t.tls_error || t.internal || t.crashed) => {
+                let i = s.active;
+                let t = &mut s.tabs[i];
+                t.crashed = false;
+                if let Some(v) = &t.view {
                     let _ = match internal_page(&t.url, &self.cfg.language) {
                         Some(html) => v.load_html(&html),
                         None => v.load_url(&t.url),
