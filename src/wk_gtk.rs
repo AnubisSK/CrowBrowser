@@ -175,7 +175,9 @@ pub fn new_store() -> Store {
     root().context().expect("webkit context")
 }
 
-pub fn config(_store: &Store, _adblock: bool) -> Config {
+/// WebKitGTK 2.40 has no gamepad switch (`WebKitFeature` is 2.42+): with `gamepad` off the
+/// page-side shim removes the API.
+pub fn config(_store: &Store, _adblock: bool, _gamepad: bool) -> Config {
     Config(root())
 }
 
@@ -194,12 +196,13 @@ const USER_AGENT: &str =
 /// Tab views (including adopted popups); the browser UI uses `ui_builder`.
 /// `incognito` only stops wry from creating a throwaway *persistent* context (which would write
 /// HSTS/storage files to disk); the related view decides the context actually used.
-pub fn builder<'a>(config: Config) -> WebViewBuilder<'a> {
+/// `page_js`: the page-world shim (`adblock::defuser`), injected into every frame.
+pub fn builder<'a>(config: Config, page_js: String) -> WebViewBuilder<'a> {
     WebViewBuilder::new()
         .with_incognito(true)
         .with_related_view(config.0)
         .with_user_agent(USER_AGENT)
-        .with_initialization_script_for_main_only(crate::adblock::DEFUSER, false)
+        .with_initialization_script_for_main_only(page_js, false)
 }
 
 pub fn ui_builder<'a>() -> WebViewBuilder<'a> {
@@ -259,6 +262,21 @@ fn start_downloads(w: &webkit2gtk::WebView, d: &webkit2gtk::PolicyDecision, t: P
     }
     w.download_uri(&uri);
     true
+}
+
+/// Runs `js` at document start in every frame of `v`, in Crow's isolated JS world (see
+/// `eval_isolated`). Called before the view's first load.
+pub fn add_isolated_script(v: &WebView, js: &str) {
+    let Some(manager) = v.webview().user_content_manager() else { return };
+    let script = webkit2gtk::UserScript::for_world(
+        js,
+        webkit2gtk::UserContentInjectedFrames::AllFrames,
+        webkit2gtk::UserScriptInjectionTime::Start,
+        "crow",
+        &[],
+        &[],
+    );
+    manager.add_script(&script);
 }
 
 /// Runs `js` in the main frame in Crow's own JS world: same DOM, but globals set there are

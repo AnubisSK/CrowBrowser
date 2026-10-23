@@ -252,6 +252,8 @@
           row(t('adblock_full'), t('adblock_desc', '~/Library/Application Support/Crow/blocklist.txt'),
             seg('adblock', [['on', t('switch_on')], ['off', t('switch_off')]])),
           adblockLists(),
+          row(t('gamepad_setting'), t('gamepad_setting_desc'), seg('gamepad_enabled', [['on', t('switch_on')], ['off', t('switch_off')]])),
+          row(t('gamepad_test'), t('gamepad_test_desc'), h('button', { class: 'btn', onclick: () => send('open-new:crow:gamepad') }, t('gamepad_test_open'))),
           row(t('whitelist'), D.allow.length ? null : t('whitelist_empty'),
             D.allow.length ? h('div', {}, ...D.allow.map(d => {
               const b = h('button', { class: 'btn', title: t('remove_exception') }, d + ' ×');

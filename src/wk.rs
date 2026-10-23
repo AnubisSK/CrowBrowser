@@ -12,7 +12,7 @@ use objc2_foundation::{
 };
 use objc2_web_kit::{
     WKContentRuleList, WKContentRuleListStore, WKContentWorld, WKUserContentController,
-    WKWebViewConfiguration, WKWebsiteDataStore,
+    WKUserScript, WKUserScriptInjectionTime, WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use objc2::{
     encode::{Encoding, RefEncode},
@@ -133,10 +133,51 @@ fn file_prefs(c: &WKWebViewConfiguration) {
     }
 }
 
+/// Gamepad API on or off. WKWebView enables it by default; the only switch is the private
+/// feature list (`_features` / `_setEnabled:forFeature:`, guarded). There is no `gamepadEnabled`
+/// preference key: KVC on it would throw. Without the SPI the page-side shim still removes the API.
+#[cfg(target_os = "macos")]
+fn gamepad_prefs(c: &WKWebViewConfiguration, on: bool) {
+    unsafe {
+        let Some(cls) = AnyClass::get(c"WKPreferences") else { return };
+        let prefs: *mut AnyObject = msg_send![c, preferences];
+        let Some(prefs) = prefs.as_ref() else { return };
+        let list: Bool = msg_send![cls, respondsToSelector: sel!(_features)];
+        let set: Bool = msg_send![prefs, respondsToSelector: sel!(_setEnabled:forFeature:)];
+        if !list.as_bool() || !set.as_bool() {
+            return;
+        }
+        let features: *mut NSArray<AnyObject> = msg_send![cls, _features];
+        let Some(features) = features.as_ref() else { return };
+        for f in features {
+            let key: *mut NSString = msg_send![&*f, key];
+            if key.as_ref().is_some_and(|k| k.to_string() == "GamepadsEnabled") {
+                let _: () = msg_send![prefs, _setEnabled: on, forFeature: &*f];
+            }
+        }
+    }
+}
+
+/// Runs `js` at document start in every frame of `v`, in Crow's isolated JS world (see
+/// `eval_isolated`). Called before the view's first load.
+pub fn add_isolated_script(v: &WebView, js: &str) {
+    unsafe {
+        let world = WKContentWorld::worldWithName(ns_string!("crow"), mtm());
+        let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
+            mtm().alloc::<WKUserScript>(),
+            &NSString::from_str(js),
+            WKUserScriptInjectionTime::AtDocumentStart,
+            false,
+            &world,
+        );
+        v.webview().configuration().userContentController().addUserScript(&script);
+    }
+}
+
 /// WebKit runs element fullscreen in its own window on macOS: nothing for the app to resize.
 pub fn on_fullscreen(_f: impl Fn(u32, bool) + 'static) {}
 
-pub fn config(store: &Store, adblock: bool) -> Config {
+pub fn config(store: &Store, adblock: bool, gamepad: bool) -> Config {
     unsafe {
         let c = WKWebViewConfiguration::new(mtm());
         c.setWebsiteDataStore(store);
@@ -146,6 +187,7 @@ pub fn config(store: &Store, adblock: bool) -> Config {
         media_prefs(&c);
         storage_prefs(&c);
         file_prefs(&c);
+        gamepad_prefs(&c, gamepad);
         Config(c)
     }
 }
@@ -167,11 +209,12 @@ const USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
 
 /// Tab views (including adopted popups); the browser UI uses `ui_builder`.
-pub fn builder<'a>(config: Config) -> WebViewBuilder<'a> {
+/// `page_js`: the page-world shim (`adblock::defuser`), injected into every frame.
+pub fn builder<'a>(config: Config, page_js: String) -> WebViewBuilder<'a> {
     WebViewBuilder::new()
         .with_webview_configuration(config.0)
         .with_user_agent(USER_AGENT)
-        .with_initialization_script_for_main_only(crate::adblock::DEFUSER, false)
+        .with_initialization_script_for_main_only(page_js, false)
 }
 
 /// Browser UI (toolbar, panel, lock screen, popovers): its own non-persistent data store

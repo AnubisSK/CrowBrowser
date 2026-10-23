@@ -31,6 +31,8 @@ pub struct Settings {
     pub adblock_hosts: bool,
     /// UI language (`LANGUAGES`).
     pub language: String,
+    /// Gamepad API for pages (off: the API does not exist; on: every pad has one generic id).
+    pub gamepad_enabled: bool,
 }
 
 /// UI languages with dictionaries in `locales.json`.
@@ -51,6 +53,7 @@ impl Default for Settings {
             adblock_easylist: true,
             adblock_hosts: true,
             language: "sk".into(),
+            gamepad_enabled: false,
         }
     }
 }
@@ -138,6 +141,7 @@ impl Settings {
             "updates" if matches!(v, "on" | "off") => self.updates = v == "on",
             "adblock_easylist" if matches!(v, "on" | "off") => self.adblock_easylist = v == "on",
             "adblock_hosts" if matches!(v, "on" | "off") => self.adblock_hosts = v == "on",
+            "gamepad_enabled" if matches!(v, "on" | "off") => self.gamepad_enabled = v == "on",
             "language" if LANGUAGES.contains(&v) => self.language = v.into(),
             "zoom" => match v.parse::<f64>() {
                 Ok(z) if (0.25..=3.0).contains(&z) => self.zoom = z,

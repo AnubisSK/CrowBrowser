@@ -1,5 +1,66 @@
 (function () {
   'use strict';
+  // Every replaced function reports the source of the native one it stands for, so
+  // `Function.prototype.toString`, `__lookupGetter__(...).toString()` and `.name` checks see
+  // "[native code]" (the toString override masks itself the same way; not installed on trusted
+  // sites below).
+  const natives = new WeakMap();
+  const toString0 = Function.prototype.toString;
+  const mask = (fake, real) => {
+    natives.set(fake, real);
+    Object.defineProperty(fake, 'name', { value: real.name, configurable: true });
+    return fake;
+  };
+
+  // Gamepads (setting "gamepad_enabled"), on every site. Off: the API is removed (macOS also
+  // switches it off in WebKit) and connect events never reach the page. On: every pad reports one
+  // generic id, so model, vendor and product ids cannot be read; mapping, buttons and axes stay
+  // real so games work. A page's first read is signalled to Crow's isolated JS world with a
+  // per-session event name the page cannot know (tabs have no IPC).
+  const GAMEPAD = /*GAMEPAD*/false;
+  const PAD_EVENT = /*PAD_EVENT*/'';
+  const PAD_ID = /*PAD_ID*/'';
+  const PAD_EVENTS = ['gamepadconnected', 'gamepaddisconnected'];
+  if (!GAMEPAD) {
+    for (const k of ['getGamepads', 'webkitGetGamepads']) delete Navigator.prototype[k];
+    for (const k of ['ongamepadconnected', 'ongamepaddisconnected']) { delete Window.prototype[k]; delete window[k]; }
+    for (const k of ['Gamepad', 'GamepadEvent', 'GamepadButton', 'GamepadHapticActuator']) delete window[k];
+    for (const type of PAD_EVENTS) window.addEventListener(type, (e) => e.stopImmediatePropagation(), true);
+  } else if (Navigator.prototype.getGamepads) {
+    const proxies = new WeakMap();
+    const wrap = (g) => {
+      if (!g) return g;
+      let p = proxies.get(g);
+      if (!p) {
+        p = new Proxy(g, {
+          get(target, key) {
+            if (key === 'id') return PAD_ID;
+            const v = Reflect.get(target, key);
+            return typeof v === 'function' ? v.bind(target) : v;
+          },
+        });
+        proxies.set(g, p);
+      }
+      return p;
+    };
+    const dispatch = EventTarget.prototype.dispatchEvent, doc = document, Ev = Event, map = Array.prototype.map;
+    let told = false;
+    const getGamepads0 = Navigator.prototype.getGamepads;
+    Navigator.prototype.getGamepads = mask(function getGamepads() {
+      const pads = getGamepads0.apply(this, arguments);
+      if (!told) {
+        told = true;
+        try { dispatch.call(doc, new Ev(PAD_EVENT)); } catch (e) {}
+      }
+      return map.call(pads, wrap);
+    }, getGamepads0);
+    const d = window.GamepadEvent && Object.getOwnPropertyDescriptor(GamepadEvent.prototype, 'gamepad');
+    if (d && d.get) {
+      const get = mask({ get gamepad() { return wrap(d.get.call(this)); } }.__lookupGetter__('gamepad'), d.get);
+      Object.defineProperty(GamepadEvent.prototype, 'gamepad', { configurable: d.configurable, enumerable: d.enumerable, get });
+    }
+  }
+
   // Sites whose app code (web components, Turbo frames, fetch-driven hydration, Gmail's "adn ads"
   // message containers, admin consoles, sign-in and payment frames) must see the native fetch,
   // Function.prototype.toString and layout getters, and that run no anti-adblock walls: nothing
@@ -9,16 +70,6 @@
   const hostOf = (o) => { try { return new URL(o).hostname; } catch (e) { return ''; } };
   const host = location.hostname || hostOf((location.ancestorOrigins || [])[0]);
   if (TRUSTED.test(host)) return;
-  // Every replaced function reports the source of the native one it stands for, so
-  // `Function.prototype.toString`, `__lookupGetter__(...).toString()` and `.name` checks see
-  // "[native code]" (the toString override masks itself the same way).
-  const natives = new WeakMap();
-  const toString0 = Function.prototype.toString;
-  const mask = (fake, real) => {
-    natives.set(fake, real);
-    Object.defineProperty(fake, 'name', { value: real.name, configurable: true });
-    return fake;
-  };
   const toString = mask({ toString() { return toString0.call(natives.get(this) || this); } }.toString, toString0);
   Object.defineProperty(Function.prototype, 'toString', { value: toString, writable: true, configurable: true });
 

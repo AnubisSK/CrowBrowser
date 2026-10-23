@@ -56,7 +56,17 @@ const HIDE: &str = "ins.adsbygoogle, .adsbygoogle, [id^='google_ads_iframe'], [i
 /// content blockers abort blocked loads (no empty 200/204 responses possible), so the page-side
 /// symptoms are neutralized instead: ad resource errors become `load`, ad fetches resolve with an
 /// empty 200, bait globals are set and hidden bait elements report a non-zero size.
-pub const DEFUSER: &str = include_str!("defuser.js");
+/// Also the gamepad privacy shim (`gamepad`: API on or removed; `pad_event`: per-session event
+/// name for Crow's isolated world). Runs in every frame of every tab.
+pub fn defuser(gamepad: bool, pad_event: &str) -> String {
+    include_str!("defuser.js")
+        .replace("/*GAMEPAD*/false", if gamepad { "true" } else { "false" })
+        .replace("/*PAD_EVENT*/''", &serde_json::to_string(pad_event).unwrap_or_default())
+        .replace("/*PAD_ID*/''", &serde_json::to_string(PAD_ID).unwrap_or_default())
+}
+
+/// The only gamepad id pages ever see: one common standard-mapping controller.
+pub const PAD_ID: &str = "Xbox 360 Controller (STANDARD GAMEPAD)";
 
 /// WebKit's content-blocker limit per rule list.
 const MAX_RULES: usize = 150_000;

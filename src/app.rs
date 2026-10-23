@@ -43,6 +43,17 @@ const FAV_TRIES: u8 = 8;
 const FAV_MAX: usize = 48 * 1024;
 /// Read in Crow's isolated JS world (`wk::eval_isolated`), never the page's.
 const FAV_READ: &str = "window.__crowIcon || ''";
+/// Gamepad reads of the active page are checked this often (only with the setting on).
+const PAD_POLL: Duration = Duration::from_secs(1);
+/// Isolated world of every frame: notes the page's first `getGamepads()` call, which the
+/// page-world shim (`adblock::defuser`) signals with the per-session event name `/*EVENT*/`.
+/// Idempotent: popups may share the opener's scripts.
+const PAD_LISTEN_JS: &str = "(() => { if (window.__crowPadOn) return; window.__crowPadOn = 1; window.__crowPad = 0; \
+document.addEventListener(/*EVENT*/'', () => { window.__crowPad = 1; }, true); })();";
+const PAD_READ: &str = "window.__crowPad ? '1' : ''";
+/// What the gamepad popover shows: the real pads, read in the isolated world (unmasked there).
+const PAD_INFO: &str = "JSON.stringify({ pads: navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) \
+.map(g => ({ index: g.index, id: g.id, mapping: g.mapping, buttons: g.buttons.length, axes: g.axes.length })) : [] })";
 const MAX_ALLOW: usize = 1000;
 /// Reopen-closed-tab memory and download list are bounded (oldest entries go first).
 const MAX_CLOSED_TABS: usize = 50;
@@ -159,6 +170,15 @@ pub enum UserEvent {
     /// Result of a filter-list download the user asked for.
     /// Manual list refresh finished: failed lists as (`locales.json` key, list name).
     RulesNote(Vec<(&'static str, &'static str)>),
+    /// The active page read the gamepads (masked by the shim).
+    GamepadRead {
+        tab: u32,
+    },
+    /// Gamepad popover data from the tab's isolated world (`PAD_INFO`, JSON).
+    GamepadInfo {
+        tab: u32,
+        data: String,
+    },
     /// The tab's web content process ended (crash, out of memory, WebGL hang).
     WebProcessTerminated {
         tab_id: u32,
@@ -204,6 +224,10 @@ struct TabCtx {
     adblock: Rc<Cell<bool>>,
     /// UI language, baked into every UI view (also before unlock, see `settings::stored_language`).
     lang: Rc<RefCell<String>>,
+    /// Gamepad setting for views built from now on (page shim and WebKit switch).
+    gamepad: Rc<Cell<bool>>,
+    /// Random per-session name of the shim's gamepad event (pages cannot listen for it).
+    pad_event: Rc<str>,
 }
 
 impl TabCtx {
@@ -229,7 +253,7 @@ impl TabCtx {
     ) -> wry::Result<WebView> {
         let (p1, p2) = (self.proxy.clone(), self.proxy.clone());
         let ctx = self.clone();
-        let mut b = wk::builder(config)
+        let mut b = wk::builder(config, adblock::defuser(self.gamepad.get(), &self.pad_event))
             .with_background_color(bg_of(&self.window))
             .with_on_page_load_handler(move |ev, url| {
                 let started = matches!(ev, PageLoadEvent::Started);
@@ -281,6 +305,9 @@ impl TabCtx {
         let view = wk::attach(b, rect, &self.window)?;
         wk::set_rules(&view, blocking);
         wk::watch(&view, id);
+        if self.gamepad.get() {
+            wk::add_isolated_script(&view, &PAD_LISTEN_JS.replace("/*EVENT*/''", &js(&self.pad_event)));
+        }
         if let Some(url) = url {
             view.load_url(url)?;
         }
@@ -367,6 +394,8 @@ struct Tab {
     internal: bool,
     /// Showing the crash page for `url` (web process ended).
     crashed: bool,
+    /// The current page read the gamepads (toolbar chip).
+    gamepad: bool,
 }
 
 /// Every way a tab disappears (close, session lock, app exit) releases its view the same way.
@@ -393,6 +422,7 @@ impl Tab {
             tls_error: false,
             internal: false,
             crashed: false,
+            gamepad: false,
         }
     }
 
@@ -450,6 +480,9 @@ struct Session {
     site_h: f64,
     site_closed: Instant,
     fav_due: Option<Instant>,
+    pad_due: Option<Instant>,
+    /// Gamepad setting changed: tab views still carry the old shim; rebuilt on next activation.
+    pad_stale: bool,
     update: Option<update::Info>,
     update_bar: bool,
     update_busy: bool,
@@ -487,6 +520,21 @@ impl Session {
                 self.fav_due = Some(Instant::now() + FAV_POLL);
             }
         }
+    }
+
+    /// Active page: has it read the gamepads yet? (Asked in the isolated world; no IPC in tabs.)
+    fn poll_gamepad(&self, proxy: &EventLoopProxy<UserEvent>) {
+        let Some(t) = self.cur() else { return };
+        let (false, Some(v)) = (t.gamepad, &t.view) else { return };
+        if !t.url.starts_with("http") {
+            return;
+        }
+        let (p, tab) = (proxy.clone(), t.id);
+        wk::eval_isolated(v, PAD_READ, move |r| {
+            if r == "1" {
+                let _ = p.send_event(UserEvent::GamepadRead { tab });
+            }
+        });
     }
 
     fn cur(&self) -> Option<&Tab> {
@@ -580,6 +628,7 @@ impl Session {
             "tls": cur.map_or("", |t| t.tls),
             "login": logged_in(&self.data.cookies, &host_of(url)),
             "blocked": cur.map_or(0, |t| t.blocked),
+            "gamepad": cur.is_some_and(|t| t.gamepad),
             "bookmarked": self.data.bookmarks.iter().any(|b| b.url == url),
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
             "panel": if self.panel.is_some() { self.panel_section.as_str() } else { "" },
@@ -716,6 +765,8 @@ impl App {
             next_id: Rc::new(Cell::new(1)),
             adblock: Rc::new(Cell::new(true)),
             lang: Rc::new(RefCell::new(settings::stored_language())),
+            gamepad: Rc::new(Cell::new(false)),
+            pad_event: pad_event_name().into(),
         };
         let mut app = Self {
             ctx,
@@ -751,7 +802,8 @@ impl App {
 
     pub fn wake(&self) -> Instant {
         let fav = self.s.as_ref().and_then(|s| s.fav_due);
-        [self.quit_at, self.restore_by, fav]
+        let pad = self.s.as_ref().filter(|_| self.cfg.gamepad_enabled).map(|s| s.pad_due.unwrap_or_else(|| Instant::now() + PAD_POLL));
+        [self.quit_at, self.restore_by, fav, pad]
             .into_iter()
             .flatten()
             .fold(self.next_tick, Instant::min)
@@ -922,6 +974,13 @@ impl App {
                 }
             }
             UserEvent::Icon { tab, data } => self.icon(tab, data),
+            UserEvent::GamepadRead { tab } => {
+                let Some(s) = self.s.as_mut() else { return };
+                let Some(i) = s.tab_idx(tab) else { return };
+                s.tabs[i].gamepad = true;
+                s.sync(&self.cfg);
+            }
+            UserEvent::GamepadInfo { tab, data } => self.gamepad_popover(tab, &data),
             UserEvent::Update { result, manual } => self.update_result(result, manual),
             UserEvent::UpdateSaved(path) => {
                 let Some(s) = self.s.as_mut() else { return };
@@ -961,6 +1020,13 @@ impl App {
             && s.fav_due.is_some_and(|d| now >= d)
         {
             s.poll_icons(&self.ctx.proxy);
+        }
+        if self.cfg.gamepad_enabled
+            && let Some(s) = self.s.as_mut()
+            && s.pad_due.is_none_or(|d| now >= d)
+        {
+            s.pad_due = Some(now + PAD_POLL);
+            s.poll_gamepad(&self.ctx.proxy);
         }
         if now < self.next_tick {
             return;
@@ -1103,6 +1169,8 @@ impl App {
             site_h: 0.0,
             site_closed: Instant::now(),
             fav_due: None,
+            pad_due: None,
+            pad_stale: false,
             update: None,
             update_bar: false,
             update_busy: false,
@@ -1155,6 +1223,13 @@ impl App {
             return;
         }
         s.close_panel();
+        // New gamepad setting: every view is rebuilt with the new shim when it is shown again.
+        if std::mem::take(&mut s.pad_stale) {
+            for t in &mut s.tabs {
+                t.drop_view();
+                t.loading = false;
+            }
+        }
         // Switching away from a fullscreen video ends it (WebKit then restores the window).
         if let Some(v) = s.video_fullscreen.take().and_then(|id| s.tab_idx(id)).and_then(|i| s.tabs[i].view.as_ref()) {
             let _ = v.evaluate_script("document.webkitExitFullscreen && document.webkitExitFullscreen()");
@@ -1171,14 +1246,14 @@ impl App {
         let tab = &mut s.tabs[idx];
         if tab.view.is_none() {
             let on = blocks(&self.cfg, &tab.url);
-            let config = wk::config(&s.store, on);
+            let config = wk::config(&s.store, on, self.cfg.gamepad_enabled);
             let page = internal_page(&tab.url, &self.cfg.language);
             let url = if page.is_some() { None } else { Some(tab.url.as_str()) };
             tab.view = self.ctx.build(tab.id, url, config, rect, on).ok();
             tab.blocking = Some(on);
-            if let (Some(html), Some(v)) = (page, &tab.view) {
+            if let (Some((address, html)), Some(v)) = (page, &tab.view) {
                 tab.internal = true;
-                tab.url = CHANGELOG_URL.into();
+                tab.url = address.into();
                 let _ = v.load_html(&html);
             }
             if let Some(v) = &tab.view {
@@ -1274,10 +1349,10 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         s.close_panel();
         if let Some(t) = s.tabs.get_mut(s.active)
-            && let Some(html) = internal_page(&url, &self.cfg.language)
+            && let Some((address, html)) = internal_page(&url, &self.cfg.language)
         {
             // Built-in page: shown under its own address, no request leaves the browser.
-            t.url = CHANGELOG_URL.into();
+            t.url = address.into();
             t.internal = true;
             t.tls = "";
             t.icon.clear();
@@ -1313,9 +1388,16 @@ impl App {
             t.tls_error = false;
             t.internal = false;
             t.crashed = false;
+            t.gamepad = false;
         }
         if !started && interstitial {
             t.loading = false;
+            if t.internal
+                && t.url == GAMEPAD_URL
+                && let Some(v) = &t.view
+            {
+                wk::eval_isolated(v, &gamepad_diag_js(self.cfg.gamepad_enabled), |_| {});
+            }
             return s.sync(&self.cfg);
         }
         if started {
@@ -1440,6 +1522,21 @@ impl App {
         if fullscreen {
             self.resize();
         }
+    }
+
+    /// Gamepad popover under the chip, for the active tab only.
+    fn gamepad_popover(&mut self, tab: u32, data: &str) {
+        let Some(s) = self.s.as_mut() else { return };
+        if s.site.is_some() || s.cur().is_none_or(|t| t.id != tab) {
+            return;
+        }
+        let url = s.cur().map_or("", |t| t.url.as_str());
+        let report: serde_json::Value = serde_json::from_str(data).unwrap_or_default();
+        let data = json!({ "host": host_of(url), "spoofed": adblock::PAD_ID, "report": report });
+        let html = include_str!("gamepadinfo.html").replace("/*DATA*/", &data.to_string().replace("</", "<\\/"));
+        let h = if s.site_h > 0.0 { s.site_h } else { 280.0 };
+        s.shield_open = false;
+        s.site = self.ctx.ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
     }
 
     fn icon(&mut self, id: u32, data: String) {
@@ -1904,7 +2001,7 @@ impl App {
                 t.crashed = false;
                 if let Some(v) = &t.view {
                     let _ = match internal_page(&t.url, &self.cfg.language) {
-                        Some(html) => v.load_html(&html),
+                        Some((_, html)) => v.load_html(&html),
                         None => v.load_url(&t.url),
                     };
                 }
@@ -2031,6 +2128,10 @@ impl App {
                 s.sync(&self.cfg);
             }
             "panel-close" => {
+                if s.pad_stale {
+                    let active = s.active;
+                    return self.activate(active); // closes the panel too
+                }
                 s.close_panel();
                 s.sync(&self.cfg);
             }
@@ -2059,6 +2160,19 @@ impl App {
                     "adblock" => {
                         self.ctx.adblock.set(self.cfg.adblock);
                         s.apply_rules_all(&self.cfg);
+                    }
+                    // Hidden tabs are unloaded now; the visible one is rebuilt when the panel closes.
+                    "gamepad_enabled" => {
+                        self.ctx.gamepad.set(self.cfg.gamepad_enabled);
+                        s.pad_stale = true;
+                        s.pad_due = None;
+                        let active = s.active;
+                        for (i, t) in s.tabs.iter_mut().enumerate() {
+                            if i != active {
+                                t.drop_view();
+                                t.loading = false;
+                            }
+                        }
                     }
                     "adblock_easylist" | "adblock_hosts" => {
                         let (on, hosts) = match k {
@@ -2229,6 +2343,22 @@ impl App {
                 s.shield_open = false;
                 self.request_site_cookies(false);
             }
+            // Gamepad chip: what the page asked for and what it got (same toggle rule as site-info).
+            "gamepad-open" => {
+                if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
+                    return;
+                }
+                s.site_x = arg.parse().unwrap_or(0.0);
+                let Some(t) = s.cur() else { return };
+                let (Some(v), tab, p) = (&t.view, t.id, self.ctx.proxy.clone()) else { return };
+                wk::eval_isolated(v, PAD_INFO, move |data| {
+                    let _ = p.send_event(UserEvent::GamepadInfo { tab, data });
+                });
+            }
+            "gamepad-diag" => {
+                s.site = None;
+                self.open_tab(GAMEPAD_URL.into());
+            }
             // Shield popover: blocked counts and the per-site switch (same toggle rule as site-info).
             "shield-open" => {
                 if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
@@ -2262,7 +2392,7 @@ impl App {
                 }
                 // Built-in pages have no script: render them again in the new language.
                 for t in s.tabs.iter().filter(|t| t.internal) {
-                    if let (Some(v), Some(html)) = (&t.view, internal_page(&t.url, &self.cfg.language)) {
+                    if let (Some(v), Some((_, html))) = (&t.view, internal_page(&t.url, &self.cfg.language)) {
                         let _ = v.load_html(&html);
                     }
                 }
@@ -2596,16 +2726,49 @@ fn panel_section(arg: &str) -> &'static str {
 
 /// Address of the built-in changelog (also reachable as `about:changelog`).
 const CHANGELOG_URL: &str = "crow:changelog";
+/// Gamepad test page (`gamepad.html`, driven from the isolated world by `gamepad.js`).
+const GAMEPAD_URL: &str = "crow:gamepad";
 
 /// Built-in offline pages: static HTML with its own strict CSP and no script, loaded into the
 /// tab view (which has no IPC) instead of being fetched. Text is filled in `lang` here, so the
-/// tab never gets the dictionaries or `t()`.
-fn internal_page(url: &str, lang: &str) -> Option<String> {
-    is_internal(url).then(|| localize_page(include_str!("changelog.html"), lang))
+/// tab never gets the dictionaries or `t()`. Returns the address shown for it and the HTML.
+fn internal_page(url: &str, lang: &str) -> Option<(&'static str, String)> {
+    let address = internal_address(url)?;
+    let src = match address {
+        GAMEPAD_URL => include_str!("gamepad.html"),
+        _ => include_str!("changelog.html"),
+    };
+    Some((address, localize_page(src, lang)))
+}
+
+fn internal_address(url: &str) -> Option<&'static str> {
+    match url.trim().to_ascii_lowercase().as_str() {
+        "crow:changelog" | "about:changelog" => Some(CHANGELOG_URL),
+        "crow:gamepad" | "about:gamepad" => Some(GAMEPAD_URL),
+        _ => None,
+    }
 }
 
 fn is_internal(url: &str) -> bool {
-    matches!(url.trim().to_ascii_lowercase().as_str(), "crow:changelog" | "about:changelog")
+    internal_address(url).is_some()
+}
+
+/// Isolated-world driver of `crow:gamepad`; `enabled` = the setting (off: shows that instead).
+fn gamepad_diag_js(enabled: bool) -> String {
+    include_str!("gamepad.js")
+        .replace("/*ENABLED*/false", if enabled { "true" } else { "false" })
+        .replace("/*PAD_ID*/''", &js(adblock::PAD_ID))
+}
+
+/// Random per-session name for the gamepad shim's event: pages cannot subscribe to it.
+fn pad_event_name() -> String {
+    use chacha20poly1305::aead::{OsRng, rand_core::RngCore};
+    let mut b = [0u8; 12];
+    OsRng.fill_bytes(&mut b);
+    b.iter().fold(String::from("x"), |mut s, x| {
+        let _ = write!(s, "{x:02x}");
+        s
+    })
 }
 
 /// Replaces `{{key}}` with the escaped translation (`**bold**` → `<b>`, `` `code` `` →
