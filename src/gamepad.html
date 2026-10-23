@@ -35,6 +35,8 @@
   #spoof { color: var(--accent); font-weight: 600; }
   pre { font: 12px ui-monospace, "SF Mono", Menlo, "DejaVu Sans Mono", monospace; color: var(--mute); white-space: pre-wrap; margin-top: 10px; min-height: 1em; }
   h2 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .hint { margin: -6px 0 20px; padding: 10px 14px; border: 1px dashed var(--accent); border-radius: 10px; color: var(--fg); }
+  body.live .hint, body.off .hint { display: none; }
 </style>
 </head>
 <body>
@@ -44,6 +46,7 @@
     <span id="state" class="pill" data-on="{{gpd_connected}}" data-off="{{gpd_disconnected}}" data-dis="{{gpd_disabled}}">{{gpd_disconnected}}</span>
   </header>
   <p class="lead">{{gpd_lead}}</p>
+  <p class="hint">🎮 {{gpd_activate}}</p>
 
   <section>
     <svg class="pad" viewBox="0 0 600 330" aria-hidden="true">

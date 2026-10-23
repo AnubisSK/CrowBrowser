@@ -179,6 +179,8 @@ pub enum UserEvent {
         tab: u32,
         data: String,
     },
+    /// Panic wipe of WebKit's store finished: the vault is saved without the session.
+    StoreWiped,
     /// The tab's web content process ended (crash, out of memory, WebGL hang).
     WebProcessTerminated {
         tab_id: u32,
@@ -948,6 +950,11 @@ impl App {
             }
             UserEvent::TlsError { tab, url, reasons } => self.tls_error(tab, url, &reasons),
             UserEvent::WebProcessTerminated { tab_id } => self.web_process_terminated(tab_id),
+            UserEvent::StoreWiped => {
+                let Some(s) = self.s.as_mut() else { return };
+                s.dirty = true;
+                self.persist(After::Nothing);
+            }
             UserEvent::Fullscreen { tab, on } => {
                 let Some(s) = self.s.as_mut() else { return };
                 s.video_fullscreen = if on { Some(tab) } else { s.video_fullscreen.filter(|t| *t != tab) };
@@ -1356,8 +1363,11 @@ impl App {
             t.internal = true;
             t.tls = "";
             t.icon.clear();
+            // Focus leaves the address bar as for any other page: WebKit hands keyboard and
+            // gamepad input only to the focused view (crow:gamepad stayed "not connected").
             if let Some(v) = &t.view {
                 let _ = v.load_html(&html);
+                let _ = v.focus();
             }
             return s.sync(&self.cfg);
         }
@@ -1489,6 +1499,54 @@ impl App {
             s.site = None;
         }
         s.sync(&self.cfg);
+    }
+
+    /// Panic (⌘⇧X / Ctrl+Shift+X): ends the browsing session at once, without locking. Every tab
+    /// and its web process goes away; tab and closed-tab addresses, cookies and the download list
+    /// are overwritten in memory (`zeroize`); WebKit's in-memory store (cookies, cache, storage,
+    /// credentials) is wiped and, once that finished, the vault is saved without them
+    /// (`StoreWiped`). History, bookmarks and the vault key stay: zeroizing the key would need
+    /// the password before the next save. One empty tab remains.
+    fn panic(&mut self) {
+        let Some(s) = self.s.as_mut() else { return };
+        eprintln!("[CrowBrowser] panic: wiping the session");
+        s.close_panel();
+        s.video_fullscreen = None;
+        for mut a in s.asks.drain(..) {
+            wk::decide_download(a.key, false, &a.url, None);
+            a.url.zeroize();
+            a.name.zeroize();
+        }
+        for t in &mut s.tabs {
+            t.drop_view();
+            t.url.zeroize();
+            t.title.zeroize();
+            t.icon.zeroize();
+        }
+        s.tabs.clear();
+        s.closed.iter_mut().for_each(Zeroize::zeroize);
+        s.closed.clear();
+        s.data.session.iter_mut().for_each(Zeroize::zeroize);
+        s.data.session.clear();
+        s.data.active = 0;
+        // Both drop their entries, which zeroize themselves (`vault.rs`).
+        s.data.cookies.clear();
+        s.data.downloads.clear();
+        // An export started before the wipe can never write its cookies back.
+        s.cookie_epoch += 1;
+        let p = self.ctx.proxy.clone();
+        wk::clear_store(&s.store, move || {
+            let _ = p.send_event(UserEvent::StoreWiped);
+        });
+        s.tabs.push(Tab::new(self.ctx.next(), "about:blank".into(), None));
+        s.active = 0;
+        s.dirty = true;
+        self.set_find(false);
+        self.resize();
+        self.activate(0);
+        if let Some(s) = &self.s {
+            s.note("panic_done", &[]);
+        }
     }
 
     /// Web process of a tab ended. A hidden tab is simply unloaded (reloads when shown again);
@@ -1882,7 +1940,7 @@ impl App {
                     for a in &s.asks {
                         wk::decide_download(a.key, false, &a.url, None);
                     }
-                    wk::clear_store(&s.store);
+                    wk::clear_store(&s.store, || {});
                 }
                 // Don't reveal the chosen theme (or anything else) while locked.
                 self.cfg = Settings::default();
@@ -2260,7 +2318,7 @@ impl App {
                     "downloads" => s.data.downloads.retain(|d| d.state == "active"),
                     "cookies" => {
                         s.cookie_epoch += 1;
-                        wk::clear_store(&s.store);
+                        wk::clear_store(&s.store, || {});
                         s.data.cookies.clear();
                     }
                     _ => return,
@@ -2425,6 +2483,7 @@ impl App {
                 self.session_cmd("panel", "settings");
             }
             "lock" => self.persist(After::Lock),
+            "panic" => self.panic(),
             _ => {}
         }
     }

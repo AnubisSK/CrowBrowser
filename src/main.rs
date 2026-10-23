@@ -206,6 +206,7 @@ fn build_menu() -> Result<Menu, muda::Error> {
                 &item("panel:settings", "Settings…", cmd, Code::Comma),
                 &sep(),
                 &item("lock", "Lock CrowBrowser", Modifiers::META | Modifiers::CONTROL, Code::KeyL),
+                &item("panic", "Panic: Wipe Session", shift, Code::KeyX),
                 &sep(),
                 &PredefinedMenuItem::hide(None),
                 &PredefinedMenuItem::hide_others(None),

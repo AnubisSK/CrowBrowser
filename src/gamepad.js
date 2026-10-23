@@ -12,11 +12,18 @@
   const text = (id, s) => { const el = $(id); if (el && el.textContent !== s) el.textContent = s; };
   if (!ENABLED || !navigator.getGamepads) {
     state.textContent = state.dataset.dis;
+    document.body.classList.add('off');
     return;
   }
+  // WebKit exposes a pad only after a button press while this page has focus (W3C gamepad
+  // user activation); `gamepadconnected` marks that moment, polling then follows the state.
+  let index = null;
+  window.addEventListener('gamepadconnected', (e) => { index = e.gamepad.index; });
+  window.addEventListener('gamepaddisconnected', (e) => { if (e.gamepad.index === index) index = null; });
   const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(3);
   function frame() {
-    const pad = Array.from(navigator.getGamepads()).find(Boolean) || null;
+    const pads = navigator.getGamepads();
+    const pad = (index !== null && pads[index]) || Array.from(pads).find(Boolean) || null;
     document.body.classList.toggle('live', !!pad);
     text('state', pad ? state.dataset.on : state.dataset.off);
     state.classList.toggle('on', !!pad);

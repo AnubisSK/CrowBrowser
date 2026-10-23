@@ -665,13 +665,19 @@ pub fn cert_chain(v: &WebView) -> Option<(Vec<Vec<u8>>, Vec<&'static str>)> {
     Some((chain, errors))
 }
 
-/// Wipes cookies, cache and storage from the in-memory store.
-pub fn clear_store(store: &Store) {
+/// Wipes cookies, cache, storage and credentials from the in-memory store; `done` runs after.
+pub fn clear_store(store: &Store, done: impl FnOnce() + 'static) {
+    let done = Cell::new(Some(done));
+    let block = RcBlock::new(move || {
+        if let Some(f) = done.take() {
+            f();
+        }
+    });
     unsafe {
         store.removeDataOfTypes_modifiedSince_completionHandler(
             &WKWebsiteDataStore::allWebsiteDataTypes(mtm()),
             &NSDate::distantPast(),
-            &RcBlock::new(|| {}),
+            &block,
         );
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "crow-browser"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "CrowBrowser – lightweight, private WebKit browser for macOS and Linux"
 

@@ -675,14 +675,21 @@ pub fn cert_chain(v: &WebView) -> Option<(Vec<Vec<u8>>, Vec<&'static str>)> {
     Some((chain, errors))
 }
 
-/// Wipes cookies, cache and storage from the in-memory store.
-pub fn clear_store(store: &Store) {
-    if let Some(m) = store.website_data_manager() {
-        let all = WebsiteDataTypes::ALL.bits();
-        unsafe {
-            webkit_website_data_manager_clear(m.as_ptr() as *mut c_void, all, 0, ptr::null_mut(), None, ptr::null_mut())
-        };
-    }
+/// Wipes cookies, cache, storage and credentials from the in-memory store; `done` runs after.
+pub fn clear_store(store: &Store, done: impl FnOnce() + 'static) {
+    let Some(m) = store.website_data_manager() else { return done() };
+    let all = WebsiteDataTypes::ALL.bits();
+    let data = finish_data(move |_, _| done());
+    unsafe {
+        webkit_website_data_manager_clear(
+            m.as_ptr() as *mut c_void,
+            all,
+            0,
+            ptr::null_mut(),
+            Some(finish_trampoline),
+            data,
+        );
+    };
 }
 
 pub fn download_dir() -> PathBuf {
@@ -786,6 +793,7 @@ fn shortcut(ev: &gdk::EventKey) -> Option<String> {
             ("b" | "o", _) => "panel:bookmarks",
             ("y", _) => "panel:downloads",
             ("l", _) => "lock",
+            ("x", _) => "panic",
             _ => return None,
         },
         (false, false, true) => match key.as_str() {
