@@ -36,6 +36,8 @@ use wry::{
 pub type Store = Retained<WKWebsiteDataStore>;
 /// Certificate failure callback: tab, refused URL, reasons.
 type TlsHandler = dyn Fn(u32, String, Vec<&'static str>);
+/// Web process crash callback: tab.
+type CrashHandler = dyn Fn(u32);
 
 /// Engine-confirmed connection security of a committed page.
 #[derive(Clone, Copy, PartialEq)]
@@ -56,6 +58,7 @@ thread_local! {
     static BLOCKED: RefCell<HashMap<u32, u32>> = RefCell::new(HashMap::new());
     static ON_BLOCKED: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
     static ON_TLS: RefCell<Option<Box<TlsHandler>>> = const { RefCell::new(None) };
+    static ON_CRASH: RefCell<Option<Box<CrashHandler>>> = const { RefCell::new(None) };
     /// URLs the user confirmed in the download prompt; consumed by the next download of that URL.
     static APPROVED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
@@ -349,6 +352,21 @@ fn tls_reason(code: isize) -> Option<&'static str> {
     })
 }
 
+/// Web content process of a tab ended (crash, out of memory, WebGL hang): `f` gets the tab.
+pub fn on_crash(f: impl Fn(u32) + 'static) {
+    ON_CRASH.with(|o| *o.borrow_mut() = Some(Box::new(f)));
+}
+
+/// `webViewWebContentProcessDidTerminate:` (WKNavigationDelegate; wry does not implement it).
+unsafe extern "C-unwind" fn web_process_terminated(_this: *mut AnyObject, _cmd: Sel, web_view: *mut AnyObject) {
+    let Some(tab) = tab_of(web_view) else { return };
+    ON_CRASH.with(|f| {
+        if let Some(f) = &*f.borrow() {
+            f(tab);
+        }
+    });
+}
+
 unsafe extern "C-unwind" fn nav_failed(
     _this: *mut AnyObject,
     _cmd: Sel,
@@ -411,8 +429,9 @@ unsafe fn add_method(cls: &AnyClass, sel: Sel, imp: Imp, types: &std::ffi::CStr)
     }
 }
 
-/// Reports blocked loads and certificate failures of `v` as tab `tab`: adds the methods to wry's
-/// navigation delegate class and re-sets the delegate, so WebKit re-reads which methods exist.
+/// Reports blocked loads, certificate failures and web process crashes of `v` as tab `tab`: adds
+/// the methods to wry's navigation delegate class and re-sets the delegate, so WebKit re-reads
+/// which methods exist.
 pub fn watch(v: &WebView, tab: u32) {
     let wv = v.webview();
     set_tab(Retained::as_ptr(&wv) as *mut AnyObject, Some(tab));
@@ -424,6 +443,8 @@ pub fn watch(v: &WebView, tab: u32) {
         add_method(cls, rule_action_sel(), imp, c"v@:@@@@");
         let imp: Imp = std::mem::transmute(nav_failed as unsafe extern "C-unwind" fn(_, _, _, _, _));
         add_method(cls, sel!(webView:didFailProvisionalNavigation:withError:), imp, c"v@:@@@");
+        let imp: Imp = std::mem::transmute(web_process_terminated as unsafe extern "C-unwind" fn(_, _, _));
+        add_method(cls, sel!(webViewWebContentProcessDidTerminate:), imp, c"v@:@");
         let _: () = msg_send![&*wv, setNavigationDelegate: d];
     }
 }

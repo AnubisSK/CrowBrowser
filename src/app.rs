@@ -159,6 +159,10 @@ pub enum UserEvent {
     /// Result of a filter-list download the user asked for.
     /// Manual list refresh finished: failed lists as (`locales.json` key, list name).
     RulesNote(Vec<(&'static str, &'static str)>),
+    /// The tab's web content process ended (crash, out of memory, WebGL hang).
+    WebProcessTerminated {
+        tab_id: u32,
+    },
     /// Result of `FAV_READ` in a tab.
     Icon {
         tab: u32,
@@ -361,6 +365,8 @@ struct Tab {
     tls_error: bool,
     /// Showing a built-in page (`url` = `crow:…`), rendered in the tab without network or IPC.
     internal: bool,
+    /// Showing the crash page for `url` (web process ended).
+    crashed: bool,
 }
 
 /// Every way a tab disappears (close, session lock, app exit) releases its view the same way.
@@ -386,6 +392,7 @@ impl Tab {
             tls: "",
             tls_error: false,
             internal: false,
+            crashed: false,
         }
     }
 
@@ -678,6 +685,10 @@ impl App {
         wk::on_tls_error(move |tab, url, reasons| {
             let _ = p.send_event(UserEvent::TlsError { tab, url, reasons });
         });
+        let p = proxy.clone();
+        wk::on_crash(move |tab_id| {
+            let _ = p.send_event(UserEvent::WebProcessTerminated { tab_id });
+        });
         #[cfg(target_os = "linux")]
         {
             let (p0, p1, p2) = (proxy.clone(), proxy.clone(), proxy.clone());
@@ -884,6 +895,7 @@ impl App {
                 s.push_shield(&self.cfg);
             }
             UserEvent::TlsError { tab, url, reasons } => self.tls_error(tab, url, &reasons),
+            UserEvent::WebProcessTerminated { tab_id } => self.web_process_terminated(tab_id),
             UserEvent::Fullscreen { tab, on } => {
                 let Some(s) = self.s.as_mut() else { return };
                 s.video_fullscreen = if on { Some(tab) } else { s.video_fullscreen.filter(|t| *t != tab) };
@@ -1286,8 +1298,8 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let t = &mut s.tabs[i];
-        // The interstitial / built-in page itself (about:blank) keeps the shown URL and state.
-        let interstitial = (t.tls_error || t.internal) && (url.is_empty() || url == "about:blank");
+        // The interstitial / built-in / crash page itself (about:blank) keeps the shown URL and state.
+        let interstitial = (t.tls_error || t.internal || t.crashed) && (url.is_empty() || url == "about:blank");
         // Allowlist follows the page being loaded: switched before its subresources are requested.
         if !url.is_empty() && !interstitial {
             apply_rules(&self.cfg, t, &url);
@@ -1295,6 +1307,7 @@ impl App {
         if started && !interstitial {
             t.tls_error = false;
             t.internal = false;
+            t.crashed = false;
         }
         if !started && interstitial {
             t.loading = false;
@@ -1389,6 +1402,39 @@ impl App {
             s.site = None;
         }
         s.sync(&self.cfg);
+    }
+
+    /// Web process of a tab ended. A hidden tab is simply unloaded (reloads when shown again);
+    /// the active one shows a static crash page whose button reloads `url`, never automatically,
+    /// so a page that runs out of memory again cannot loop. Per-page state is reset.
+    fn web_process_terminated(&mut self, id: u32) {
+        eprintln!("warning: web process of tab {id} terminated (crash / out of memory)");
+        let Some(s) = self.s.as_mut() else { return };
+        let Some(i) = s.tab_idx(id) else { return };
+        let fullscreen = s.video_fullscreen == Some(id);
+        s.video_fullscreen = s.video_fullscreen.filter(|t| *t != id);
+        let active = i == s.active;
+        let t = &mut s.tabs[i];
+        t.loading = false;
+        t.fav_tries = 0;
+        t.blocked = 0;
+        t.tls = "";
+        if active {
+            t.crashed = true;
+            if let Some(v) = &t.view {
+                let _ = v.load_html(&crash_page(&s.lang.borrow(), &t.url));
+            }
+            if s.find_open {
+                s.eval("findCount(0)");
+            }
+            s.site = None;
+        } else {
+            t.drop_view();
+        }
+        s.sync(&self.cfg);
+        if fullscreen {
+            self.resize();
+        }
     }
 
     fn icon(&mut self, id: u32, data: String) {
@@ -2359,6 +2405,39 @@ button {{ margin-top: 16px; font: inherit; color: #fff; background: #5b8def; bor
 <ul>{items}</ul>
 <p>{hint}</p>
 <button onclick="history.back()">{back}</button>
+</main></body></html>"#
+    )
+}
+
+/// Static page shown in a tab whose web process ended (rendered in the tab, no IPC, no script).
+/// The button is a plain link back to the page; offered only for http(s) URLs.
+fn crash_page(lang: &str, url: &str) -> String {
+    let tr = |key: &str| html_escape(&settings::tr(lang, key, &[]));
+    let (title, desc) = (tr("tab_crashed_title"), tr("tab_crashed_desc"));
+    let lower = url.to_ascii_lowercase();
+    let button = if lower.starts_with("https://") || lower.starts_with("http://") {
+        format!(r#"<a class="btn" href="{}">{}</a>"#, html_escape(url), tr("reload"))
+    } else {
+        String::new()
+    };
+    let lang = html_escape(lang);
+    format!(
+        r#"<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><title>{title}</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<style>
+:root {{ color-scheme: dark; }}
+body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #1b1b1f; color: #e6e6e9;
+  font: 14px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; }}
+main {{ max-width: 560px; padding: 32px; }}
+.icon {{ width: 48px; height: 48px; color: #9a9aa3; }}
+h1 {{ font-size: 22px; margin: 16px 0 8px; }}
+p {{ color: #9a9aa3; line-height: 1.5; }}
+.btn {{ display: inline-block; margin-top: 16px; color: #fff; background: #5b8def; border-radius: 8px; padding: 8px 16px; text-decoration: none; }}
+</style></head><body><main>
+<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 10l2 2m0-2l-2 2M13 10l2 2m0-2l-2 2M9 16h6"/></svg>
+<h1>{title}</h1>
+<p>{desc}</p>
+{button}
 </main></body></html>"#
     )
 }

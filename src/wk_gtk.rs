@@ -21,7 +21,7 @@ use tao::{
 use webkit2gtk::{
     CacheModel, CookieManagerExt, TLSErrorsPolicy, DownloadExt, PolicyDecisionExt, PolicyDecisionType,
     ResponsePolicyDecisionExt, SettingsExt, URIRequestExt, URIResponseExt, UserContentManagerExt, WebContext,
-    WebContextExt, WebViewExt, WebsiteDataManagerExt, WebsiteDataTypes,
+    WebContextExt, WebProcessTerminationReason, WebViewExt, WebsiteDataManagerExt, WebsiteDataTypes,
 };
 use wry::{
     NewWindowFeatures, NewWindowResponse, Rect, WebView, WebViewBuilder, WebViewBuilderExtUnix,
@@ -146,6 +146,7 @@ thread_local! {
     static STARTED: RefCell<Option<Rc<Started>>> = const { RefCell::new(None) };
     static ON_TLS: RefCell<Option<Rc<TlsHandler>>> = const { RefCell::new(None) };
     static ON_FULLSCREEN: RefCell<Option<Rc<dyn Fn(u32, bool)>>> = const { RefCell::new(None) };
+    static ON_CRASH: RefCell<Option<Rc<dyn Fn(u32)>>> = const { RefCell::new(None) };
 }
 
 /// Hidden, never-loaded view owning an ephemeral context; views created related to it share
@@ -440,11 +441,29 @@ fn tls_reasons(flags: gio::TlsCertificateFlags) -> Vec<&'static str> {
     if r.is_empty() { vec!["cert_err_unverified"] } else { r }
 }
 
+/// Web content process of a tab ended (crash, out of memory, WebGL hang): `f` gets the tab.
+pub fn on_crash(f: impl Fn(u32) + 'static) {
+    ON_CRASH.with(|o| *o.borrow_mut() = Some(Rc::new(f)));
+}
+
 /// Certificate failures of `v` are reported as tab `tab`. The context's policy is FAIL (see
 /// `root_of`), so the load is already refused; returning true suppresses WebKit's own error page
-/// in favor of Crow's interstitial.
+/// in favor of Crow's interstitial. Web process crashes are reported too (not Crow's own
+/// `terminate_web_process`, which it never calls).
 pub fn watch(v: &WebView, tab: u32) {
     watch_fullscreen(v, tab);
+    v.webview().connect_web_process_terminated(move |_, reason| {
+        let why = match reason {
+            WebProcessTerminationReason::Crashed => "crashed",
+            WebProcessTerminationReason::ExceededMemoryLimit => "exceeded memory limit",
+            WebProcessTerminationReason::TerminatedByApi => return,
+            _ => "terminated",
+        };
+        eprintln!("web process of tab {tab} {why}");
+        if let Some(f) = ON_CRASH.with(|o| o.borrow().clone()) {
+            f(tab);
+        }
+    });
     v.webview().connect_load_failed_with_tls_errors(move |_, uri, _cert, flags| {
         if let Some(f) = ON_TLS.with(|o| o.borrow().clone()) {
             f(tab, uri.to_string(), tls_reasons(flags));
