@@ -1,0 +1,86 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #222226; --line: #33333a; --fg: #e6e6e9; --mute: #9a9aa3; --input: #2a2a2f; --accent: #5b8def; --tile: #1b1b1f;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; --bg: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76; --input: #f0f0f3; --tile: #f6f6f8; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font: 13px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; color: var(--fg);
+    user-select: none; -webkit-user-select: none; cursor: default;
+  }
+  #card { background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .ico { font-size: 22px; line-height: 1; }
+  .who { flex: 1; min-width: 0; }
+  .host { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .state { color: var(--accent); font-size: 12px; margin-top: 2px; }
+  .body { padding: 12px 16px; display: grid; gap: 10px; }
+  .call { color: var(--mute); font-size: 12px; }
+  code { font: 11.5px ui-monospace, "SF Mono", Menlo, "DejaVu Sans Mono", monospace; }
+  .pad { background: var(--tile); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+  .k { color: var(--mute); font-size: 12px; white-space: nowrap; }
+  .v { font-size: 12px; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+  .v.real { color: var(--mute); text-decoration: line-through; }
+  .v.sent { color: var(--accent); font-weight: 600; }
+  .note { color: var(--mute); font-size: 11px; line-height: 1.4; }
+  footer { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); }
+  .btn { font: inherit; color: var(--fg); border: 1px solid var(--line); background: var(--input); padding: 4px 10px; border-radius: 7px; white-space: nowrap; }
+  .btn:hover { border-color: var(--mute); }
+  .spacer { flex: 1; }
+</style>
+</head>
+<body>
+<div id="card"></div>
+<script>
+  // Data comes from Crow's isolated JS world of the tab (real ids; the page never sees them).
+  let D = /*DATA*/;
+  const send = (m) => window.ipc.postMessage(m);
+  const card = document.getElementById('card');
+
+  function h(tag, props = {}, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k.startsWith('on')) el[k] = v; else if (k === 'class') el.className = v; else el.setAttribute(k, v);
+    }
+    for (const k of kids.flat()) if (k != null) el.append(k);
+    return el;
+  }
+  const pair = (k, v, cls) => [h('div', { class: 'k' }, k), h('div', { class: 'v' + (cls ? ' ' + cls : '') }, v)];
+
+  function render() {
+    const pads = (D.report && Array.isArray(D.report.pads)) ? D.report.pads : [];
+    const out = [h('header', {}, h('span', { class: 'ico' }, '🎮'),
+      h('div', { class: 'who' }, h('div', { class: 'host' }, D.host || t('this_page')), h('div', { class: 'state' }, t('gp_state'))))];
+    const body = h('div', { class: 'body' }, h('div', { class: 'call' }, t('gp_requested'), ' ', h('code', {}, 'navigator.getGamepads()')));
+    if (!pads.length) body.append(h('div', { class: 'note' }, t('gp_none')));
+    for (const p of pads) {
+      body.append(h('div', { class: 'pad' },
+        ...pair(t('gp_real'), String(p.id), 'real'),
+        ...pair(t('gp_sent'), D.spoofed, 'sent'),
+        ...pair(t('gp_mapping'), t('gp_unchanged', p.mapping || '—')),
+        ...pair(t('gp_controls'), t('gp_unchanged', p.buttons + ' / ' + p.axes))));
+    }
+    body.append(h('div', { class: 'note' }, t('gp_note')));
+    out.push(body);
+    out.push(h('footer', {},
+      h('button', { class: 'btn', onclick: () => send('gamepad-diag') }, t('gamepad_test_open')),
+      h('div', { class: 'spacer' }),
+      h('button', { class: 'btn', onclick: () => send('site-settings') }, t('settings'))));
+    card.replaceChildren(...out);
+    requestAnimationFrame(() => send('site-size:' + Math.ceil(document.body.scrollHeight)));
+  }
+  window.onLanguage = () => render();
+
+  document.onkeydown = (e) => { if (e.key === 'Escape') send('site-close'); };
+  window.onblur = () => send('site-close');
+  render();
+</script>
+</body>
+</html>
