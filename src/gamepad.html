@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="{{@lang}}">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; frame-ancestors 'none';">
+<title>{{gpd_title}}</title>
+<!-- Static markup only: Crow drives it from its isolated JS world (wk::eval_isolated, gamepad.js),
+     the only place that sees the real hardware id. -->
+<style>
+  :root { color-scheme: dark; --bg: #0b0d11; --card: #14171f; --line: #232834; --fg: #e6e6e9; --mute: #8a90a2; --accent: #6366f1; --ok: #3fb950; }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 36px 28px 56px; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; }
+  h1 { font-size: 24px; font-weight: 600; flex: 1; }
+  .lead { color: var(--mute); margin-bottom: 20px; }
+  .pill { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 12px; border: 1px solid var(--line); color: var(--mute); }
+  .pill.on { color: #fff; background: var(--ok); border-color: var(--ok); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin-bottom: 16px; }
+  svg.pad { width: 100%; height: auto; display: block; }
+  .body { fill: #1b1f2a; stroke: var(--line); stroke-width: 2; }
+  .base { fill: #10131a; stroke: var(--line); stroke-width: 2; }
+  .k { fill: #262b38; stroke: #343a4a; stroke-width: 1.5; transition: fill .06s; }
+  .k.on { fill: var(--accent); stroke: var(--accent); }
+  .stick { fill: #2f3546; stroke: #3d4459; stroke-width: 2; }
+  .stick.on { fill: var(--accent); }
+  .bar { fill: var(--accent); }
+  .lbl { fill: var(--mute); font-size: 11px; font-weight: 600; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+  body:not(.live) svg.pad { opacity: .45; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td { padding: 7px 0; border-top: 1px solid var(--line); vertical-align: top; }
+  tr:first-child td { border-top: 0; }
+  td:first-child { color: var(--mute); width: 38%; padding-right: 12px; }
+  #raw { color: var(--mute); }
+  #spoof { color: var(--accent); font-weight: 600; }
+  pre { font: 12px ui-monospace, "SF Mono", Menlo, "DejaVu Sans Mono", monospace; color: var(--mute); white-space: pre-wrap; margin-top: 10px; min-height: 1em; }
+  h2 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>🎮 {{gpd_title}}</h1>
+    <span id="state" class="pill" data-on="{{gpd_connected}}" data-off="{{gpd_disconnected}}" data-dis="{{gpd_disabled}}">{{gpd_disconnected}}</span>
+  </header>
+  <p class="lead">{{gpd_lead}}</p>
+
+  <section>
+    <svg class="pad" viewBox="0 0 600 330" aria-hidden="true">
+      <rect class="base" x="110" y="18" width="70" height="16" rx="5"/><rect id="lt" class="bar" x="115" y="22" width="0" height="8" rx="3"/>
+      <rect class="base" x="420" y="18" width="70" height="16" rx="5"/><rect id="rt" class="bar" x="425" y="22" width="0" height="8" rx="3"/>
+      <text class="lbl" x="145" y="10">LT</text><text class="lbl" x="455" y="10">RT</text>
+      <rect id="b4" class="k" x="100" y="44" width="90" height="20" rx="8"/><text class="lbl" x="145" y="54">LB</text>
+      <rect id="b5" class="k" x="410" y="44" width="90" height="20" rx="8"/><text class="lbl" x="455" y="54">RB</text>
+      <path class="body" d="M150 74 H450 C520 74 560 120 575 200 C590 280 560 320 520 320 C480 320 460 280 430 262 H170 C140 280 120 320 80 320 C40 320 10 280 25 200 C40 120 80 74 150 74 Z"/>
+      <circle class="base" cx="170" cy="150" r="42"/><circle id="b10" class="stick" cx="170" cy="150" r="20"><title>L3</title></circle>
+      <g id="ls"><circle class="k" cx="170" cy="150" r="8"/></g>
+      <circle class="base" cx="380" cy="222" r="42"/><circle id="b11" class="stick" cx="380" cy="222" r="20"><title>R3</title></circle>
+      <g id="rs"><circle class="k" cx="380" cy="222" r="8"/></g>
+      <rect id="b12" class="k" x="208" y="180" width="24" height="26" rx="4"/>
+      <rect id="b13" class="k" x="208" y="230" width="24" height="26" rx="4"/>
+      <rect id="b14" class="k" x="182" y="206" width="26" height="24" rx="4"/>
+      <rect id="b15" class="k" x="232" y="206" width="26" height="24" rx="4"/>
+      <rect id="b8" class="k" x="252" y="140" width="30" height="16" rx="8"/><text class="lbl" x="267" y="168">⧉</text>
+      <rect id="b9" class="k" x="318" y="140" width="30" height="16" rx="8"/><text class="lbl" x="333" y="168">≡</text>
+      <circle id="b16" class="k" cx="300" cy="108" r="14"/><text class="lbl" x="300" y="108">⌂</text>
+      <circle id="b3" class="k" cx="430" cy="112" r="16"/><text class="lbl" x="430" y="112">Y</text>
+      <circle id="b2" class="k" cx="396" cy="146" r="16"/><text class="lbl" x="396" y="146">X</text>
+      <circle id="b1" class="k" cx="464" cy="146" r="16"/><text class="lbl" x="464" y="146">B</text>
+      <circle id="b0" class="k" cx="430" cy="180" r="16"/><text class="lbl" x="430" y="180">A</text>
+    </svg>
+    <pre id="axes"></pre>
+  </section>
+
+  <section>
+    <h2>{{gpd_ids}}</h2>
+    <table>
+      <tr><td>{{gpd_real}}</td><td id="raw">—</td></tr>
+      <tr><td>{{gpd_spoofed}}</td><td id="spoof">—</td></tr>
+      <tr><td>{{gpd_mapping}}</td><td id="map">—</td></tr>
+      <tr><td>{{gpd_counts}}</td><td id="counts">—</td></tr>
+    </table>
+  </section>
+</main>
+</body>
+</html>
