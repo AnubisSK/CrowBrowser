@@ -996,8 +996,13 @@ impl App {
     fn command(&mut self, cmd: &str) {
         let (name, arg) = cmd.split_once(':').unwrap_or((cmd, ""));
         match name {
+            // Only while the press that asked for it is still held (IPC is async: after a quick
+            // click the button is already up) and never in fullscreen, where there is nothing to move.
             "drag" => {
-                let _ = self.ctx.window.drag_window();
+                let w = &self.ctx.window;
+                if w.fullscreen().is_none() && wk::left_button_down() {
+                    let _ = w.drag_window();
+                }
             }
             "quit" | "win-close" => self.quit(),
             "win-min" => self.ctx.window.set_minimized(true),
@@ -1408,7 +1413,7 @@ impl App {
     /// the active one shows a static crash page whose button reloads `url`, never automatically,
     /// so a page that runs out of memory again cannot loop. Per-page state is reset.
     fn web_process_terminated(&mut self, id: u32) {
-        eprintln!("warning: web process of tab {id} terminated (crash / out of memory)");
+        eprintln!("[CrowBrowser] WebProcess terminated for tab {id}");
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let fullscreen = s.video_fullscreen == Some(id);
@@ -2409,35 +2414,44 @@ button {{ margin-top: 16px; font: inherit; color: #fff; background: #5b8def; bor
     )
 }
 
-/// Static page shown in a tab whose web process ended (rendered in the tab, no IPC, no script).
-/// The button is a plain link back to the page; offered only for http(s) URLs.
+/// Static page shown in a tab whose web process ended (rendered in the tab, no IPC). "Reload"
+/// replaces it with `url` (http(s) only: no `javascript:` / `file:` from a crafted URL); the URL
+/// is JSON-encoded for the JS string, then HTML-escaped for the attribute, so neither context
+/// can be broken out of.
 fn crash_page(lang: &str, url: &str) -> String {
     let tr = |key: &str| html_escape(&settings::tr(lang, key, &[]));
-    let (title, desc) = (tr("tab_crashed_title"), tr("tab_crashed_desc"));
+    let (title, desc, back) = (tr("tab_crashed_title"), tr("tab_crashed_desc"), tr("back"));
     let lower = url.to_ascii_lowercase();
-    let button = if lower.starts_with("https://") || lower.starts_with("http://") {
-        format!(r#"<a class="btn" href="{}">{}</a>"#, html_escape(url), tr("reload"))
+    let reload = if lower.starts_with("https://") || lower.starts_with("http://") {
+        let target = html_escape(&format!("window.location.replace({})", js(url)));
+        format!(r#"<button class="primary" onclick="{target}">{}</button>"#, tr("crash_reload"))
     } else {
         String::new()
     };
+    let shown = if url.is_empty() { String::new() } else { format!(r#"<p class="url">{}</p>"#, html_escape(url)) };
     let lang = html_escape(lang);
     format!(
         r#"<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><title>{title}</title>
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <style>
 :root {{ color-scheme: dark; }}
-body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #1b1b1f; color: #e6e6e9;
+body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0d11; color: #e6e6e9;
   font: 14px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; }}
-main {{ max-width: 560px; padding: 32px; }}
-.icon {{ width: 48px; height: 48px; color: #9a9aa3; }}
-h1 {{ font-size: 22px; margin: 16px 0 8px; }}
-p {{ color: #9a9aa3; line-height: 1.5; }}
-.btn {{ display: inline-block; margin-top: 16px; color: #fff; background: #5b8def; border-radius: 8px; padding: 8px 16px; text-decoration: none; }}
+main {{ max-width: 520px; margin: 24px; padding: 32px; background: #14171f; border: 1px solid #232834; border-radius: 14px; }}
+.icon {{ width: 44px; height: 44px; color: #6366f1; }}
+h1 {{ font-size: 20px; margin: 16px 0 8px; }}
+p {{ color: #9a9aa3; line-height: 1.5; margin: 0 0 12px; }}
+.url {{ font-size: 12px; overflow-wrap: anywhere; color: #6b7080; }}
+.actions {{ display: flex; gap: 8px; margin-top: 20px; }}
+button {{ font: inherit; border-radius: 8px; padding: 8px 16px; cursor: pointer; }}
+.primary {{ color: #fff; background: #6366f1; border: 1px solid #6366f1; }}
+.secondary {{ color: #e6e6e9; background: transparent; border: 1px solid #232834; }}
 </style></head><body><main>
-<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 10l2 2m0-2l-2 2M13 10l2 2m0-2l-2 2M9 16h6"/></svg>
+<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l10 18H2z"/><path d="M12 10v4M12 17.5v.01"/></svg>
 <h1>{title}</h1>
 <p>{desc}</p>
-{button}
+{shown}
+<div class="actions">{reload}<button class="secondary" onclick="window.history.back()">{back}</button></div>
 </main></body></html>"#
     )
 }

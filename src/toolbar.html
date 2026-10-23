@@ -197,6 +197,14 @@
 <script>
   const $ = (id) => document.getElementById(id);
   const send = (m) => window.ipc.postMessage(m);
+  // Window drag: plain left press on the empty strip itself, never on controls; the default
+  // (focus/selection) is suppressed so WebKit does not handle the same press too. A double click
+  // keeps its own meaning instead of starting a second drag.
+  const dragOn = (el, ok) => el.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.detail > 1 || !ok(e) || e.target.closest('button, input, .tab, .no-drag')) return;
+    e.preventDefault();
+    send('drag');
+  });
   const url = $('url'), fq = $('fq');
   let S = { tabs: [], active: 0 };
 
@@ -229,9 +237,9 @@
   };
   url.onfocus = () => setTimeout(() => url.select(), 0);
 
-  $('tabrow').onmousedown = (e) => { if (e.target.id === 'tabrow' || e.target.id === 'tabs') send('drag'); };
+  dragOn($('tabrow'), (e) => e.target.id === 'tabrow' || e.target.id === 'tabs');
   document.querySelectorAll('#lights span').forEach(l => l.onclick = () => send(l.dataset.c));
-  $('lights').onmousedown = (e) => { if (e.target.id === 'lights') send('drag'); };
+  dragOn($('lights'), (e) => e.target.id === 'lights');
   function setFocus(on) { document.body.classList.toggle('blurred', !on); }
   $('tabrow').ondblclick = (e) => { if (e.target.id === 'tabrow' || e.target.id === 'tabs') send('new-tab'); };
 

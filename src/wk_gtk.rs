@@ -279,6 +279,11 @@ pub fn eval_isolated(v: &WebView, js: &str, done: impl FnOnce(String) + 'static)
     });
 }
 
+/// GTK's move drag checks the pointer itself; nothing to guard here.
+pub fn left_button_down() -> bool {
+    true
+}
+
 pub fn set_bounds(v: &WebView, rect: Rect) {
     let w = v.webview();
     let scale = w.scale_factor() as f64;

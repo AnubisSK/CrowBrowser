@@ -208,6 +208,13 @@ pub fn eval_isolated(v: &WebView, js: &str, done: impl FnOnce(String) + 'static)
     }
 }
 
+/// Left mouse button is held right now. `drag_window` replays AppKit's current event; started
+/// after the button was released, AppKit logs "Window move completed without beginning".
+pub fn left_button_down() -> bool {
+    let pressed: usize = unsafe { msg_send![objc2::class!(NSEvent), pressedMouseButtons] };
+    pressed & 1 != 0
+}
+
 pub fn set_bounds(v: &WebView, rect: Rect) {
     let _ = v.set_bounds(rect);
 }

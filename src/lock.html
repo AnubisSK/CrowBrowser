@@ -65,6 +65,14 @@
   const MODE = /*MODE*/;
   const $ = (id) => document.getElementById(id);
   const send = (m) => window.ipc.postMessage(m);
+  // Window drag: plain left press on the empty strip itself, never on controls; the default
+  // (focus/selection) is suppressed so WebKit does not handle the same press too. A double click
+  // keeps its own meaning instead of starting a second drag.
+  const dragOn = (el, ok) => el.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.detail > 1 || !ok(e) || e.target.closest('button, input, .tab, .no-drag')) return;
+    e.preventDefault();
+    send('drag');
+  });
   const create = MODE === 'create';
 
   $('h').textContent = t(create ? 'welcome' : 'locked');
@@ -75,10 +83,10 @@
   $('warn').style.display = create ? '' : 'none';
   $('reset').style.display = create ? 'none' : '';
 
-  document.body.onmousedown = (e) => { if (e.target === document.body) send('drag'); };
+  dragOn(document.body, (e) => e.target === document.body);
 
   document.querySelectorAll('#lights span').forEach(l => l.onclick = () => send(l.dataset.c));
-  $('lights').onmousedown = (e) => { if (e.target.id === 'lights') send('drag'); };
+  dragOn($('lights'), (e) => e.target.id === 'lights');
   function setFocus(on) { document.body.classList.toggle('blurred', !on); }
 
   $('card').onsubmit = (e) => {
