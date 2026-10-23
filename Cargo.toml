@@ -31,6 +31,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 objc2-web-kit = { version = "0.3", default-features = false, features = [
     "std", "block2", "WKWebView", "WKWebsiteDataStore", "WKWebsiteDataRecord", "WKHTTPCookieStore",
     "WKWebViewConfiguration", "WKUserContentController", "WKContentRuleList", "WKContentRuleListStore",
+    "WKContentWorld", "WKFrameInfo",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

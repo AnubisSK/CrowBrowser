@@ -11,8 +11,8 @@ use objc2_foundation::{
     NSHTTPCookieValue, NSMutableDictionary, NSString, ns_string,
 };
 use objc2_web_kit::{
-    WKContentRuleList, WKContentRuleListStore, WKUserContentController, WKWebViewConfiguration,
-    WKWebsiteDataStore,
+    WKContentRuleList, WKContentRuleListStore, WKContentWorld, WKUserContentController,
+    WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use objc2::{
     encode::{Encoding, RefEncode},
@@ -111,6 +111,25 @@ fn storage_prefs(c: &WKWebViewConfiguration) {
     }
 }
 
+/// Local files: a `file:` page may read neither other files nor other origins. WebKit's defaults;
+/// set explicitly via the private keys (guarded; the public-looking setters do not exist) so a
+/// changed default cannot open them up.
+#[cfg(target_os = "macos")]
+fn file_prefs(c: &WKWebViewConfiguration) {
+    unsafe {
+        let ok: Bool = msg_send![c, respondsToSelector: sel!(_setAllowUniversalAccessFromFileURLs:)];
+        if ok.as_bool() {
+            let _: () = msg_send![c, _setAllowUniversalAccessFromFileURLs: false];
+        }
+        let prefs: *mut AnyObject = msg_send![c, preferences];
+        let Some(prefs) = prefs.as_ref() else { return };
+        let ok: Bool = msg_send![prefs, respondsToSelector: sel!(_setAllowFileAccessFromFileURLs:)];
+        if ok.as_bool() {
+            let _: () = msg_send![prefs, _setAllowFileAccessFromFileURLs: false];
+        }
+    }
+}
+
 /// WebKit runs element fullscreen in its own window on macOS: nothing for the app to resize.
 pub fn on_fullscreen(_f: impl Fn(u32, bool) + 'static) {}
 
@@ -123,6 +142,7 @@ pub fn config(store: &Store, adblock: bool) -> Config {
         }
         media_prefs(&c);
         storage_prefs(&c);
+        file_prefs(&c);
         Config(c)
     }
 }
@@ -132,6 +152,7 @@ pub fn popup_config(features: NewWindowFeatures) -> Config {
     let c = features.opener.target_configuration;
     media_prefs(&c);
     storage_prefs(&c);
+    file_prefs(&c);
     Config(c)
 }
 
@@ -158,6 +179,30 @@ pub fn ui_builder<'a>() -> WebViewBuilder<'a> {
 
 pub fn attach(b: WebViewBuilder, rect: Rect, window: &Window) -> wry::Result<WebView> {
     b.with_bounds(rect).build_as_child(window)
+}
+
+/// Runs `js` in the main frame in Crow's own JS world: same DOM, but globals set there are
+/// invisible to the page's scripts. `done` gets the result if it is a string, else "".
+pub fn eval_isolated(v: &WebView, js: &str, done: impl FnOnce(String) + 'static) {
+    let done = Cell::new(Some(done));
+    let block = RcBlock::new(move |res: *mut AnyObject, _err: *mut NSError| {
+        let s = unsafe { res.as_ref() }
+            .and_then(|o| o.downcast_ref::<NSString>())
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        if let Some(f) = done.take() {
+            f(s);
+        }
+    });
+    unsafe {
+        let world = WKContentWorld::worldWithName(ns_string!("crow"), mtm());
+        v.webview().evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+            &NSString::from_str(js),
+            None,
+            &world,
+            Some(&block),
+        );
+    }
 }
 
 pub fn set_bounds(v: &WebView, rect: Rect) {

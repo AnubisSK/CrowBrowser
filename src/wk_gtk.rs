@@ -47,6 +47,13 @@ pub enum Tls {
     Unverified,
 }
 
+// String results of `eval_isolated` (javascriptcore-rs is not a direct dependency).
+#[link(name = "javascriptcoregtk-4.1")]
+unsafe extern "C" {
+    fn jsc_value_is_string(value: *mut c_void) -> glib::ffi::gboolean;
+    fn jsc_value_to_string(value: *mut c_void) -> *mut c_char;
+}
+
 #[allow(non_camel_case_types)]
 type GAsyncReadyCallback =
     Option<unsafe extern "C" fn(*mut glib::gobject_ffi::GObject, *mut gio::ffi::GAsyncResult, *mut c_void)>;
@@ -253,6 +260,24 @@ fn start_downloads(w: &webkit2gtk::WebView, d: &webkit2gtk::PolicyDecision, t: P
     true
 }
 
+/// Runs `js` in the main frame in Crow's own JS world: same DOM, but globals set there are
+/// invisible to the page's scripts. `done` gets the result if it is a string, else "".
+pub fn eval_isolated(v: &WebView, js: &str, done: impl FnOnce(String) + 'static) {
+    v.webview().evaluate_javascript(js, Some("crow"), None, None::<&gio::Cancellable>, move |res| {
+        let s = res
+            .ok()
+            .and_then(|val| unsafe {
+                let p = val.as_ptr().cast::<c_void>();
+                (jsc_value_is_string(p) != 0).then(|| {
+                    let g: glib::GString = glib::translate::from_glib_full(jsc_value_to_string(p));
+                    g.to_string()
+                })
+            })
+            .unwrap_or_default();
+        done(s);
+    });
+}
+
 pub fn set_bounds(v: &WebView, rect: Rect) {
     let w = v.webview();
     let scale = w.scale_factor() as f64;
@@ -436,13 +461,18 @@ pub fn on_fullscreen(f: impl Fn(u32, bool) + 'static) {
 
 /// Enables the Fullscreen API on the view; returning false keeps WebKit's default handler,
 /// which fullscreens the toplevel GTK (tao) window. Web storage (in memory, the context is
-/// ephemeral) is enabled explicitly too, for sites that hydrate from it.
+/// ephemeral) is enabled explicitly too, for sites that hydrate from it. A `file:` page may read
+/// neither other files nor other origins, and page console output never reaches stdout / the
+/// journal (WebKit's defaults, set explicitly).
 fn watch_fullscreen(v: &WebView, tab: u32) {
     let wv = v.webview();
     if let Some(s) = WebViewExt::settings(&wv) {
         s.set_enable_fullscreen(true);
         s.set_enable_html5_local_storage(true);
         s.set_enable_html5_database(true);
+        s.set_allow_file_access_from_file_urls(false);
+        s.set_allow_universal_access_from_file_urls(false);
+        s.set_enable_write_console_messages_to_stdout(false);
     }
     let notify = move |on: bool| {
         if let Some(f) = ON_FULLSCREEN.with(|o| o.borrow().clone()) {

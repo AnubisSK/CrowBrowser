@@ -41,6 +41,7 @@ const RESTORE_TIMEOUT: Duration = Duration::from_secs(3);
 const FAV_POLL: Duration = Duration::from_millis(500);
 const FAV_TRIES: u8 = 8;
 const FAV_MAX: usize = 48 * 1024;
+/// Read in Crow's isolated JS world (`wk::eval_isolated`), never the page's.
 const FAV_READ: &str = "window.__crowIcon || ''";
 const MAX_ALLOW: usize = 1000;
 /// Reopen-closed-tab memory and download list are bounded (oldest entries go first).
@@ -61,7 +62,8 @@ const FIND_JS: &str = r"(function (q, dir) {
   return ok ? n : 0;
 })";
 
-/// Runs in the page: tries <link rel=icon> candidates then /favicon.ico, re-encodes the first
+/// Runs in Crow's isolated JS world of the page (same DOM, own globals: `__crowIcon` is invisible
+/// to page scripts): tries <link rel=icon> candidates then /favicon.ico, re-encodes the first
 /// one that loads into a PNG data URL (only CORS-readable images survive the canvas).
 const FAV_JS: &str = r#"(function () {
   window.__crowIcon = '';
@@ -157,7 +159,7 @@ pub enum UserEvent {
     /// Result of a filter-list download the user asked for.
     /// Manual list refresh finished: failed lists as (`locales.json` key, list name).
     RulesNote(Vec<(&'static str, &'static str)>),
-    /// Result of `FAV_READ` in a tab (JSON string).
+    /// Result of `FAV_READ` in a tab.
     Icon {
         tab: u32,
         data: String,
@@ -307,6 +309,8 @@ impl TabCtx {
     /// Internal UI with `window.ipc`. Strict CSP: no network, no external scripts/styles/frames;
     /// only its own inline code. Tab views never get an IPC handler, so wry never injects
     /// `window.ipc` there (popups inherit the opener tab's configuration, also without IPC).
+    /// The view never leaves its own document (`with_html` loads as `about:blank`): any other
+    /// navigation is refused, so `window.ipc` can never reach web content.
     fn ui_view(&self, html: &str, rect: Rect) -> Option<WebView> {
         const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'\">";
         // Dictionaries + `t()` go in first, so the page's own script can use them right away.
@@ -320,6 +324,7 @@ impl TabCtx {
             .with_html(wk::ui_html(html))
             .with_background_color(bg_of(&self.window))
             .with_focused(true)
+            .with_navigation_handler(|url| url == "about:blank")
             .with_ipc_handler(move |req| {
                 let _ = p.send_event(UserEvent::Ipc(req.into_body()));
             });
@@ -468,7 +473,7 @@ impl Session {
             };
             t.fav_tries -= 1;
             let (p, tab) = (proxy.clone(), t.id);
-            let _ = v.evaluate_script_with_callback(FAV_READ, move |data| {
+            wk::eval_isolated(v, FAV_READ, move |data| {
                 let _ = p.send_event(UserEvent::Icon { tab, data });
             });
             if t.fav_tries > 0 {
@@ -904,7 +909,7 @@ impl App {
                     s.refresh_panel(&self.cfg);
                 }
             }
-            UserEvent::Icon { tab, data } => self.icon(tab, &data),
+            UserEvent::Icon { tab, data } => self.icon(tab, data),
             UserEvent::Update { result, manual } => self.update_result(result, manual),
             UserEvent::UpdateSaved(path) => {
                 let Some(s) = self.s.as_mut() else { return };
@@ -1329,7 +1334,7 @@ impl App {
         };
         match &t.view {
             Some(v) if url.starts_with("http") => {
-                let _ = v.evaluate_script(FAV_JS);
+                wk::eval_isolated(v, FAV_JS, |_| {});
                 t.fav_tries = FAV_TRIES;
                 s.fav_due.get_or_insert_with(|| Instant::now() + FAV_POLL);
             }
@@ -1386,10 +1391,9 @@ impl App {
         s.sync(&self.cfg);
     }
 
-    fn icon(&mut self, id: u32, res: &str) {
+    fn icon(&mut self, id: u32, data: String) {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
-        let data: String = serde_json::from_str(res).unwrap_or_default();
         if data.is_empty() {
             return; // still loading, polled again
         }
