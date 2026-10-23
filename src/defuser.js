@@ -1,9 +1,14 @@
 (function () {
   'use strict';
   // Sites whose app code (web components, Turbo frames, fetch-driven hydration, Gmail's "adn ads"
-  // message containers) must see the native fetch, Function.prototype.toString and layout
-  // getters, and that run no anti-adblock walls: nothing is patched there.
-  if (/(^|\.)(github\.com|google\.com)$/i.test(location.hostname)) return;
+  // message containers, admin consoles, sign-in and payment frames) must see the native fetch,
+  // Function.prototype.toString and layout getters, and that run no anti-adblock walls: nothing
+  // is patched there. about:blank / srcdoc frames (editors, modals) count as the page that
+  // created them.
+  const TRUSTED = /(^|\.)(github\.com|google\.com|booking\.com|stripe\.com|stripe\.network)$|^accounts\./i;
+  const hostOf = (o) => { try { return new URL(o).hostname; } catch (e) { return ''; } };
+  const host = location.hostname || hostOf((location.ancestorOrigins || [])[0]);
+  if (TRUSTED.test(host)) return;
   // Every replaced function reports the source of the native one it stands for, so
   // `Function.prototype.toString`, `__lookupGetter__(...).toString()` and `.name` checks see
   // "[native code]" (the toString override masks itself the same way).
