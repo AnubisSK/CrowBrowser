@@ -1,6 +1,6 @@
 # Funkcie
 
-Prehľad všetkého, čo Crow vie (verzia 0.1.1).
+Prehľad všetkého, čo Crow vie (verzia 0.1.2).
 
 ## Obsah
 
