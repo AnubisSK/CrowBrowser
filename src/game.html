@@ -125,9 +125,10 @@
     for (const k of keys) { k.x -= speed * dt; k.bob += dt * 3; }
     towers = towers.filter((o) => o.x + o.w > -10);
     keys = keys.filter((k) => k.x > -20 && !k.taken);
-    // Collisions: crow as a circle against tower rectangles, the ground and the sky.
+    // Collisions: crow as a circle against tower rectangles and the ground; the sky only stops it.
     const r = 13 * scale;
-    if (crow.y + r >= GROUND || crow.y - r <= 0) return over();
+    if (crow.y - r < 0) { crow.y = r; crow.vy = 0; }
+    if (crow.y + r >= GROUND) return over();
     for (const o of towers) {
       if (crow.x + r > o.x && crow.x - r < o.x + o.w && (crow.y - r < o.top || crow.y + r > o.top + o.gap)) return over();
     }
@@ -165,7 +166,7 @@
     const wing = state === 'play' || state === 'ready' ? Math.sin(t * 14) * 0.5 + crow.flap * 0.6 : 0.2;
     ctx.save();
     ctx.translate(x, y); ctx.rotate(tilt); ctx.scale(scale, scale);
-    ctx.fillStyle = '#05060a'; ctx.strokeStyle = '#3b4157'; ctx.lineWidth = 1.5;
+    ctx.fillStyle = '#05060a'; ctx.strokeStyle = '#6b7396'; ctx.lineWidth = 1.5;
     // Tail
     ctx.beginPath(); ctx.moveTo(-14, -2); ctx.lineTo(-28, -8); ctx.lineTo(-26, 2); ctx.lineTo(-28, 9); ctx.lineTo(-14, 4); ctx.closePath();
     ctx.fill(); ctx.stroke();
@@ -223,7 +224,7 @@
   function draw() {
     ctx.fillStyle = SKY; ctx.fillRect(0, 0, W, H);
     ctx.fillStyle = 'rgba(230, 230, 233, 0.5)';
-    for (const s of stars) { ctx.beginPath(); ctx.arc((s.x * W - dist * 0.02) % W + (s.x * W - dist * 0.02 < 0 ? W : 0), s.y * H, s.r, 0, 6.28); ctx.fill(); }
+    for (const s of stars) { ctx.beginPath(); ctx.arc((((s.x * W - dist * 0.02) % W) + W) % W, s.y * H, s.r, 0, 6.28); ctx.fill(); }
     // Moon
     ctx.save(); ctx.shadowColor = 'rgba(251, 191, 36, .4)'; ctx.shadowBlur = 30; ctx.fillStyle = '#1d2230';
     ctx.beginPath(); ctx.arc(W * 0.82, H * 0.18, 34 * scale, 0, 6.28); ctx.fill(); ctx.restore();

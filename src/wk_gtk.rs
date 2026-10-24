@@ -147,6 +147,7 @@ thread_local! {
     static ON_TLS: RefCell<Option<Rc<TlsHandler>>> = const { RefCell::new(None) };
     static ON_FULLSCREEN: RefCell<Option<Rc<dyn Fn(u32, bool)>>> = const { RefCell::new(None) };
     static ON_CRASH: RefCell<Option<Rc<dyn Fn(u32)>>> = const { RefCell::new(None) };
+    static ON_NET_ERROR: RefCell<Option<Rc<dyn Fn(u32, String, &'static str)>>> = const { RefCell::new(None) };
     /// Hidden root view of each container's own ephemeral context (see `new_container_store`).
     static CONTAINER_ROOTS: RefCell<Vec<webkit2gtk::WebView>> = const { RefCell::new(Vec::new()) };
     /// Download prompt hookup, also attached to container contexts.
@@ -506,6 +507,31 @@ fn tls_reasons(flags: gio::TlsCertificateFlags) -> Vec<&'static str> {
     if r.is_empty() { vec!["cert_err_unverified"] } else { r }
 }
 
+/// The main page of a tab could not be loaded (network): `f` gets tab, URL and reason.
+pub fn on_net_error(f: impl Fn(u32, String, &'static str) + 'static) {
+    ON_NET_ERROR.with(|o| *o.borrow_mut() = Some(Rc::new(f)));
+}
+
+/// Reason (`locales.json` key) of a failed page load, or None when it is not an error to show:
+/// cancelled loads and policy decisions (downloads, MIME types WebKit hands elsewhere).
+fn net_reason(e: &glib::Error) -> Option<&'static str> {
+    use gio::IOErrorEnum as Io;
+    if e.kind::<webkit2gtk::PolicyError>().is_some() || e.matches(webkit2gtk::NetworkError::Cancelled) || e.matches(Io::Cancelled) {
+        return None;
+    }
+    Some(if e.kind::<gio::ResolverError>().is_some() {
+        "net_dns"
+    } else {
+        match e.kind::<Io>() {
+            Some(Io::TimedOut) => "net_timeout",
+            Some(Io::ConnectionRefused) => "net_refused",
+            Some(Io::NetworkUnreachable | Io::HostUnreachable) => "net_offline",
+            Some(Io::ConnectionClosed | Io::BrokenPipe) => "net_lost",
+            _ => "net_generic",
+        }
+    })
+}
+
 /// Web content process of a tab ended (crash, out of memory, WebGL hang): `f` gets the tab.
 pub fn on_crash(f: impl Fn(u32) + 'static) {
     ON_CRASH.with(|o| *o.borrow_mut() = Some(Rc::new(f)));
@@ -528,6 +554,14 @@ pub fn watch(v: &WebView, tab: u32) {
         if let Some(f) = ON_CRASH.with(|o| o.borrow().clone()) {
             f(tab);
         }
+    });
+    // Network failures get Crow's page (with the offline game) instead of WebKit's own.
+    v.webview().connect_load_failed(move |_, _, uri, error| {
+        let Some(reason) = net_reason(error) else { return false };
+        if let Some(f) = ON_NET_ERROR.with(|o| o.borrow().clone()) {
+            f(tab, uri.to_string(), reason);
+        }
+        true
     });
     v.webview().connect_load_failed_with_tls_errors(move |_, uri, _cert, flags| {
         if let Some(f) = ON_TLS.with(|o| o.borrow().clone()) {

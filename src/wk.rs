@@ -38,6 +38,8 @@ pub type Store = Retained<WKWebsiteDataStore>;
 type TlsHandler = dyn Fn(u32, String, Vec<&'static str>);
 /// Web process crash callback: tab.
 type CrashHandler = dyn Fn(u32);
+/// Network failure callback: tab, URL, reason (`locales.json` key).
+type NetHandler = dyn Fn(u32, String, &'static str);
 
 /// Engine-confirmed connection security of a committed page.
 #[derive(Clone, Copy, PartialEq)]
@@ -59,6 +61,7 @@ thread_local! {
     static ON_BLOCKED: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
     static ON_TLS: RefCell<Option<Box<TlsHandler>>> = const { RefCell::new(None) };
     static ON_CRASH: RefCell<Option<Box<CrashHandler>>> = const { RefCell::new(None) };
+    static ON_NET_ERROR: RefCell<Option<Box<NetHandler>>> = const { RefCell::new(None) };
     /// Blocked loads per domain since the last `take_blocked_hosts`.
     static BLOCKED_HOSTS: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
     /// URLs the user confirmed in the download prompt; consumed by the next download of that URL.
@@ -476,6 +479,25 @@ fn tls_reason(code: isize) -> Option<&'static str> {
     })
 }
 
+/// NSURLErrorDomain codes of a page that could not be reached (offline, DNS, refused, timeout).
+/// Cancelled loads (-999) and downloads (WebKitErrorDomain) are not errors to show.
+fn net_reason(code: isize) -> Option<&'static str> {
+    Some(match code {
+        -1009 | -1020 => "net_offline",
+        -1003 | -1006 => "net_dns",
+        -1004 => "net_refused",
+        -1001 => "net_timeout",
+        -1005 => "net_lost",
+        -1000 | -1002 | -1008 | -1011 | -1017 | -1018 | -1019 => "net_generic",
+        _ => return None,
+    })
+}
+
+/// The main page of a tab could not be loaded (network): `f` gets tab, URL and reason.
+pub fn on_net_error(f: impl Fn(u32, String, &'static str) + 'static) {
+    ON_NET_ERROR.with(|o| *o.borrow_mut() = Some(Box::new(f)));
+}
+
 /// Web content process of a tab ended (crash, out of memory, WebGL hang): `f` gets the tab.
 pub fn on_crash(f: impl Fn(u32) + 'static) {
     ON_CRASH.with(|o| *o.borrow_mut() = Some(Box::new(f)));
@@ -510,13 +532,20 @@ unsafe extern "C-unwind" fn nav_failed(
         let url = url.cast::<NSString>().as_ref().map(std::string::ToString::to_string).unwrap_or_default();
         (domain.as_ref().map(std::string::ToString::to_string).unwrap_or_default(), code, url)
     };
-    let tab = tab_of(web_view);
-    let (Some(tab), Some(reason)) = (tab, tls_reason(code).filter(|_| domain == "NSURLErrorDomain")) else { return };
-    ON_TLS.with(|f| {
-        if let Some(f) = &*f.borrow() {
-            f(tab, url, vec![reason]);
-        }
-    });
+    let (Some(tab), true) = (tab_of(web_view), domain == "NSURLErrorDomain") else { return };
+    if let Some(reason) = tls_reason(code) {
+        ON_TLS.with(|f| {
+            if let Some(f) = &*f.borrow() {
+                f(tab, url, vec![reason]);
+            }
+        });
+    } else if let Some(reason) = net_reason(code) {
+        ON_NET_ERROR.with(|f| {
+            if let Some(f) = &*f.borrow() {
+                f(tab, url, reason);
+            }
+        });
+    }
 }
 
 /// Key of the tab id associated with a WKWebView (address of this static, never dereferenced).

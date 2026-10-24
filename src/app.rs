@@ -198,6 +198,12 @@ pub enum UserEvent {
         tab: u32,
         data: String,
     },
+    /// The tab's page could not be loaded (offline, DNS, refused, timeout): reason key.
+    NetError {
+        tab: u32,
+        url: String,
+        reason: &'static str,
+    },
     /// Panic wipe of WebKit's store finished: the vault is saved without the session.
     StoreWiped,
     /// The tab's web content process ended (crash, out of memory, WebGL hang).
@@ -488,6 +494,8 @@ struct Tab {
     internal: bool,
     /// Showing the crash page for `url` (web process ended).
     crashed: bool,
+    /// Showing the network error page (with the offline game) for `url`.
+    net_error: bool,
     /// The current page read the gamepads (toolbar chip).
     gamepad: bool,
     /// WebGL contexts refused on the current page (site has WebGL off).
@@ -522,6 +530,7 @@ impl Tab {
             tls_error: false,
             internal: false,
             crashed: false,
+            net_error: false,
             gamepad: false,
             webgl_blocks: 0,
             video: false,
@@ -932,6 +941,10 @@ impl App {
             let _ = p.send_event(UserEvent::TlsError { tab, url, reasons });
         });
         let p = proxy.clone();
+        wk::on_net_error(move |tab, url, reason| {
+            let _ = p.send_event(UserEvent::NetError { tab, url, reason });
+        });
+        let p = proxy.clone();
         wk::on_crash(move |tab_id| {
             let _ = p.send_event(UserEvent::WebProcessTerminated { tab_id });
         });
@@ -1153,6 +1166,7 @@ impl App {
             }
             UserEvent::TlsError { tab, url, reasons } => self.tls_error(tab, url, &reasons),
             UserEvent::WebProcessTerminated { tab_id } => self.web_process_terminated(tab_id),
+            UserEvent::NetError { tab, url, reason } => self.net_error(tab, url, reason),
             UserEvent::StoreWiped => {
                 let Some(s) = self.s.as_mut() else { return };
                 s.dirty = true;
@@ -1628,8 +1642,8 @@ impl App {
         let t = &mut s.tabs[i];
         // The interstitial / built-in / crash page itself (about:blank, built-in pages under
         // `INTERNAL_BASE`) keeps the shown URL and state.
-        let local = url.is_empty() || url == "about:blank" || (t.internal && url.starts_with(INTERNAL_BASE));
-        let interstitial = (t.tls_error || t.internal || t.crashed) && local;
+        let local = url.is_empty() || url == "about:blank" || url.starts_with(INTERNAL_BASE);
+        let interstitial = (t.tls_error || t.internal || t.crashed || t.net_error) && local;
         // Allowlist follows the page being loaded: switched before its subresources are requested.
         if !url.is_empty() && !interstitial {
             apply_rules(&self.cfg, t, &url);
@@ -1638,6 +1652,7 @@ impl App {
             t.tls_error = false;
             t.internal = false;
             t.crashed = false;
+            t.net_error = false;
             t.gamepad = false;
             t.webgl_blocks = 0;
             t.video = false;
@@ -1869,6 +1884,28 @@ impl App {
         if changed {
             s.sync(&self.cfg);
         }
+    }
+
+    /// The page could not be reached: Crow's error page with a retry link and the offline game,
+    /// shown in the tab (no IPC) under `INTERNAL_BASE`; the address bar keeps the failed URL.
+    fn net_error(&mut self, id: u32, url: String, reason: &'static str) {
+        let Some(s) = self.s.as_mut() else { return };
+        let Some(i) = s.tab_idx(id) else { return };
+        let t = &mut s.tabs[i];
+        t.loading = false;
+        t.net_error = true;
+        t.tls = "";
+        t.icon.clear();
+        if !url.is_empty() {
+            t.url = url;
+        }
+        if let Some(v) = &t.view {
+            wk::load_internal(v, &game_page(&s.lang.borrow(), Some((reason, &t.url))), INTERNAL_BASE);
+        }
+        if i == s.active {
+            s.site = None;
+        }
+        s.sync(&self.cfg);
     }
 
     fn icon(&mut self, id: u32, data: String) {
@@ -2331,7 +2368,7 @@ impl App {
             }
             // Reload on the certificate interstitial or the crash page loads the URL itself (a
             // plain reload would only repeat the local page); a built-in page is rendered again.
-            "reload" if s.cur().is_some_and(|t| t.tls_error || t.internal || t.crashed) => {
+            "reload" if s.cur().is_some_and(|t| t.tls_error || t.internal || t.crashed || t.net_error) => {
                 let i = s.active;
                 let page = s.internal(&s.tabs[i].url, &self.cfg);
                 let t = &mut s.tabs[i];
@@ -3098,6 +3135,8 @@ const CHANGELOG_URL: &str = "crow:changelog";
 const GAMEPAD_URL: &str = "crow:gamepad";
 /// Session shield dashboard (`shields.html` + `Session::shields_html`).
 const SHIELDS_URL: &str = "crow:shields";
+/// Offline game Crow Flight (`game.html`), also part of the network error page.
+const GAME_URL: &str = "crow:game";
 /// Document address of built-in pages. A secure origin, so APIs restricted to secure contexts
 /// work there (WebKit hands gamepads only to them; `about:blank` from `load_html` is not one).
 /// `.invalid` never resolves and the pages load nothing (CSP `default-src 'none'`).
@@ -3112,6 +3151,7 @@ fn internal_page(url: &str, lang: &str, stats: &str) -> Option<(&'static str, St
     let src = match address {
         GAMEPAD_URL => include_str!("gamepad.html"),
         SHIELDS_URL => include_str!("shields.html"),
+        GAME_URL => return Some((address, game_page(lang, None))),
         _ => include_str!("changelog.html"),
     };
     Some((address, localize_page(src, lang).replace("<!--STATS-->", stats)))
@@ -3122,12 +3162,39 @@ fn internal_address(url: &str) -> Option<&'static str> {
         "crow:changelog" | "about:changelog" => Some(CHANGELOG_URL),
         "crow:gamepad" | "about:gamepad" => Some(GAMEPAD_URL),
         "crow:shields" | "about:shields" => Some(SHIELDS_URL),
+        "crow:game" | "about:game" => Some(GAME_URL),
         _ => None,
     }
 }
 
 fn is_internal(url: &str) -> bool {
     internal_address(url).is_some()
+}
+
+/// Crow Flight; with `error` (reason key, failed URL) it is the network error page: the card
+/// on top offers a retry (http(s) only) and starts the game in place. Values are escaped.
+fn game_page(lang: &str, error: Option<(&str, &str)>) -> String {
+    let page = localize_page(include_str!("game.html"), lang);
+    let Some((reason, url)) = error else { return page.replace("<!--ERROR-->", "") };
+    let tr = |key: &str| html_escape(&settings::tr(lang, key, &[]));
+    let lower = url.to_ascii_lowercase();
+    let retry = if lower.starts_with("https://") || lower.starts_with("http://") {
+        format!(r#"<a class="btn" href="{}">{}</a>"#, html_escape(url), tr("net_retry"))
+    } else {
+        String::new()
+    };
+    let card = format!(
+        r#"<div id="err"><div class="card">
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8.8a15 15 0 0 1 20 0M5 12.5a10 10 0 0 1 9-2.6M8.5 16.1a5 5 0 0 1 4-1M12 20h.01"/><path d="M3 3l18 18"/></svg>
+<h1>{}</h1><p>{}</p><p class="url">{}</p>
+<div class="actions"><button id="play" class="btn primary">{}</button>{retry}</div>
+</div></div>"#,
+        tr("net_title"),
+        tr(reason),
+        html_escape(url),
+        tr("net_play"),
+    );
+    page.replacen("<body>", r#"<body class="err">"#, 1).replace("<!--ERROR-->", &card)
 }
 
 /// Isolated-world driver of `crow:gamepad`; `enabled` = the setting (off: shows that instead).
