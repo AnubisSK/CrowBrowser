@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="{{@lang}}">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<title>{{game_title}}</title>
+<!-- Crow Flight: crow:game, also embedded in the network error page (the error card is filled in
+     by Crow, escaped). Canvas 2D only, no assets. Best score lives in sessionStorage of the
+     in-memory data store, so it never reaches the disk. -->
+<style>
+  :root { color-scheme: dark; --bg: #0b0d11; --card: #14171f; --line: #232834; --fg: #e6e6e9; --mute: #8a90a2; --gold: #fbbf24; --accent: #6366f1; }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: pointer; }
+  #pad { position: fixed; right: 14px; bottom: 12px; font-size: 12px; color: var(--mute); background: rgba(20, 23, 31, .85);
+    border: 1px solid var(--line); border-radius: 10px; padding: 3px 10px; display: none; }
+  #pad.on { display: block; }
+  /* Network error card above the (dimmed, idle) game; "play" removes it. */
+  #err { position: fixed; inset: 0; display: none; place-items: center; background: rgba(11, 13, 17, .78); }
+  body.err #err { display: grid; }
+  .card { max-width: 520px; margin: 24px; padding: 28px 30px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+  .card svg { width: 40px; height: 40px; color: var(--mute); }
+  .card h1 { font-size: 20px; margin: 12px 0 6px; }
+  .card p { color: var(--mute); margin-bottom: 10px; }
+  .card .url { font-size: 12px; overflow-wrap: anywhere; color: #6b7080; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+  .btn { font: inherit; border-radius: 8px; padding: 8px 16px; cursor: pointer; text-decoration: none; border: 1px solid var(--line); color: var(--fg); background: transparent; }
+  .btn.primary { color: #111; background: var(--gold); border-color: var(--gold); font-weight: 600; }
+</style>
+</head>
+<body>
+<canvas id="c" data-score="{{game_score}}" data-best="{{game_best}}" data-start="{{game_start}}"
+  data-over="{{game_over}}" data-restart="{{game_restart}}"></canvas>
+<div id="pad">🎮 {{game_pad}}</div>
+<!--ERROR-->
+<script>
+(() => {
+  'use strict';
+  const cv = document.getElementById('c'), ctx = cv.getContext('2d'), L = cv.dataset;
+  const padTag = document.getElementById('pad');
+  const SKY = '#0b0d11', BLOCK = '#14171f', EDGE = '#232834', GOLD = '#fbbf24';
+  let W = 0, H = 0, GROUND = 0, scale = 1;
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    GROUND = H - 48;
+    scale = Math.max(0.7, Math.min(1.4, H / 640));
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Best score: this tab's in-memory session only.
+  const BEST = 'crowFlightBest';
+  let best = 0;
+  try { best = Number(sessionStorage.getItem(BEST)) || 0; } catch (e) {}
+
+  // State: 'ready' (waits for the first flap), 'play', 'over'.
+  let state = 'ready', score = 0, t = 0, overAt = 0;
+  const crow = { x: 0, y: 0, vy: 0, flap: 0 };
+  let towers = [], keys = [], sparks = [], dist = 0;
+  const rnd = (a, b) => a + Math.random() * (b - a);
+
+  // Parallax silhouettes, generated once (repeat horizontally).
+  const far = Array.from({ length: 24 }, () => ({ w: rnd(30, 70), h: rnd(40, 140) }));
+  const near = Array.from({ length: 18 }, (_, i) => ({ w: rnd(40, 90), h: rnd(30, 110), tree: i % 3 === 0 }));
+  const stars = Array.from({ length: 70 }, () => ({ x: Math.random(), y: Math.random() * 0.6, r: Math.random() * 1.2 + 0.2 }));
+
+  function reset() {
+    state = 'ready'; score = 0; dist = 0; overAt = 0;
+    crow.x = W * 0.28; crow.y = H * 0.42; crow.vy = 0; crow.flap = 0;
+    towers = []; keys = []; sparks = [];
+  }
+  reset();
+
+  function flap() {
+    if (document.body.classList.contains('err')) return;
+    if (state === 'over') {
+      if (performance.now() - overAt > 350) reset();
+      return;
+    }
+    if (state === 'ready') state = 'play';
+    crow.vy = -470 * scale;
+    crow.flap = 1;
+  }
+
+  function spawn(x) {
+    const gap = rnd(160, 230) * scale;
+    const top = rnd(70 * scale, GROUND - gap - 60 * scale);
+    towers.push({ x, w: 64 * scale, top, gap, passed: false, moving: score > 8 && Math.random() < 0.35, phase: Math.random() * 6.28 });
+    if (Math.random() < 0.6) keys.push({ x: x + 32 * scale, y: top + gap / 2, taken: false, bob: Math.random() * 6.28 });
+  }
+
+  function over() {
+    state = 'over';
+    overAt = performance.now();
+    if (score > best) {
+      best = score;
+      try { sessionStorage.setItem(BEST, String(best)); } catch (e) {}
+    }
+  }
+
+  function update(dt) {
+    t += dt;
+    crow.flap = Math.max(0, crow.flap - dt * 4);
+    if (state !== 'play') {
+      if (state === 'ready') crow.y = H * 0.42 + Math.sin(t * 3) * 8;
+      if (state === 'over' && crow.y < GROUND - 14) { crow.vy += 1500 * scale * dt; crow.y = Math.min(GROUND - 14, crow.y + crow.vy * dt); }
+      return;
+    }
+    const speed = (190 + Math.min(score, 60) * 2.2) * scale;
+    dist += speed * dt;
+    crow.vy = Math.min(crow.vy + 1500 * scale * dt, 900 * scale);
+    crow.y += crow.vy * dt;
+    const spacing = 270 * scale;
+    const lastX = towers.length ? towers[towers.length - 1].x : W * 0.6;
+    if (lastX < W + spacing) spawn(Math.max(lastX + spacing, W + 40));
+    for (const o of towers) {
+      o.x -= speed * dt;
+      if (o.moving) o.top += Math.sin(t * 1.6 + o.phase) * 40 * scale * dt;
+      o.top = Math.max(50 * scale, Math.min(GROUND - o.gap - 40 * scale, o.top));
+      if (!o.passed && o.x + o.w < crow.x) { o.passed = true; score += 1; }
+    }
+    for (const k of keys) { k.x -= speed * dt; k.bob += dt * 3; }
+    towers = towers.filter((o) => o.x + o.w > -10);
+    keys = keys.filter((k) => k.x > -20 && !k.taken);
+    // Collisions: crow as a circle against tower rectangles, the ground and the sky.
+    const r = 13 * scale;
+    if (crow.y + r >= GROUND || crow.y - r <= 0) return over();
+    for (const o of towers) {
+      if (crow.x + r > o.x && crow.x - r < o.x + o.w && (crow.y - r < o.top || crow.y + r > o.top + o.gap)) return over();
+    }
+    for (const k of keys) {
+      const ky = k.y + Math.sin(k.bob) * 6;
+      if (Math.hypot(k.x - crow.x, ky - crow.y) < r + 12 * scale) {
+        k.taken = true; score += 5;
+        for (let i = 0; i < 10; i++) sparks.push({ x: k.x, y: ky, vx: rnd(-120, 120), vy: rnd(-160, 40), life: 0.6 });
+      }
+    }
+    for (const s of sparks) { s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 300 * dt; s.life -= dt; }
+    sparks = sparks.filter((s) => s.life > 0);
+  }
+
+  // Drawing: everything with paths, no images or fonts beyond the system UI font.
+  function skyline(items, speed, base, color, gap) {
+    let x = -((dist * speed) % 900);
+    ctx.fillStyle = color;
+    for (let i = 0; x < W + 100; i = (i + 1) % items.length) {
+      const it = items[i], h = it.h * scale;
+      if (it.tree) {
+        ctx.beginPath();
+        ctx.moveTo(x, base); ctx.lineTo(x + it.w * 0.5, base - h * 1.2); ctx.lineTo(x + it.w, base);
+        ctx.fill();
+      } else {
+        ctx.fillRect(x, base - h, it.w * scale * 0.8, h);
+      }
+      x += it.w * scale * 0.8 + gap;
+    }
+  }
+
+  function drawCrow() {
+    const { x, y } = crow;
+    const tilt = Math.max(-0.5, Math.min(0.9, crow.vy / (700 * scale)));
+    const wing = state === 'play' || state === 'ready' ? Math.sin(t * 14) * 0.5 + crow.flap * 0.6 : 0.2;
+    ctx.save();
+    ctx.translate(x, y); ctx.rotate(tilt); ctx.scale(scale, scale);
+    ctx.fillStyle = '#05060a'; ctx.strokeStyle = '#3b4157'; ctx.lineWidth = 1.5;
+    // Tail
+    ctx.beginPath(); ctx.moveTo(-14, -2); ctx.lineTo(-28, -8); ctx.lineTo(-26, 2); ctx.lineTo(-28, 9); ctx.lineTo(-14, 4); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    // Body and head
+    ctx.beginPath(); ctx.ellipse(0, 0, 17, 11, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(14, -6, 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    // Beak
+    ctx.fillStyle = '#4b5165';
+    ctx.beginPath(); ctx.moveTo(20, -8); ctx.lineTo(31, -4); ctx.lineTo(20, -2); ctx.closePath(); ctx.fill();
+    // Eye
+    ctx.fillStyle = GOLD; ctx.beginPath(); ctx.arc(16, -8, 1.8, 0, Math.PI * 2); ctx.fill();
+    // Wing
+    ctx.fillStyle = '#0d0f16';
+    ctx.beginPath(); ctx.moveTo(-6, -2);
+    ctx.quadraticCurveTo(2, -26 * wing - 4, 12, -4 - 20 * wing);
+    ctx.quadraticCurveTo(6, 2, -6, 4); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawKey(k) {
+    const y = k.y + Math.sin(k.bob) * 6, s = scale;
+    ctx.save();
+    ctx.translate(k.x, y); ctx.rotate(Math.sin(k.bob * 0.7) * 0.3);
+    ctx.shadowColor = GOLD; ctx.shadowBlur = 16;
+    ctx.strokeStyle = GOLD; ctx.fillStyle = GOLD; ctx.lineWidth = 3 * s;
+    ctx.beginPath(); ctx.arc(-6 * s, 0, 5 * s, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-1 * s, 0); ctx.lineTo(11 * s, 0); ctx.stroke();
+    ctx.fillRect(6 * s, 0, 2.5 * s, 5 * s); ctx.fillRect(9.5 * s, 0, 2.5 * s, 4 * s);
+    ctx.restore();
+  }
+
+  function drawTower(o) {
+    const lip = 6 * scale;
+    for (const [y, h] of [[0, o.top], [o.top + o.gap, GROUND - o.top - o.gap]]) {
+      ctx.fillStyle = BLOCK; ctx.strokeStyle = EDGE; ctx.lineWidth = 2;
+      ctx.fillRect(o.x, y, o.w, h); ctx.strokeRect(o.x + 1, y + 1, o.w - 2, h - 2);
+      // Lit windows
+      ctx.fillStyle = 'rgba(251, 191, 36, 0.12)';
+      for (let wy = y + 14; wy < y + h - 10; wy += 22 * scale) {
+        for (let wx = o.x + 10; wx < o.x + o.w - 12; wx += 18 * scale) ctx.fillRect(wx, wy, 6 * scale, 9 * scale);
+      }
+    }
+    ctx.fillStyle = EDGE;
+    ctx.fillRect(o.x - lip / 2, o.top - lip, o.w + lip, lip);
+    ctx.fillRect(o.x - lip / 2, o.top + o.gap, o.w + lip, lip);
+  }
+
+  function text(s, x, y, size, color, align) {
+    ctx.font = '600 ' + size + 'px -apple-system, BlinkMacSystemFont, system-ui, sans-serif';
+    ctx.fillStyle = color; ctx.textAlign = align || 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(s, x, y);
+  }
+
+  function draw() {
+    ctx.fillStyle = SKY; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(230, 230, 233, 0.5)';
+    for (const s of stars) { ctx.beginPath(); ctx.arc((s.x * W - dist * 0.02) % W + (s.x * W - dist * 0.02 < 0 ? W : 0), s.y * H, s.r, 0, 6.28); ctx.fill(); }
+    // Moon
+    ctx.save(); ctx.shadowColor = 'rgba(251, 191, 36, .4)'; ctx.shadowBlur = 30; ctx.fillStyle = '#1d2230';
+    ctx.beginPath(); ctx.arc(W * 0.82, H * 0.18, 34 * scale, 0, 6.28); ctx.fill(); ctx.restore();
+    skyline(far, 0.15, GROUND, '#10131b', 6);
+    skyline(near, 0.4, GROUND, '#0e1118', 10);
+    for (const o of towers) drawTower(o);
+    for (const k of keys) drawKey(k);
+    ctx.fillStyle = GOLD;
+    for (const s of sparks) { ctx.globalAlpha = Math.max(0, s.life / 0.6); ctx.fillRect(s.x, s.y, 3, 3); }
+    ctx.globalAlpha = 1;
+    // Ground
+    ctx.fillStyle = BLOCK; ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = EDGE; ctx.fillRect(0, GROUND, W, 2);
+    ctx.fillStyle = '#1b1f2a';
+    for (let x = -((dist) % 40); x < W; x += 40) ctx.fillRect(x, GROUND + 14, 20, 3);
+    drawCrow();
+    // HUD
+    text(L.score + ' ' + score, 18, 26, 18, '#e6e6e9');
+    text(L.best + ' ' + best, 18, 50, 13, '#8a90a2');
+    if (state === 'ready') text(L.start, W / 2, H * 0.62, 16, '#e6e6e9', 'center');
+    if (state === 'over') {
+      text(L.over, W / 2, H * 0.4, 30, GOLD, 'center');
+      text(L.score + ' ' + score + '  ·  ' + L.best + ' ' + best, W / 2, H * 0.4 + 36, 15, '#e6e6e9', 'center');
+      text(L.restart, W / 2, H * 0.4 + 66, 13, '#8a90a2', 'center');
+    }
+  }
+
+  // Gamepads: button 0 (Xbox A / PlayStation Cross) or D-pad up flaps, Start restarts. The pad
+  // appears after a button press while this page has focus (W3C user activation).
+  const pressed = new Map();
+  function pollPads() {
+    if (!navigator.getGamepads) return;
+    let any = false;
+    for (const p of Array.from(navigator.getGamepads())) {
+      if (!p) continue;
+      any = true;
+      const now = !!((p.buttons[0] && p.buttons[0].pressed) || (p.buttons[12] && p.buttons[12].pressed));
+      const start = !!(p.buttons[9] && p.buttons[9].pressed);
+      const prev = pressed.get(p.index) || {};
+      if (now && !prev.now) flap();
+      if (start && !prev.start && state === 'over') reset();
+      pressed.set(p.index, { now, start });
+    }
+    padTag.classList.toggle('on', any);
+  }
+  window.addEventListener('gamepadconnected', () => padTag.classList.add('on'));
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') { e.preventDefault(); if (!e.repeat) flap(); }
+    else if (e.key === 'r' || e.key === 'R') reset();
+  });
+  cv.addEventListener('pointerdown', (e) => { if (e.button === 0) { e.preventDefault(); flap(); } });
+
+  // Network error page: the card's play button starts the game.
+  const play = document.getElementById('play');
+  if (play) play.addEventListener('click', () => { document.body.classList.remove('err'); cv.focus(); reset(); });
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    pollPads();
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
