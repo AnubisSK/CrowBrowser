@@ -12,13 +12,37 @@
     return fake;
   };
 
-  // Gamepads (setting "gamepad_enabled"), on every site. Off: the API is removed (macOS also
-  // switches it off in WebKit) and connect events never reach the page. On: every pad reports one
-  // generic id, so model, vendor and product ids cannot be read; mapping, buttons and axes stay
-  // real so games work. A page's first read is signalled to Crow's isolated JS world with a
-  // per-session event name the page cannot know (tabs have no IPC).
-  const GAMEPAD = /*GAMEPAD*/false;
+  // Site of this document; about:blank / srcdoc frames count as the page that created them.
+  const hostOf = (o) => { try { return new URL(o).hostname; } catch (e) { return ''; } };
+  const host = location.hostname || hostOf((location.ancestorOrigins || [])[0]);
+  const listed = (list) => !!host && list.some((d) => host === d || host.endsWith('.' + d));
+  // Signals to Crow's isolated JS world (tabs have no IPC): events with per-session names the
+  // page cannot know, sent with functions captured before any page script runs.
   const PAD_EVENT = /*PAD_EVENT*/'';
+  const dispatch = EventTarget.prototype.dispatchEvent, doc = document, Ev = Event;
+  const signal = (name) => { try { dispatch.call(doc, new Ev(name)); } catch (e) {} };
+
+  // WebGL off for this site (shield popover): no context is ever created, so neither rendering
+  // nor GPU details (renderer, extensions) can be read. Each refusal is counted by Crow.
+  if (listed(/*WEBGL_OFF*/[])) {
+    const GL = /^(experimental-)?webgl2?$/i;
+    for (const C of [window.HTMLCanvasElement, window.OffscreenCanvas]) {
+      if (!C) continue;
+      const getContext0 = C.prototype.getContext;
+      C.prototype.getContext = mask(function getContext(type) {
+        if (GL.test(String(type))) { signal(PAD_EVENT + 'g'); return null; }
+        return getContext0.apply(this, arguments);
+      }, getContext0);
+    }
+    for (const k of ['WebGLRenderingContext', 'WebGL2RenderingContext']) delete window[k];
+  }
+
+  // Gamepads: setting "gamepad_enabled", flipped for sites listed in the shield popover. Off: the
+  // API is removed (macOS also switches it off in WebKit when no site needs it) and connect events
+  // never reach the page. On: every pad reports one generic id, so model, vendor and product ids
+  // cannot be read; mapping, buttons and axes stay real so games work, and every connected pad is
+  // returned (only empty slots are null). A page's first read is signalled to Crow.
+  const GAMEPAD = /*GAMEPAD*/false !== listed(/*GAMEPAD_FLIP*/[]);
   const PAD_ID = /*PAD_ID*/'';
   const PAD_EVENTS = ['gamepadconnected', 'gamepaddisconnected'];
   if (!GAMEPAD) {
@@ -43,14 +67,14 @@
       }
       return p;
     };
-    const dispatch = EventTarget.prototype.dispatchEvent, doc = document, Ev = Event, map = Array.prototype.map;
+    const map = Array.prototype.map;
     let told = false;
     const getGamepads0 = Navigator.prototype.getGamepads;
     Navigator.prototype.getGamepads = mask(function getGamepads() {
       const pads = getGamepads0.apply(this, arguments);
       if (!told) {
         told = true;
-        try { dispatch.call(doc, new Ev(PAD_EVENT)); } catch (e) {}
+        signal(PAD_EVENT);
       }
       return map.call(pads, wrap);
     }, getGamepads0);
@@ -67,8 +91,6 @@
   // is patched there. about:blank / srcdoc frames (editors, modals) count as the page that
   // created them.
   const TRUSTED = /(^|\.)(github\.com|google\.com|booking\.com|stripe\.com|stripe\.network)$|^accounts\./i;
-  const hostOf = (o) => { try { return new URL(o).hostname; } catch (e) { return ''; } };
-  const host = location.hostname || hostOf((location.ancestorOrigins || [])[0]);
   if (TRUSTED.test(host)) return;
   const toString = mask({ toString() { return toString0.call(natives.get(this) || this); } }.toString, toString0);
   Object.defineProperty(Function.prototype, 'toString', { value: toString, writable: true, configurable: true });

@@ -147,6 +147,21 @@ thread_local! {
     static ON_TLS: RefCell<Option<Rc<TlsHandler>>> = const { RefCell::new(None) };
     static ON_FULLSCREEN: RefCell<Option<Rc<dyn Fn(u32, bool)>>> = const { RefCell::new(None) };
     static ON_CRASH: RefCell<Option<Rc<dyn Fn(u32)>>> = const { RefCell::new(None) };
+    /// Hidden root view of each container's own ephemeral context (see `new_container_store`).
+    static CONTAINER_ROOTS: RefCell<Vec<webkit2gtk::WebView>> = const { RefCell::new(Vec::new()) };
+    /// Download prompt hookup, also attached to container contexts.
+    static DOWNLOAD_HOOK: RefCell<Option<Rc<dyn Fn(&WebContext)>>> = const { RefCell::new(None) };
+}
+
+/// Ephemeral context: nothing on disk, certificate errors refuse the load.
+fn ephemeral_context() -> WebContext {
+    let ctx = WebContext::new_ephemeral();
+    ctx.set_cache_model(CacheModel::DocumentViewer);
+    // Explicit: certificate errors refuse the load, never an "ignore" fallback.
+    if let Some(m) = ctx.website_data_manager() {
+        m.set_tls_errors_policy(TLSErrorsPolicy::Fail);
+    }
+    ctx
 }
 
 /// Hidden, never-loaded view owning an ephemeral context; views created related to it share
@@ -154,15 +169,7 @@ thread_local! {
 fn root_of(key: &'static std::thread::LocalKey<RefCell<Option<webkit2gtk::WebView>>>) -> webkit2gtk::WebView {
     key.with(|r| {
         r.borrow_mut()
-            .get_or_insert_with(|| {
-                let ctx = WebContext::new_ephemeral();
-                ctx.set_cache_model(CacheModel::DocumentViewer);
-                // Explicit: certificate errors refuse the load, never an "ignore" fallback.
-                if let Some(m) = ctx.website_data_manager() {
-                    m.set_tls_errors_policy(TLSErrorsPolicy::Fail);
-                }
-                webkit2gtk::WebView::with_context(&ctx)
-            })
+            .get_or_insert_with(|| webkit2gtk::WebView::with_context(&ephemeral_context()))
             .clone()
     })
 }
@@ -175,10 +182,35 @@ pub fn new_store() -> Store {
     root().context().expect("webkit context")
 }
 
+/// Separate ephemeral context of a container (own cookies, storage, cache, network process),
+/// with the same download prompt as the shared one.
+pub fn new_container_store() -> Store {
+    let ctx = ephemeral_context();
+    if let Some(hook) = DOWNLOAD_HOOK.with(|h| h.borrow().clone()) {
+        hook(&ctx);
+    }
+    CONTAINER_ROOTS.with(|r| r.borrow_mut().push(webkit2gtk::WebView::with_context(&ctx)));
+    ctx
+}
+
+/// Forgets the container's root view; the context goes with its last tab.
+pub fn drop_container_store(store: &Store) {
+    CONTAINER_ROOTS.with(|r| r.borrow_mut().retain(|v| v.context().as_ref() != Some(store)));
+}
+
+/// No picture-in-picture in WebKitGTK.
+pub const PIP: bool = false;
+
+/// Not reported by WebKitGTK (see `BLOCK_STATS`).
+pub fn take_blocked_hosts() -> Vec<(String, u32)> {
+    Vec::new()
+}
+
 /// WebKitGTK 2.40 has no gamepad switch (`WebKitFeature` is 2.42+): with `gamepad` off the
 /// page-side shim removes the API.
-pub fn config(_store: &Store, _adblock: bool, _gamepad: bool) -> Config {
-    Config(root())
+pub fn config(store: &Store, _adblock: bool, _gamepad: bool) -> Config {
+    let container = CONTAINER_ROOTS.with(|r| r.borrow().iter().find(|v| v.context().as_ref() == Some(store)).cloned());
+    Config(container.unwrap_or_else(root))
 }
 
 /// window.open target: must be related to the opener so `window.opener` keeps working.
@@ -262,6 +294,16 @@ fn start_downloads(w: &webkit2gtk::WebView, d: &webkit2gtk::PolicyDecision, t: P
     }
     w.download_uri(&uri);
     true
+}
+
+/// Built-in page `html` under the document address `base` (see `app::INTERNAL_BASE`).
+pub fn load_internal(v: &WebView, html: &str, base: &str) {
+    v.webview().load_html(html, Some(base));
+}
+
+/// Not available on Linux (WebKitGTK reads pads through libmanette itself).
+pub fn system_gamepads() -> Option<Vec<String>> {
+    None
 }
 
 /// Runs `js` at document start in every frame of `v`, in Crow's isolated JS world (see
@@ -711,6 +753,18 @@ pub fn watch_downloads(
     STARTED.with(|s| *s.borrow_mut() = Some(Rc::new(started)));
     let (ask, finished) = (Rc::new(ask), Rc::new(finished));
     let next = Rc::new(Cell::new(1u32));
+    let hook: Rc<dyn Fn(&WebContext)> = Rc::new(move |ctx: &WebContext| {
+        let (ask, finished, next) = (ask.clone(), finished.clone(), next.clone());
+        hook_downloads(ctx, ask, finished, next);
+    });
+    hook(store);
+    DOWNLOAD_HOOK.with(|h| *h.borrow_mut() = Some(hook));
+}
+
+type AskFn = dyn Fn(u32, String, String);
+type FinishedFn = dyn Fn(String, bool);
+
+fn hook_downloads(store: &WebContext, ask: Rc<AskFn>, finished: Rc<FinishedFn>, next: Rc<Cell<u32>>) {
     store.connect_download_started(move |_, d| {
         let (ask, next) = (ask.clone(), next.clone());
         d.connect_decide_destination(move |d, name| {

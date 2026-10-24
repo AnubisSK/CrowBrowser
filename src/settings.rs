@@ -33,6 +33,10 @@ pub struct Settings {
     pub language: String,
     /// Gamepad API for pages (off: the API does not exist; on: every pad has one generic id).
     pub gamepad_enabled: bool,
+    /// Sites (and subdomains) where the gamepad setting is reversed (shield popover).
+    pub gamepad_sites: Vec<String>,
+    /// Sites (and subdomains) where WebGL is off (shield popover).
+    pub webgl_off: Vec<String>,
 }
 
 /// UI languages with dictionaries in `locales.json`.
@@ -54,6 +58,8 @@ impl Default for Settings {
             adblock_hosts: true,
             language: "sk".into(),
             gamepad_enabled: false,
+            gamepad_sites: Vec::new(),
+            webgl_off: Vec::new(),
         }
     }
 }
@@ -158,7 +164,22 @@ impl Settings {
 
     /// `host` is on the ad-block allowlist (exact or subdomain).
     pub fn allowed(&self, host: &str) -> bool {
-        !host.is_empty() && self.adblock_allow.iter().any(|d| host == d || host.ends_with(&format!(".{d}")))
+        listed(&self.adblock_allow, host)
+    }
+
+    /// Gamepad API on for `host` (global setting, reversed for listed sites).
+    pub fn gamepad_for(&self, host: &str) -> bool {
+        self.gamepad_enabled != listed(&self.gamepad_sites, host)
+    }
+
+    /// WebGL off for `host`.
+    pub fn webgl_off_for(&self, host: &str) -> bool {
+        listed(&self.webgl_off, host)
+    }
+
+    /// Some site may use gamepads: WebKit's switch must stay on (the page shim decides per site).
+    pub fn gamepad_anywhere(&self) -> bool {
+        self.gamepad_enabled || !self.gamepad_sites.is_empty()
     }
 
     pub fn search_prefix(&self) -> &'static str {
@@ -168,6 +189,11 @@ impl Settings {
             .unwrap_or(&ENGINES[0])
             .2
     }
+}
+
+/// `host` is one of `list` or a subdomain of one.
+fn listed(list: &[String], host: &str) -> bool {
+    !host.is_empty() && list.iter().any(|d| host == d || host.strip_suffix(d.as_str()).is_some_and(|r| r.ends_with('.')))
 }
 
 #[cfg(test)]

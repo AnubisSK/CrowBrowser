@@ -59,6 +59,8 @@ thread_local! {
     static ON_BLOCKED: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
     static ON_TLS: RefCell<Option<Box<TlsHandler>>> = const { RefCell::new(None) };
     static ON_CRASH: RefCell<Option<Box<CrashHandler>>> = const { RefCell::new(None) };
+    /// Blocked loads per domain since the last `take_blocked_hosts`.
+    static BLOCKED_HOSTS: RefCell<HashMap<String, u32>> = RefCell::new(HashMap::new());
     /// URLs the user confirmed in the download prompt; consumed by the next download of that URL.
     static APPROVED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
@@ -70,6 +72,32 @@ fn mtm() -> MainThreadMarker {
 /// Nothing written to disk by WebKit; persistence goes through the encrypted vault.
 pub fn new_store() -> Store {
     unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm()) }
+}
+
+/// Separate in-memory store of a container: every `nonPersistentDataStore` call is a new,
+/// isolated one (own cookies, storage, cache), freed when its last view and owner drop it.
+pub fn new_container_store() -> Store {
+    new_store()
+}
+
+/// The store's last owner lets go of it (macOS frees it with its views).
+pub fn drop_container_store(_store: &Store) {}
+
+/// Native picture-in-picture for page videos (`PIP_JS`).
+pub const PIP: bool = true;
+
+/// Picture-in-picture is off in WKWebView by default; the private preference (guarded) turns on
+/// the system's floating player for `<video>` (also MSE / blob streams).
+#[cfg(target_os = "macos")]
+fn pip_prefs(c: &WKWebViewConfiguration) {
+    unsafe {
+        let prefs: *mut AnyObject = msg_send![c, preferences];
+        let Some(prefs) = prefs.as_ref() else { return };
+        let ok: Bool = msg_send![prefs, respondsToSelector: sel!(_setAllowsPictureInPictureMediaPlayback:)];
+        if ok.as_bool() {
+            let _: () = msg_send![prefs, _setAllowsPictureInPictureMediaPlayback: true];
+        }
+    }
 }
 
 /// Media playback of tab views: AirPlay routing allowed (`allowsAirPlayForMediaPlayback`) and no
@@ -158,6 +186,44 @@ fn gamepad_prefs(c: &WKWebViewConfiguration, on: bool) {
     }
 }
 
+/// Built-in page `html` under the document address `base` (see `app::INTERNAL_BASE`).
+pub fn load_internal(v: &WebView, html: &str, base: &str) {
+    unsafe {
+        let url = objc2_foundation::NSURL::URLWithString(&NSString::from_str(base));
+        let _: *mut AnyObject = msg_send![&*v.webview(), loadHTMLString: &*NSString::from_str(html), baseURL: url.as_deref()];
+    }
+}
+
+unsafe extern "C" {
+    fn dlopen(path: *const std::ffi::c_char, mode: std::ffi::c_int) -> *mut c_void;
+}
+
+/// Game controllers macOS itself sees (GameController framework), for the crow:gamepad
+/// diagnostics. The framework is loaded only when asked (WebKit loads it anyway for gamepads).
+pub fn system_gamepads() -> Option<Vec<String>> {
+    static LOAD: std::sync::Once = std::sync::Once::new();
+    LOAD.call_once(|| unsafe {
+        dlopen(c"/System/Library/Frameworks/GameController.framework/GameController".as_ptr(), 1);
+    });
+    unsafe {
+        let cls = AnyClass::get(c"GCController")?;
+        let list: *mut NSArray<AnyObject> = msg_send![cls, controllers];
+        let list = list.as_ref()?;
+        let text = |o: *mut NSString| o.as_ref().map(ToString::to_string);
+        Some(
+            list.iter()
+                .map(|c| {
+                    let name = text(msg_send![&*c, vendorName]).unwrap_or_else(|| "?".into());
+                    match text(msg_send![&*c, productCategory]) {
+                        Some(kind) if kind != name => format!("{name} ({kind})"),
+                        _ => name,
+                    }
+                })
+                .collect(),
+        )
+    }
+}
+
 /// Runs `js` at document start in every frame of `v`, in Crow's isolated JS world (see
 /// `eval_isolated`). Called before the view's first load.
 pub fn add_isolated_script(v: &WebView, js: &str) {
@@ -188,6 +254,7 @@ pub fn config(store: &Store, adblock: bool, gamepad: bool) -> Config {
         storage_prefs(&c);
         file_prefs(&c);
         gamepad_prefs(&c, gamepad);
+        pip_prefs(&c);
         Config(c)
     }
 }
@@ -360,7 +427,7 @@ unsafe extern "C-unwind" fn rule_action(
     web_view: *mut AnyObject,
     _id: *mut AnyObject,
     action: *mut AnyObject,
-    _url: *mut AnyObject,
+    url: *mut AnyObject,
 ) {
     let Some(action) = (unsafe { action.as_ref() }) else { return };
     let blocked = unsafe {
@@ -368,6 +435,13 @@ unsafe extern "C-unwind" fn rule_action(
         known.as_bool() && msg_send![action, blockedLoad]
     };
     let (true, Some(tab)) = (blocked, tab_of(web_view)) else { return };
+    let host: Option<String> = unsafe { url.as_ref() }.and_then(|u| {
+        let h: *mut NSString = unsafe { msg_send![u, host] };
+        unsafe { h.as_ref() }.map(|h| h.to_string().to_ascii_lowercase())
+    });
+    if let Some(host) = host.filter(|h| !h.is_empty()) {
+        BLOCKED_HOSTS.with(|b| *b.borrow_mut().entry(host).or_default() += 1);
+    }
     let first = BLOCKED.with(|b| {
         let mut b = b.borrow_mut();
         let first = b.is_empty();
@@ -518,6 +592,11 @@ pub fn forget(v: &WebView) {
 /// Blocked loads per tab since the last call.
 pub fn take_blocked() -> Vec<(u32, u32)> {
     BLOCKED.with(|b| b.borrow_mut().drain().collect())
+}
+
+/// Blocked loads per domain since the last call.
+pub fn take_blocked_hosts() -> Vec<(String, u32)> {
+    BLOCKED_HOSTS.with(|b| b.borrow_mut().drain().collect())
 }
 
 pub fn export_cookies(store: &Store, done: impl Fn(Vec<CookieRec>) + 'static) {

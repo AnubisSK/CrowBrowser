@@ -35,6 +35,7 @@
   #spoof { color: var(--accent); font-weight: 600; }
   pre { font: 12px ui-monospace, "SF Mono", Menlo, "DejaVu Sans Mono", monospace; color: var(--mute); white-space: pre-wrap; margin-top: 10px; min-height: 1em; }
   h2 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .note { color: var(--mute); font-size: 12px; margin-top: 10px; }
   .hint { margin: -6px 0 20px; padding: 10px 14px; border: 1px dashed var(--accent); border-radius: 10px; color: var(--fg); }
   body.live .hint, body.off .hint { display: none; }
 </style>
@@ -83,6 +84,19 @@
       <tr><td>{{gpd_mapping}}</td><td id="map">—</td></tr>
       <tr><td>{{gpd_counts}}</td><td id="counts">—</td></tr>
     </table>
+  </section>
+
+  <section id="diag" data-yes="{{gpd_yes}}" data-no="{{gpd_no}}" data-none="{{gpd_none_seen}}">
+    <h2>{{gpd_diag}}</h2>
+    <table>
+      <tr><td>{{gpd_d_system}}</td><td id="d-sys">—</td></tr>
+      <tr><td>{{gpd_d_webkit}}</td><td id="d-slots">—</td></tr>
+      <tr><td>{{gpd_d_secure}}</td><td id="d-secure">—</td></tr>
+      <tr><td>{{gpd_d_focus}}</td><td id="d-focus">—</td></tr>
+      <tr><td>{{gpd_d_visible}}</td><td id="d-vis">—</td></tr>
+      <tr><td>{{gpd_d_script}}</td><td id="d-js">{{gpd_no}}</td></tr>
+    </table>
+    <p class="note">{{gpd_diag_note}}</p>
   </section>
 </main>
 </body>

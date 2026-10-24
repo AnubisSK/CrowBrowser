@@ -1,6 +1,6 @@
 # Známe obmedzenia
 
-Úprimný zoznam toho, čo Crow (0.1.3) zatiaľ nevie alebo robí inak než veľké prehliadače.
+Úprimný zoznam toho, čo Crow (0.1.4) zatiaľ nevie alebo robí inak než veľké prehliadače.
 
 ## Dáta a prihlásenia
 

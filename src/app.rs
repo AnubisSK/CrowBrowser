@@ -43,14 +43,29 @@ const FAV_TRIES: u8 = 8;
 const FAV_MAX: usize = 48 * 1024;
 /// Read in Crow's isolated JS world (`wk::eval_isolated`), never the page's.
 const FAV_READ: &str = "window.__crowIcon || ''";
-/// Gamepad reads of the active page are checked this often (only with the setting on).
-const PAD_POLL: Duration = Duration::from_secs(1);
-/// Isolated world of every frame: notes the page's first `getGamepads()` call, which the
-/// page-world shim (`adblock::defuser`) signals with the per-session event name `/*EVENT*/`.
-/// Idempotent: popups may share the opener's scripts.
-const PAD_LISTEN_JS: &str = "(() => { if (window.__crowPadOn) return; window.__crowPadOn = 1; window.__crowPad = 0; \
-document.addEventListener(/*EVENT*/'', () => { window.__crowPad = 1; }, true); })();";
-const PAD_READ: &str = "window.__crowPad ? '1' : ''";
+/// The active page is asked this often what the page-world shim reported (isolated world).
+const PAGE_POLL: Duration = Duration::from_secs(1);
+/// Isolated world of every frame: counts what the page-world shim (`adblock::defuser`) signals
+/// with the per-session event name `/*EVENT*/` (first gamepad read; `g` suffix: refused WebGL
+/// context). Idempotent: popups may share the opener's scripts.
+const PAGE_LISTEN_JS: &str = "(() => { if (window.__crowOn) return; window.__crowOn = 1; window.__crowPad = 0; \
+window.__crowGl = 0; const e = /*EVENT*/''; document.addEventListener(e, () => { window.__crowPad = 1; }, true); \
+document.addEventListener(e + 'g', () => { window.__crowGl++; }, true); })();";
+/// Active page: gamepads read, WebGL contexts refused, a video ready for picture-in-picture
+/// (metadata loaded: before that WebKit refuses the mode).
+const PAGE_READ: &str = "JSON.stringify([window.__crowPad | 0, window.__crowGl | 0, \
+Array.from(document.querySelectorAll('video')).some(v => v.readyState > 0) ? 1 : 0])";
+/// Picture-in-picture toggle (macOS): the largest playing video, else the largest one. Run by
+/// the app, so WebKit counts it as a user gesture.
+const PIP_JS: &str = "(() => { const vs = Array.from(document.querySelectorAll('video')).filter(v => v.readyState > 0); \
+const on = vs.find(v => v.webkitPresentationMode === 'picture-in-picture'); \
+if (on) { on.webkitSetPresentationMode('inline'); return 'inline'; } \
+const score = (v) => v.clientWidth * v.clientHeight + (v.paused ? 0 : 1e9); \
+const v = vs.sort((a, b) => score(b) - score(a))[0]; \
+if (!v || !v.webkitSupportsPresentationMode || !v.webkitSupportsPresentationMode('picture-in-picture')) return 'none'; \
+v.webkitSetPresentationMode('picture-in-picture'); return 'pip'; })()";
+/// Session list of blocked domains shown on crow:shields is capped.
+const MAX_BLOCKED_HOSTS: usize = 500;
 /// What the gamepad popover shows: the real pads, read in the isolated world (unmasked there).
 const PAD_INFO: &str = "JSON.stringify({ pads: navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) \
 .map(g => ({ index: g.index, id: g.id, mapping: g.mapping, buttons: g.buttons.length, axes: g.axes.length })) : [] })";
@@ -111,7 +126,8 @@ pub enum UserEvent {
         title: String,
     },
     NewTab(String),
-    AdoptTab(u32),
+    /// Popup `id` opened by tab `opener` becomes a tab (same container as the opener).
+    AdoptTab { id: u32, opener: u32 },
     /// A download wants to write to disk; held until the user answers the toolbar prompt.
     /// `key` identifies the pending download inside `wk`, `tab` the requesting tab (if known).
     DownloadAsk {
@@ -170,10 +186,13 @@ pub enum UserEvent {
     /// Result of a filter-list download the user asked for.
     /// Manual list refresh finished: failed lists as (`locales.json` key, list name).
     RulesNote(Vec<(&'static str, &'static str)>),
-    /// The active page read the gamepads (masked by the shim).
-    GamepadRead {
+    /// `PAGE_READ` result of the active page.
+    PageState {
         tab: u32,
+        data: String,
     },
+    /// Picture-in-picture toggle result (`PIP_JS`).
+    Pip(String),
     /// Gamepad popover data from the tab's isolated world (`PAD_INFO`, JSON).
     GamepadInfo {
         tab: u32,
@@ -226,8 +245,8 @@ struct TabCtx {
     adblock: Rc<Cell<bool>>,
     /// UI language, baked into every UI view (also before unlock, see `settings::stored_language`).
     lang: Rc<RefCell<String>>,
-    /// Gamepad setting for views built from now on (page shim and WebKit switch).
-    gamepad: Rc<Cell<bool>>,
+    /// Page-world shim for views built from now on (`adblock::defuser` with current settings).
+    page_js: Rc<RefCell<String>>,
     /// Random per-session name of the shim's gamepad event (pages cannot listen for it).
     pad_event: Rc<str>,
 }
@@ -255,7 +274,7 @@ impl TabCtx {
     ) -> wry::Result<WebView> {
         let (p1, p2) = (self.proxy.clone(), self.proxy.clone());
         let ctx = self.clone();
-        let mut b = wk::builder(config, adblock::defuser(self.gamepad.get(), &self.pad_event))
+        let mut b = wk::builder(config, self.page_js.borrow().clone())
             .with_background_color(bg_of(&self.window))
             .with_on_page_load_handler(move |ev, url| {
                 let started = matches!(ev, PageLoadEvent::Started);
@@ -268,7 +287,7 @@ impl TabCtx {
             .with_document_title_changed_handler(move |title| {
                 let _ = p2.send_event(UserEvent::Title { tab: id, title });
             })
-            .with_new_window_req_handler(move |url, features| ctx.popup(url, features));
+            .with_new_window_req_handler(move |url, features| ctx.popup(id, url, features));
         // Linux: downloads are watched once on the shared context (wk::watch_downloads).
         #[cfg(target_os = "macos")]
         {
@@ -307,9 +326,7 @@ impl TabCtx {
         let view = wk::attach(b, rect, &self.window)?;
         wk::set_rules(&view, blocking);
         wk::watch(&view, id);
-        if self.gamepad.get() {
-            wk::add_isolated_script(&view, &PAD_LISTEN_JS.replace("/*EVENT*/''", &js(&self.pad_event)));
-        }
+        wk::add_isolated_script(&view, &PAGE_LISTEN_JS.replace("/*EVENT*/''", &js(&self.pad_event)));
         if let Some(url) = url {
             view.load_url(url)?;
         }
@@ -318,7 +335,7 @@ impl TabCtx {
 
     /// window.open / target=_blank: a real WKWebView keeping `window.opener`
     /// (required by OAuth login popups), adopted as a new tab.
-    fn popup(&self, url: String, features: NewWindowFeatures) -> NewWindowResponse {
+    fn popup(&self, opener: u32, url: String, features: NewWindowFeatures) -> NewWindowResponse {
         let id = self.next();
         let rect = content_rect(&self.window, TABS_H + NAV_H);
         // Rules go on before WebKit navigates the popup (adoption as a tab happens later).
@@ -331,7 +348,7 @@ impl TabCtx {
         ) {
             let response = wk::popup_response(&view);
             PENDING.with(|p| p.borrow_mut().push((id, view)));
-            self.send(UserEvent::AdoptTab(id));
+            self.send(UserEvent::AdoptTab { id, opener });
             response
         } else {
             self.send(UserEvent::NewTab(url));
@@ -363,6 +380,81 @@ impl TabCtx {
             });
         wk::attach(b, rect, &self.window).ok()
     }
+}
+
+/// Cookie/storage jar of a tab. `Default` is the vault-backed store; the others each get an
+/// in-memory store of their own (separate cookies, logins, storage, cache), never saved and
+/// dropped with their last tab. `Isolated` also leaves no history.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+enum Container {
+    #[default]
+    Default,
+    Personal,
+    Work,
+    Isolated,
+}
+
+impl Container {
+    const ALL: [Self; 4] = [Self::Default, Self::Personal, Self::Work, Self::Isolated];
+
+    /// Toolbar / IPC name (`""` = default).
+    fn key(self) -> &'static str {
+        match self {
+            Self::Default => "",
+            Self::Personal => "personal",
+            Self::Work => "work",
+            Self::Isolated => "isolated",
+        }
+    }
+
+    fn label_key(self) -> &'static str {
+        match self {
+            Self::Default => "ct_default",
+            Self::Personal => "ct_personal",
+            Self::Work => "ct_work",
+            Self::Isolated => "ct_isolated",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        if s == "default" {
+            return Some(Self::Default);
+        }
+        Self::ALL.into_iter().find(|c| !c.key().is_empty() && c.key() == s)
+    }
+}
+
+/// What the shields did this session (crow:shields); never saved.
+#[derive(Default)]
+struct ShieldStats {
+    blocked: u64,
+    /// Blocked loads per domain (macOS reports them; capped at `MAX_BLOCKED_HOSTS`).
+    domains: HashMap<String, u64>,
+    /// Pages that read the gamepads (and got the masked id).
+    pad_pages: u32,
+    /// WebGL contexts refused on sites with WebGL off.
+    webgl: u64,
+}
+
+/// Site key for per-site lists (`www.` dropped), if `host` is a plain host name.
+fn site_key(host: &str) -> Option<String> {
+    let host = host.trim().to_ascii_lowercase();
+    let host = host.trim_start_matches("www.");
+    let ok = (host.contains('.') || host == "localhost")
+        && host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'));
+    ok.then(|| host.to_string())
+}
+
+/// Adds `host` to `list` or removes it; false if the list is full.
+fn toggle_site(list: &mut Vec<String>, host: String) -> bool {
+    if let Some(i) = list.iter().position(|d| *d == host) {
+        list.remove(i);
+    } else if list.len() < MAX_ALLOW {
+        list.push(host);
+    } else {
+        return false;
+    }
+    true
 }
 
 struct Ask {
@@ -398,6 +490,12 @@ struct Tab {
     crashed: bool,
     /// The current page read the gamepads (toolbar chip).
     gamepad: bool,
+    /// WebGL contexts refused on the current page (site has WebGL off).
+    webgl_blocks: u32,
+    /// The current page has a video (picture-in-picture chip, macOS).
+    video: bool,
+    /// Cookie/storage jar of the tab (`Container::Default` = the vault-backed one).
+    container: Container,
 }
 
 /// Every way a tab disappears (close, session lock, app exit) releases its view the same way.
@@ -425,6 +523,9 @@ impl Tab {
             internal: false,
             crashed: false,
             gamepad: false,
+            webgl_blocks: 0,
+            video: false,
+            container: Container::Default,
         }
     }
 
@@ -482,9 +583,13 @@ struct Session {
     site_h: f64,
     site_closed: Instant,
     fav_due: Option<Instant>,
-    pad_due: Option<Instant>,
-    /// Gamepad setting changed: tab views still carry the old shim; rebuilt on next activation.
-    pad_stale: bool,
+    page_due: Option<Instant>,
+    /// Page shim settings changed: tab views still carry the old one; rebuilt on next activation.
+    views_stale: bool,
+    /// In-memory stores of the ephemeral containers that have tabs.
+    containers: HashMap<Container, wk::Store>,
+    /// What the shields did this session (crow:shields).
+    stats: ShieldStats,
     update: Option<update::Info>,
     update_bar: bool,
     update_busy: bool,
@@ -524,18 +629,41 @@ impl Session {
         }
     }
 
-    /// Active page: has it read the gamepads yet? (Asked in the isolated world; no IPC in tabs.)
-    fn poll_gamepad(&self, proxy: &EventLoopProxy<UserEvent>) {
+    /// Active page, in the isolated world (no IPC in tabs): what the shim reported and whether
+    /// it has a video. crow:gamepad gets the controllers macOS sees instead.
+    fn poll_page(&self, proxy: &EventLoopProxy<UserEvent>) {
         let Some(t) = self.cur() else { return };
-        let (false, Some(v)) = (t.gamepad, &t.view) else { return };
+        let Some(v) = &t.view else { return };
+        if t.internal && t.url == GAMEPAD_URL {
+            let list = json!(wk::system_gamepads());
+            return wk::eval_isolated(v, &format!("window.__crowSys && window.__crowSys({list})"), |_| {});
+        }
         if !t.url.starts_with("http") {
             return;
         }
         let (p, tab) = (proxy.clone(), t.id);
-        wk::eval_isolated(v, PAD_READ, move |r| {
-            if r == "1" {
-                let _ = p.send_event(UserEvent::GamepadRead { tab });
+        wk::eval_isolated(v, PAGE_READ, move |data| {
+            let _ = p.send_event(UserEvent::PageState { tab, data });
+        });
+    }
+
+    /// Store of `c`: the vault-backed one, or the container's own in-memory store.
+    fn store_for(&mut self, c: Container) -> wk::Store {
+        if c == Container::Default {
+            return self.store.clone();
+        }
+        self.containers.entry(c).or_insert_with(wk::new_container_store).clone()
+    }
+
+    /// Containers without tabs lose their store (and every cookie and cache in it).
+    fn drop_unused_containers(&mut self) {
+        let tabs = &self.tabs;
+        self.containers.retain(|c, store| {
+            let used = tabs.iter().any(|t| t.container == *c);
+            if !used {
+                wk::drop_container_store(store);
             }
+            used
         });
     }
 
@@ -596,7 +724,7 @@ impl Session {
         self.data.session.clear();
         self.data.active = 0;
         for (i, t) in self.tabs.iter().enumerate() {
-            if t.url.starts_with("http") {
+            if t.url.starts_with("http") && t.container == Container::Default {
                 if i == self.active {
                     self.data.active = self.data.session.len();
                 }
@@ -620,7 +748,7 @@ impl Session {
         let tabs: Vec<_> = self
             .tabs
             .iter()
-            .map(|t| json!({ "id": t.id, "title": t.label(), "loading": t.loading, "asleep": t.view.is_none(), "icon": t.icon }))
+            .map(|t| json!({ "id": t.id, "title": t.label(), "loading": t.loading, "asleep": t.view.is_none(), "icon": t.icon, "c": t.container.key() }))
             .collect();
         let state = json!({
             "tabs": tabs,
@@ -631,6 +759,7 @@ impl Session {
             "login": logged_in(&self.data.cookies, &host_of(url)),
             "blocked": cur.map_or(0, |t| t.blocked),
             "gamepad": cur.is_some_and(|t| t.gamepad),
+            "video": wk::PIP && cur.is_some_and(|t| t.video),
             "bookmarked": self.data.bookmarks.iter().any(|b| b.url == url),
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
             "panel": if self.panel.is_some() { self.panel_section.as_str() } else { "" },
@@ -668,7 +797,73 @@ impl Session {
             "total_blocked": total,
             "total_bytes": total * BLOCK_BYTES,
             "total_ms": total * BLOCK_MS,
+            "gamepad_api": cfg.gamepad_for(&host),
+            "gamepad_global": cfg.gamepad_enabled,
+            "webgl": !cfg.webgl_off_for(&host),
+            "pad_read": self.cur().is_some_and(|t| t.gamepad),
+            "gl_blocks": self.cur().map_or(0, |t| t.webgl_blocks),
         })
+    }
+
+    /// Built-in page for `url`; crow:shields gets this session's numbers rendered in.
+    fn internal(&self, url: &str, cfg: &Settings) -> Option<(&'static str, String)> {
+        let address = internal_address(url)?;
+        let stats = if address == SHIELDS_URL { self.shields_html(cfg) } else { String::new() };
+        internal_page(address, &cfg.language, &stats)
+    }
+
+    /// crow:shields body: only what Crow really does (blocked loads and domains, masked gamepad
+    /// reads, refused WebGL contexts), the per-site exceptions and the open containers. Every
+    /// value is escaped; the page itself runs no script.
+    fn shields_html(&self, cfg: &Settings) -> String {
+        let lang = cfg.language.as_str();
+        let tr = |k: &str, a: &[&str]| html_escape(&settings::tr(lang, k, a));
+        let mut o = String::new();
+        let _ = write!(o, r#"<div class="grid">"#);
+        for (n, k) in [
+            (self.stats.blocked, "sh_blocked_session"),
+            (self.data.blocked_total, "sh_blocked_total"),
+            (u64::from(self.stats.pad_pages), "sh_pad_pages"),
+            (self.stats.webgl, "sh_webgl"),
+        ] {
+            let _ = write!(o, r#"<div class="tile"><div class="num">{n}</div><div class="lbl">{}</div></div>"#, tr(k, &[]));
+        }
+        let _ = write!(o, "</div><section><h2>{}</h2>", tr("sh_domains", &[]));
+        let mut domains: Vec<_> = self.stats.domains.iter().collect();
+        domains.sort_unstable_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        if !wk::BLOCK_STATS {
+            let _ = write!(o, r#"<p class="note">{}</p>"#, tr("shield_unavailable", &[]));
+        } else if domains.is_empty() {
+            let _ = write!(o, r#"<p class="note">{}</p>"#, tr("sh_domains_none", &[]));
+        } else {
+            o.push_str("<table>");
+            for (host, n) in domains.into_iter().take(40) {
+                let _ = write!(o, r#"<tr><td>{}</td><td class="n">{n}</td></tr>"#, html_escape(host));
+            }
+            o.push_str("</table>");
+        }
+        let on_off = |b: bool| tr(if b { "switch_on" } else { "switch_off" }, &[]);
+        let _ = write!(o, "</section><section><h2>{}</h2><table>", tr("sh_protections", &[]));
+        for (label, value) in [
+            (tr("adblock_full", &[""]), on_off(cfg.adblock)),
+            (tr("gamepad_setting", &[]), format!("{} · {}", on_off(cfg.gamepad_enabled), html_escape(adblock::PAD_ID))),
+        ] {
+            let _ = write!(o, "<tr><td>{label}</td><td>{value}</td></tr>");
+        }
+        o.push_str("</table></section>");
+        let none = tr("sh_none", &[]);
+        let _ = write!(o, "<section><h2>{}</h2><table>", tr("sh_sites", &[]));
+        for (k, list) in [("sh_sites_adblock", &cfg.adblock_allow), ("sh_sites_gamepad", &cfg.gamepad_sites), ("sh_sites_webgl", &cfg.webgl_off)] {
+            let v = if list.is_empty() { none.clone() } else { html_escape(&list.join(", ")) };
+            let _ = write!(o, "<tr><td>{}</td><td>{v}</td></tr>", tr(k, &[]));
+        }
+        let _ = write!(o, "</table></section><section><h2>{}</h2><table>", tr("sh_containers", &[]));
+        for c in Container::ALL {
+            let n = self.tabs.iter().filter(|t| t.container == c).count();
+            let _ = write!(o, r#"<tr><td><span class="dot {}"></span>{}</td><td class="n">{n}</td></tr>"#, c.key(), tr(c.label_key(), &[]));
+        }
+        let _ = write!(o, r#"</table><p class="note">{}</p></section>"#, tr("sh_containers_note", &[]));
+        o
     }
 
     fn push_shield(&self, cfg: &Settings) {
@@ -767,7 +962,7 @@ impl App {
             next_id: Rc::new(Cell::new(1)),
             adblock: Rc::new(Cell::new(true)),
             lang: Rc::new(RefCell::new(settings::stored_language())),
-            gamepad: Rc::new(Cell::new(false)),
+            page_js: Rc::new(RefCell::new(String::new())),
             pad_event: pad_event_name().into(),
         };
         let mut app = Self {
@@ -804,8 +999,8 @@ impl App {
 
     pub fn wake(&self) -> Instant {
         let fav = self.s.as_ref().and_then(|s| s.fav_due);
-        let pad = self.s.as_ref().filter(|_| self.cfg.gamepad_enabled).map(|s| s.pad_due.unwrap_or_else(|| Instant::now() + PAD_POLL));
-        [self.quit_at, self.restore_by, fav, pad]
+        let page = self.s.as_ref().map(|s| s.page_due.unwrap_or_else(|| Instant::now() + PAGE_POLL));
+        [self.quit_at, self.restore_by, fav, page]
             .into_iter()
             .flatten()
             .fold(self.next_tick, Instant::min)
@@ -866,7 +1061,7 @@ impl App {
                     let _ = p.evaluate_script(&format!("setDefaultBrowser({})", json!(status)));
                 }
             }
-            UserEvent::AdoptTab(id) => self.adopt(id),
+            UserEvent::AdoptTab { id, opener } => self.adopt(id, opener),
             UserEvent::DownloadAsk {
                 key,
                 tab,
@@ -936,12 +1131,20 @@ impl App {
             }
             UserEvent::Blocked => {
                 let blocked = wk::take_blocked();
+                let hosts = wk::take_blocked_hosts();
                 let Some(s) = self.s.as_mut() else { return };
                 for (id, n) in blocked {
                     if let Some(i) = s.tab_idx(id) {
                         s.tabs[i].blocked += n;
                         s.data.blocked_total += u64::from(n);
+                        s.stats.blocked += u64::from(n);
                         s.dirty = true;
+                    }
+                }
+                for (host, n) in hosts {
+                    let d = &mut s.stats.domains;
+                    if d.len() < MAX_BLOCKED_HOSTS || d.contains_key(&host) {
+                        *d.entry(host).or_default() += u64::from(n);
                     }
                 }
                 let n = s.cur().map_or(0, |t| t.blocked);
@@ -981,11 +1184,11 @@ impl App {
                 }
             }
             UserEvent::Icon { tab, data } => self.icon(tab, data),
-            UserEvent::GamepadRead { tab } => {
-                let Some(s) = self.s.as_mut() else { return };
-                let Some(i) = s.tab_idx(tab) else { return };
-                s.tabs[i].gamepad = true;
-                s.sync(&self.cfg);
+            UserEvent::PageState { tab, data } => self.page_state(tab, &data),
+            UserEvent::Pip(r) => {
+                if let (Some(s), "none") = (&self.s, r.as_str()) {
+                    s.note("pip_none", &[]);
+                }
             }
             UserEvent::GamepadInfo { tab, data } => self.gamepad_popover(tab, &data),
             UserEvent::Update { result, manual } => self.update_result(result, manual),
@@ -1028,12 +1231,11 @@ impl App {
         {
             s.poll_icons(&self.ctx.proxy);
         }
-        if self.cfg.gamepad_enabled
-            && let Some(s) = self.s.as_mut()
-            && s.pad_due.is_none_or(|d| now >= d)
+        if let Some(s) = self.s.as_mut()
+            && s.page_due.is_none_or(|d| now >= d)
         {
-            s.pad_due = Some(now + PAD_POLL);
-            s.poll_gamepad(&self.ctx.proxy);
+            s.page_due = Some(now + PAGE_POLL);
+            s.poll_page(&self.ctx.proxy);
         }
         if now < self.next_tick {
             return;
@@ -1130,6 +1332,8 @@ impl App {
             .or_else(Settings::take_legacy)
             .unwrap_or_default();
         self.ctx.adblock.set(self.cfg.adblock);
+        *self.ctx.page_js.borrow_mut() =
+            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event);
         // The vault is authoritative; the plain copy only serves the next lock screen.
         settings::store_language(&self.cfg.language);
         self.ctx.lang.borrow_mut().clone_from(&self.cfg.language);
@@ -1176,8 +1380,10 @@ impl App {
             site_h: 0.0,
             site_closed: Instant::now(),
             fav_due: None,
-            pad_due: None,
-            pad_stale: false,
+            page_due: None,
+            views_stale: false,
+            containers: HashMap::new(),
+            stats: ShieldStats::default(),
             update: None,
             update_bar: false,
             update_busy: false,
@@ -1231,7 +1437,7 @@ impl App {
         }
         s.close_panel();
         // New gamepad setting: every view is rebuilt with the new shim when it is shown again.
-        if std::mem::take(&mut s.pad_stale) {
+        if std::mem::take(&mut s.views_stale) {
             for t in &mut s.tabs {
                 t.drop_view();
                 t.loading = false;
@@ -1250,18 +1456,20 @@ impl App {
             }
         s.active = idx;
         let rect = content_rect(&self.ctx.window, s.top());
+        // Built before borrowing the tab: crow:shields renders session data.
+        let page = if s.tabs[idx].view.is_none() { s.internal(&s.tabs[idx].url, &self.cfg) } else { None };
+        let store = s.store_for(s.tabs[idx].container);
         let tab = &mut s.tabs[idx];
         if tab.view.is_none() {
             let on = blocks(&self.cfg, &tab.url);
-            let config = wk::config(&s.store, on, self.cfg.gamepad_enabled);
-            let page = internal_page(&tab.url, &self.cfg.language);
+            let config = wk::config(&store, on, self.cfg.gamepad_anywhere());
             let url = if page.is_some() { None } else { Some(tab.url.as_str()) };
             tab.view = self.ctx.build(tab.id, url, config, rect, on).ok();
             tab.blocking = Some(on);
             if let (Some((address, html)), Some(v)) = (page, &tab.view) {
                 tab.internal = true;
                 tab.url = address.into();
-                let _ = v.load_html(&html);
+                wk::load_internal(v, &html, INTERNAL_BASE);
             }
             if let Some(v) = &tab.view {
                 let _ = v.zoom(s.zoom);
@@ -1276,11 +1484,36 @@ impl App {
     }
 
     fn open_tab(&mut self, url: String) {
+        self.open_tab_in(url, Container::Default);
+    }
+
+    fn open_tab_in(&mut self, url: String, container: Container) {
         let Some(s) = self.s.as_mut() else { return };
         let at = (s.active + 1).min(s.tabs.len());
-        s.tabs.insert(at, Tab::new(self.ctx.next(), url, None));
+        let mut tab = Tab::new(self.ctx.next(), url, None);
+        tab.container = container;
+        s.tabs.insert(at, tab);
         s.dirty = true;
         self.activate(at);
+    }
+
+    /// Page shim for views built from now on; existing views are rebuilt when shown next (the
+    /// visible one at once unless a panel is open, then when it closes).
+    fn shim_changed(&mut self, now: bool) {
+        *self.ctx.page_js.borrow_mut() =
+            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event);
+        let Some(s) = self.s.as_mut() else { return };
+        s.views_stale = true;
+        let active = s.active;
+        for (i, t) in s.tabs.iter_mut().enumerate() {
+            if i != active {
+                t.drop_view();
+                t.loading = false;
+            }
+        }
+        if now {
+            self.activate(active);
+        }
     }
 
     /// Links from other apps: only http(s), each in a new tab; queued until the vault is
@@ -1308,7 +1541,7 @@ impl App {
         self.ctx.window.set_focus();
     }
 
-    fn adopt(&mut self, id: u32) {
+    fn adopt(&mut self, id: u32, opener: u32) {
         let view = PENDING.with(|p| {
             let mut p = p.borrow_mut();
             let i = p.iter().position(|(pid, _)| *pid == id)?;
@@ -1319,6 +1552,8 @@ impl App {
         };
         let _ = view.zoom(s.zoom);
         let mut tab = Tab::new(id, String::new(), Some(view));
+        // The popup already lives in the opener's store (WebKit copies its configuration).
+        tab.container = s.tab_idx(opener).map_or(Container::Default, |i| s.tabs[i].container);
         apply_rules(&self.cfg, &mut tab, "");
         let at = (s.active + 1).min(s.tabs.len());
         s.tabs.insert(at, tab);
@@ -1331,13 +1566,15 @@ impl App {
             return;
         }
         let mut tab = s.tabs.remove(idx);
-        if tab.url.starts_with("http") {
+        // Container tabs are ephemeral: not reopened (that would be in the default container).
+        if tab.url.starts_with("http") && tab.container == Container::Default {
             s.closed.push(tab.url.clone());
             if s.closed.len() > MAX_CLOSED_TABS {
                 s.closed.remove(0);
             }
         }
         tab.drop_view();
+        s.drop_unused_containers();
         s.dirty = true;
         if s.tabs.is_empty() {
             s.active = 0;
@@ -1355,8 +1592,9 @@ impl App {
     fn navigate(&mut self, url: String) {
         let Some(s) = self.s.as_mut() else { return };
         s.close_panel();
+        let page = s.internal(&url, &self.cfg);
         if let Some(t) = s.tabs.get_mut(s.active)
-            && let Some((address, html)) = internal_page(&url, &self.cfg.language)
+            && let Some((address, html)) = page
         {
             // Built-in page: shown under its own address, no request leaves the browser.
             t.url = address.into();
@@ -1366,7 +1604,7 @@ impl App {
             // Focus leaves the address bar as for any other page: WebKit hands keyboard and
             // gamepad input only to the focused view (crow:gamepad stayed "not connected").
             if let Some(v) = &t.view {
-                let _ = v.load_html(&html);
+                wk::load_internal(v, &html, INTERNAL_BASE);
                 let _ = v.focus();
             }
             return s.sync(&self.cfg);
@@ -1388,8 +1626,10 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let t = &mut s.tabs[i];
-        // The interstitial / built-in / crash page itself (about:blank) keeps the shown URL and state.
-        let interstitial = (t.tls_error || t.internal || t.crashed) && (url.is_empty() || url == "about:blank");
+        // The interstitial / built-in / crash page itself (about:blank, built-in pages under
+        // `INTERNAL_BASE`) keeps the shown URL and state.
+        let local = url.is_empty() || url == "about:blank" || (t.internal && url.starts_with(INTERNAL_BASE));
+        let interstitial = (t.tls_error || t.internal || t.crashed) && local;
         // Allowlist follows the page being loaded: switched before its subresources are requested.
         if !url.is_empty() && !interstitial {
             apply_rules(&self.cfg, t, &url);
@@ -1399,6 +1639,8 @@ impl App {
             t.internal = false;
             t.crashed = false;
             t.gamepad = false;
+            t.webgl_blocks = 0;
+            t.video = false;
         }
         if !started && interstitial {
             t.loading = false;
@@ -1450,7 +1692,8 @@ impl App {
             }
             _ => t.icon.clear(),
         }
-        if url.starts_with("http") {
+        // The isolated container leaves no history.
+        if url.starts_with("http") && t.container != Container::Isolated {
             let title = t.title.clone();
             let h = &mut s.data.history;
             if h.last().is_none_or(|e| e.url != url) {
@@ -1524,6 +1767,12 @@ impl App {
             t.icon.zeroize();
         }
         s.tabs.clear();
+        for store in s.containers.values() {
+            wk::clear_store(store, || {});
+            wk::drop_container_store(store);
+        }
+        s.containers.clear();
+        s.stats = ShieldStats::default();
         s.closed.iter_mut().for_each(Zeroize::zeroize);
         s.closed.clear();
         s.data.session.iter_mut().for_each(Zeroize::zeroize);
@@ -1595,6 +1844,31 @@ impl App {
         let h = if s.site_h > 0.0 { s.site_h } else { 280.0 };
         s.shield_open = false;
         s.site = self.ctx.ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
+    }
+
+    /// `PAGE_READ` of a tab: gamepad and video chips, refused WebGL contexts (crow:shields).
+    fn page_state(&mut self, tab: u32, data: &str) {
+        let Some(s) = self.s.as_mut() else { return };
+        let Some(i) = s.tab_idx(tab) else { return };
+        let Ok([pad, gl, video]) = serde_json::from_str::<[u32; 3]>(data) else { return };
+        let t = &mut s.tabs[i];
+        let mut changed = false;
+        if pad == 1 && !t.gamepad {
+            t.gamepad = true;
+            s.stats.pad_pages += 1;
+            changed = true;
+        }
+        if gl > t.webgl_blocks {
+            s.stats.webgl += u64::from(gl - t.webgl_blocks);
+            t.webgl_blocks = gl;
+        }
+        if (video == 1) != t.video {
+            t.video = video == 1;
+            changed = true;
+        }
+        if changed {
+            s.sync(&self.cfg);
+        }
     }
 
     fn icon(&mut self, id: u32, data: String) {
@@ -1941,6 +2215,10 @@ impl App {
                         wk::decide_download(a.key, false, &a.url, None);
                     }
                     wk::clear_store(&s.store, || {});
+                    for store in s.containers.values() {
+                        wk::clear_store(store, || {});
+                        wk::drop_container_store(store);
+                    }
                 }
                 // Don't reveal the chosen theme (or anything else) while locked.
                 self.cfg = Settings::default();
@@ -2055,11 +2333,15 @@ impl App {
             // plain reload would only repeat the local page); a built-in page is rendered again.
             "reload" if s.cur().is_some_and(|t| t.tls_error || t.internal || t.crashed) => {
                 let i = s.active;
+                let page = s.internal(&s.tabs[i].url, &self.cfg);
                 let t = &mut s.tabs[i];
                 t.crashed = false;
                 if let Some(v) = &t.view {
-                    let _ = match internal_page(&t.url, &self.cfg.language) {
-                        Some((_, html)) => v.load_html(&html),
+                    let _ = match page {
+                        Some((_, html)) => {
+                            wk::load_internal(v, &html, INTERNAL_BASE);
+                            Ok(())
+                        }
                         None => v.load_url(&t.url),
                     };
                 }
@@ -2186,7 +2468,7 @@ impl App {
                 s.sync(&self.cfg);
             }
             "panel-close" => {
-                if s.pad_stale {
+                if s.views_stale {
                     let active = s.active;
                     return self.activate(active); // closes the panel too
                 }
@@ -2221,16 +2503,9 @@ impl App {
                     }
                     // Hidden tabs are unloaded now; the visible one is rebuilt when the panel closes.
                     "gamepad_enabled" => {
-                        self.ctx.gamepad.set(self.cfg.gamepad_enabled);
-                        s.pad_stale = true;
-                        s.pad_due = None;
-                        let active = s.active;
-                        for (i, t) in s.tabs.iter_mut().enumerate() {
-                            if i != active {
-                                t.drop_view();
-                                t.loading = false;
-                            }
-                        }
+                        s.sync(&self.cfg);
+                        self.persist(After::Nothing);
+                        return self.shim_changed(false);
                     }
                     "adblock_easylist" | "adblock_hosts" => {
                         let (on, hosts) = match k {
@@ -2401,6 +2676,40 @@ impl App {
                 s.shield_open = false;
                 self.request_site_cookies(false);
             }
+            // Shield popover, per site (vault): gamepad setting reversed / WebGL off. The page shim
+            // carries these lists, so the tab is rebuilt (reloaded) at once.
+            "site-gamepad" | "site-webgl" => {
+                let Some(host) = site_key(arg) else { return };
+                let list = if name == "site-gamepad" { &mut self.cfg.gamepad_sites } else { &mut self.cfg.webgl_off };
+                if !toggle_site(list, host) {
+                    return s.note("allowlist_full", &[]);
+                }
+                s.dirty = true;
+                self.persist(After::Nothing);
+                self.shim_changed(true);
+            }
+            "pip" => {
+                let Some(v) = s.view() else { return };
+                let p = self.ctx.proxy.clone();
+                wk::eval_isolated(v, PIP_JS, move |r| {
+                    let _ = p.send_event(UserEvent::Pip(r));
+                });
+            }
+            // Right click on "+": container picker (same toggle rule as site-info).
+            "container-menu" => {
+                if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
+                    return;
+                }
+                s.site_x = arg.parse().unwrap_or(0.0);
+                let h = if s.site_h > 0.0 { s.site_h } else { 240.0 };
+                s.shield_open = false;
+                s.site = self.ctx.ui_view(include_str!("containers.html"), site_rect(&self.ctx.window, s.site_x, h));
+            }
+            "new-tab-container" => {
+                let Some(c) = Container::parse(arg) else { return };
+                s.site = None;
+                self.open_tab_in(self.cfg.homepage.clone(), c);
+            }
             // Gamepad chip: what the page asked for and what it got (same toggle rule as site-info).
             "gamepad-open" => {
                 if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
@@ -2450,8 +2759,8 @@ impl App {
                 }
                 // Built-in pages have no script: render them again in the new language.
                 for t in s.tabs.iter().filter(|t| t.internal) {
-                    if let (Some(v), Some((_, html))) = (&t.view, internal_page(&t.url, &self.cfg.language)) {
-                        let _ = v.load_html(&html);
+                    if let (Some(v), Some((_, html))) = (&t.view, s.internal(&t.url, &self.cfg)) {
+                        wk::load_internal(v, &html, INTERNAL_BASE);
                     }
                 }
                 s.dirty = true;
@@ -2787,23 +3096,32 @@ fn panel_section(arg: &str) -> &'static str {
 const CHANGELOG_URL: &str = "crow:changelog";
 /// Gamepad test page (`gamepad.html`, driven from the isolated world by `gamepad.js`).
 const GAMEPAD_URL: &str = "crow:gamepad";
+/// Session shield dashboard (`shields.html` + `Session::shields_html`).
+const SHIELDS_URL: &str = "crow:shields";
+/// Document address of built-in pages. A secure origin, so APIs restricted to secure contexts
+/// work there (WebKit hands gamepads only to them; `about:blank` from `load_html` is not one).
+/// `.invalid` never resolves and the pages load nothing (CSP `default-src 'none'`).
+const INTERNAL_BASE: &str = "https://crow.invalid/";
 
 /// Built-in offline pages: static HTML with its own strict CSP and no script, loaded into the
 /// tab view (which has no IPC) instead of being fetched. Text is filled in `lang` here, so the
 /// tab never gets the dictionaries or `t()`. Returns the address shown for it and the HTML.
-fn internal_page(url: &str, lang: &str) -> Option<(&'static str, String)> {
+/// `stats`: pre-rendered, escaped body of crow:shields (`Session::shields_html`).
+fn internal_page(url: &str, lang: &str, stats: &str) -> Option<(&'static str, String)> {
     let address = internal_address(url)?;
     let src = match address {
         GAMEPAD_URL => include_str!("gamepad.html"),
+        SHIELDS_URL => include_str!("shields.html"),
         _ => include_str!("changelog.html"),
     };
-    Some((address, localize_page(src, lang)))
+    Some((address, localize_page(src, lang).replace("<!--STATS-->", stats)))
 }
 
 fn internal_address(url: &str) -> Option<&'static str> {
     match url.trim().to_ascii_lowercase().as_str() {
         "crow:changelog" | "about:changelog" => Some(CHANGELOG_URL),
         "crow:gamepad" | "about:gamepad" => Some(GAMEPAD_URL),
+        "crow:shields" | "about:shields" => Some(SHIELDS_URL),
         _ => None,
     }
 }

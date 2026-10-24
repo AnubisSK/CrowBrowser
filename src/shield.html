@@ -37,6 +37,9 @@
   .tile.big .num { font-size: 32px; color: var(--accent); }
   .lbl { color: var(--mute); font-size: 12px; margin-top: 2px; }
   .note { padding: 0 16px 12px; color: var(--mute); font-size: 11px; line-height: 1.4; }
+  .site { display: grid; gap: 2px; padding: 4px 16px 12px; }
+  .site .row { display: flex; align-items: center; gap: 12px; padding: 6px 0; }
+  .site .row .who .host { font-size: 13px; font-weight: 500; }
   footer { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); }
   .btn { font: inherit; color: var(--fg); border: 1px solid var(--line); background: var(--input); padding: 4px 10px; border-radius: 7px; white-space: nowrap; }
   .btn:hover { border-color: var(--mute); }
@@ -100,6 +103,17 @@
         t('shield_total', num(D.total_blocked), bytes(D.total_bytes), time(D.total_ms))));
     } else {
       out.push(h('div', { class: 'note', style: 'padding-top:12px' }, t('shield_unavailable')));
+    }
+    // Per-site switches (saved in the vault); the page reloads with them.
+    if (D.host) {
+      const row = (title, state, on, cmd) => {
+        const sw = h('div', { class: 'sw' + (on ? ' on' : ''), role: 'switch' });
+        sw.onclick = () => send(cmd + ':' + D.host);
+        return h('div', { class: 'row' }, h('div', { class: 'who' }, h('div', { class: 'host' }, title), h('div', { class: 'state' }, state)), sw);
+      };
+      out.push(h('div', { class: 'site' },
+        row(t('sh_pad_site'), D.gamepad_api ? t(D.pad_read ? 'sh_pad_read' : 'gp_state') : t('sh_pad_off'), D.gamepad_api, 'site-gamepad'),
+        row(t('sh_webgl_site'), D.webgl ? t('sh_webgl_on') : t('sh_webgl_off', D.gl_blocks), D.webgl, 'site-webgl')));
     }
     out.push(h('footer', {},
       h('button', { class: 'btn', onclick: () => send('toggle-adblock') }, t(D.is_enabled ? 'disable_everywhere' : 'enable_everywhere')),

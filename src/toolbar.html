@@ -58,6 +58,11 @@
   .tab .fav { width: 16px; height: 16px; flex: none; border-radius: 3px; }
   .tab.loading .fav { display: none; }
   .tab:not(.loading) .fav + .dot { display: none; }
+  /* Container tabs: colored stripe on top (own in-memory cookie/storage jar). */
+  .tab[data-c]::before { content: ''; position: absolute; left: 8px; right: 8px; top: 0; height: 2px; border-radius: 0 0 2px 2px; }
+  .tab[data-c="personal"]::before { background: #3b82f6; }
+  .tab[data-c="work"]::before { background: #f59e0b; }
+  .tab[data-c="isolated"]::before { background: #a855f7; }
   .tab .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--mute); flex: none; opacity: .5; }
   .tab.loading .dot { background: transparent; border: 2px solid var(--accent); border-right-color: transparent; animation: spin .8s linear infinite; opacity: 1; }
   .tab .x { width: 18px; height: 18px; border-radius: 4px; display: grid; place-items: center; opacity: 0; font-size: 14px; flex: none; }
@@ -116,6 +121,8 @@
   #pad .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @keyframes padin { from { opacity: 0; transform: translateY(-4px) scale(.96); } to { opacity: 1; transform: none; } }
   @media (max-width: 900px) { #pad .txt { display: none; } }
+  #pip { display: none; color: var(--accent); }
+  #pip.show { display: grid; animation: padin .35s ease-out; }
   #dl.busy { color: var(--accent); }
   #dl.busy::after { content: ''; position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
@@ -170,6 +177,7 @@
       <button id="login" data-i18n-title="logged_in"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/></svg></button>
       <button id="star" data-i18n-title="bookmark_page" data-hint=" (⌘D)"><svg viewBox="0 0 24 24"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg></button>
     </div>
+    <button id="pip" data-i18n-title="pip_title"><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="11" width="8" height="7" rx="1"/></svg></button>
     <button id="pad" data-i18n-title="gamepad_chip"><span aria-hidden="true">🎮</span><span class="txt" data-i18n="gamepad_chip"></span></button>
     <button id="shield" data-i18n-title="adblock"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span id="shieldn"></span></button>
     <button id="bms" data-i18n-title="bookmarks" data-hint=" (⌘⌥B)"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
@@ -224,6 +232,9 @@
   $('reload').onclick = () => send(S.loading ? 'stop' : 'reload');
   // Shield: click = stats popover (per-site switch inside), ⌥/Alt+click = global switch.
   $('pad').onclick = () => send('gamepad-open:' + Math.round($('pad').getBoundingClientRect().left));
+  $('pip').onclick = () => send('pip');
+  // "+" right click: open the new tab in a container.
+  $('newtab').oncontextmenu = (e) => { e.preventDefault(); send('container-menu:' + Math.round($('newtab').getBoundingClientRect().left)); };
   $('shield').onclick = (e) => send(e.altKey ? 'toggle-adblock' : 'shield-open:' + Math.round($('shield').getBoundingClientRect().left));
   // Blocked loads on the current page (badge); pushed by the backend as they happen.
   function setBlocked(n) {
@@ -291,6 +302,7 @@
       el.className = 'tab' + (i === st.active ? ' on' : '') + (tab.loading ? ' loading' : '') + (tab.asleep ? ' asleep' : '');
       el.dataset.id = tab.id;
       el.title = tab.title || t('new_tab');
+      if (tab.c) { el.dataset.c = tab.c; el.title += ' · ' + t('ct_' + tab.c); }
       const dot = document.createElement('span'); dot.className = 'dot';
       const title = document.createElement('span'); title.className = 't'; title.textContent = tab.title || t('new_tab');
       const x = document.createElement('span'); x.className = 'x'; x.textContent = '×'; x.title = t('close_tab');
@@ -345,6 +357,7 @@
       + ' (' + t('shield_hint') + ')';
     setBlocked(st.blocked || 0);
     $('pad').classList.toggle('show', !!st.gamepad);
+    $('pip').classList.toggle('show', !!st.video);
     $('dl').classList.toggle('busy', st.downloads > 0);
     for (const [id, sec] of [['bms', 'bookmarks'], ['hist', 'history'], ['dl', 'downloads'], ['settings', 'settings']])
       $(id).classList.toggle('on', st.panel === sec);
