@@ -16,6 +16,10 @@ zeroize = "1"
 sha2 = "0.10"
 # EasyList/EasyPrivacy parsing, converted to WebKit content-blocker rules (no runtime engine)
 adblock = { version = "0.13", default-features = false, features = ["content-blocking", "embedded-domain-resolver"] }
+# Native gamepads for pages (WebKit's Gamepad API is off). Default features: gilrs-core
+# refuses to build without its Windows backend feature, which is inert elsewhere.
+# Linux: needs libudev (libudev-dev / systemd-devel).
+gilrs = "0.11"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.21"

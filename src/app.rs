@@ -1,5 +1,5 @@
 use crate::{
-    adblock, cert, default_browser, download,
+    adblock, cert, default_browser, download, gamepad,
     settings::{self, ENGINES, Settings},
     update,
     vault::{self, Bookmark, CookieRec, Download, HistoryEntry, MAX_HISTORY, Vault, VaultData},
@@ -66,9 +66,6 @@ if (!v || !v.webkitSupportsPresentationMode || !v.webkitSupportsPresentationMode
 v.webkitSetPresentationMode('picture-in-picture'); return 'pip'; })()";
 /// Session list of blocked domains shown on crow:shields is capped.
 const MAX_BLOCKED_HOSTS: usize = 500;
-/// What the gamepad popover shows: the real pads, read in the isolated world (unmasked there).
-const PAD_INFO: &str = "JSON.stringify({ pads: navigator.getGamepads ? Array.from(navigator.getGamepads()).filter(Boolean) \
-.map(g => ({ index: g.index, id: g.id, mapping: g.mapping, buttons: g.buttons.length, axes: g.axes.length })) : [] })";
 const MAX_ALLOW: usize = 1000;
 /// Reopen-closed-tab memory and download list are bounded (oldest entries go first).
 const MAX_CLOSED_TABS: usize = 50;
@@ -193,11 +190,8 @@ pub enum UserEvent {
     },
     /// Picture-in-picture toggle result (`PIP_JS`).
     Pip(String),
-    /// Gamepad popover data from the tab's isolated world (`PAD_INFO`, JSON).
-    GamepadInfo {
-        tab: u32,
-        data: String,
-    },
+    /// Controller state from `gamepad::Bridge` (JSON list of `GamepadSnapshot`) for the active tab.
+    Gamepads(String),
     /// The tab's page could not be loaded (offline, DNS, refused, timeout): reason key.
     NetError {
         tab: u32,
@@ -639,12 +633,12 @@ impl Session {
     }
 
     /// Active page, in the isolated world (no IPC in tabs): what the shim reported and whether
-    /// it has a video. crow:gamepad gets the controllers macOS sees instead.
-    fn poll_page(&self, proxy: &EventLoopProxy<UserEvent>) {
+    /// it has a video. crow:gamepad gets the controllers Crow's bridge sees instead (`pads`).
+    fn poll_page(&self, proxy: &EventLoopProxy<UserEvent>, pads: Option<&[gamepad::PadInfo]>) {
         let Some(t) = self.cur() else { return };
         let Some(v) = &t.view else { return };
         if t.internal && t.url == GAMEPAD_URL {
-            let list = json!(wk::system_gamepads());
+            let list = json!(pads);
             return wk::eval_isolated(v, &format!("window.__crowSys && window.__crowSys({list})"), |_| {});
         }
         if !t.url.starts_with("http") {
@@ -923,6 +917,11 @@ pub struct App {
     sessions: u64,
     /// Links received while locked or before the session restored, opened afterwards.
     incoming: Vec<String>,
+    /// Native controller input, started once some site may use gamepads (`sync_pads`).
+    pads: Option<gamepad::Bridge>,
+    /// Tab, address and loading state that gets controller input (focused window only).
+    pad_target: Option<(u32, String, bool)>,
+    focused: bool,
 }
 
 impl App {
@@ -990,6 +989,9 @@ impl App {
             update_checked: false,
             sessions: 0,
             incoming: Vec::new(),
+            pads: None,
+            pad_target: None,
+            focused: true,
         };
         app.show_lock();
         app
@@ -1042,7 +1044,8 @@ impl App {
     }
 
     /// Greys out the drawn window controls (Linux) like macOS does for inactive windows.
-    pub fn focused(&self, on: bool) {
+    pub fn focused(&mut self, on: bool) {
+        self.focused = on;
         let js = format!("setFocus({on})");
         for v in self.lock.iter().chain(self.s.as_ref().map(|s| &s.toolbar)) {
             let _ = v.evaluate_script(&js);
@@ -1204,7 +1207,7 @@ impl App {
                     s.note("pip_none", &[]);
                 }
             }
-            UserEvent::GamepadInfo { tab, data } => self.gamepad_popover(tab, &data),
+            UserEvent::Gamepads(state) => self.push_pads(&state),
             UserEvent::Update { result, manual } => self.update_result(result, manual),
             UserEvent::UpdateSaved(path) => {
                 let Some(s) = self.s.as_mut() else { return };
@@ -1249,8 +1252,10 @@ impl App {
             && s.page_due.is_none_or(|d| now >= d)
         {
             s.page_due = Some(now + PAGE_POLL);
-            s.poll_page(&self.ctx.proxy);
+            let pads = self.pads.as_ref().map(gamepad::Bridge::pads);
+            s.poll_page(&self.ctx.proxy, pads.as_deref());
         }
+        self.sync_pads();
         if now < self.next_tick {
             return;
         }
@@ -1276,9 +1281,51 @@ impl App {
     }
 
     /// NSApp terminated from outside (Dock, logout): synchronous save with last known cookies.
+    /// The gamepad worker is stopped and joined.
     pub fn shutdown(&mut self) {
         if let Some(s) = &mut self.s {
             s.save_now(&self.cfg);
+        }
+        self.pads = None;
+    }
+
+    /// Controller input goes to the active tab only: focused window, unlocked session, a site
+    /// with gamepads on (or crow:gamepad). A new target gets the full state once.
+    fn sync_pads(&mut self) {
+        if self.pads.is_none() && self.cfg.gamepad_anywhere() {
+            self.pads = Some(gamepad::Bridge::start(self.ctx.proxy.clone()));
+        }
+        let Some(b) = &self.pads else { return };
+        let session = self.s.as_ref().filter(|s| self.focused && s.ready);
+        let target = session.and_then(|s| {
+            let t = s.cur().filter(|t| t.view.is_some())?;
+            let on = if t.internal {
+                t.url == GAMEPAD_URL && self.cfg.gamepad_enabled
+            } else {
+                t.url.starts_with("http") && self.cfg.gamepad_for(&host_of(&t.url))
+            };
+            on.then(|| (t.id, t.url.clone(), t.loading))
+        });
+        if target != self.pad_target {
+            b.resync();
+            self.pad_target = target;
+        }
+        b.set_active(self.pad_target.is_some());
+    }
+
+    /// Bridge state to the target tab: the page shim (main world, per-session event name that
+    /// pages cannot know) or crow:gamepad's isolated-world driver.
+    fn push_pads(&self, state: &str) {
+        let Some(t) = self.s.as_ref().and_then(Session::cur) else { return };
+        let Some(v) = &t.view else { return };
+        if self.pad_target.as_ref().is_none_or(|(id, ..)| *id != t.id) {
+            return;
+        }
+        if t.internal {
+            wk::eval_isolated(v, &format!("window.__crowPads && window.__crowPads({state})"), |_| {});
+        } else {
+            let name = js(&format!("{}p", self.ctx.pad_event));
+            let _ = v.evaluate_script(&format!("document.dispatchEvent(new CustomEvent({name}, {{ detail: {} }}))", js(state)));
         }
     }
 
@@ -1476,7 +1523,7 @@ impl App {
         let tab = &mut s.tabs[idx];
         if tab.view.is_none() {
             let on = blocks(&self.cfg, &tab.url);
-            let config = wk::config(&store, on, self.cfg.gamepad_anywhere());
+            let config = wk::config(&store, on);
             let url = if page.is_some() { None } else { Some(tab.url.as_str()) };
             tab.view = self.ctx.build(tab.id, url, config, rect, on).ok();
             tab.blocking = Some(on);
@@ -1846,14 +1893,19 @@ impl App {
         }
     }
 
-    /// Gamepad popover under the chip, for the active tab only.
-    fn gamepad_popover(&mut self, tab: u32, data: &str) {
+    /// Gamepad popover under the chip, for the active tab: the controllers Crow reads (real names).
+    fn gamepad_popover(&mut self) {
+        let pads = self.pads.as_ref().map(gamepad::Bridge::pads).unwrap_or_default();
         let Some(s) = self.s.as_mut() else { return };
-        if s.site.is_some() || s.cur().is_none_or(|t| t.id != tab) {
+        if s.site.is_some() {
             return;
         }
         let url = s.cur().map_or("", |t| t.url.as_str());
-        let report: serde_json::Value = serde_json::from_str(data).unwrap_or_default();
+        let pads: Vec<_> = pads
+            .iter()
+            .map(|p| json!({ "index": p.index, "id": p.name, "mapping": p.mapping, "buttons": 17, "axes": 4 }))
+            .collect();
+        let report = json!({ "pads": pads });
         let data = json!({ "host": host_of(url), "spoofed": adblock::PAD_ID, "report": report });
         let html = include_str!("gamepadinfo.html").replace("/*DATA*/", &data.to_string().replace("</", "<\\/"));
         let h = if s.site_h > 0.0 { s.site_h } else { 280.0 };
@@ -2753,11 +2805,7 @@ impl App {
                     return;
                 }
                 s.site_x = arg.parse().unwrap_or(0.0);
-                let Some(t) = s.cur() else { return };
-                let (Some(v), tab, p) = (&t.view, t.id, self.ctx.proxy.clone()) else { return };
-                wk::eval_isolated(v, PAD_INFO, move |data| {
-                    let _ = p.send_event(UserEvent::GamepadInfo { tab, data });
-                });
+                self.gamepad_popover();
             }
             "gamepad-diag" => {
                 s.site = None;

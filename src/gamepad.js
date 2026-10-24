@@ -1,7 +1,8 @@
-// crow:gamepad: runs in Crow's isolated JS world of that page (wk::eval_isolated), so it reads
-// the real gamepads while websites only ever get `PAD_ID`. DOM updates use textContent and
-// attributes only. The diagnostics table tells where input stops: macOS (`__crowSys`, pushed by
-// Crow), WebKit (slots), or the page (secure context, focus, visibility).
+// crow:gamepad: runs in Crow's isolated JS world of that page (wk::eval_isolated). Crow pushes
+// the native bridge's state (`__crowPads`, gamepad.rs) and the controllers it reads with their
+// real names (`__crowSys`), while websites only ever get `PAD_ID`. DOM updates use textContent
+// and attributes only. The diagnostics table tells where input stops: the bridge (controllers),
+// the page feed (slots), or the page (secure context, focus, visibility).
 (() => {
   if (window.__crowDiag) return;
   window.__crowDiag = true;
@@ -12,28 +13,31 @@
   if (!state || !diag) return;
   const text = (id, s) => { const el = $(id); if (el && el.textContent !== s) el.textContent = s; };
   const yn = (b) => (b ? diag.dataset.yes : diag.dataset.no);
-  window.__crowSys = (list) => text('d-sys', !list ? '—' : list.length ? list.join(', ') : diag.dataset.none);
-  const api = ENABLED && !!navigator.getGamepads;
+  let names = [], pads = [];
+  window.__crowSys = (list) => {
+    names = Array.isArray(list) ? list : [];
+    text('d-sys', !list ? '—' : list.length ? list.map((p) => p.name).join(', ') : diag.dataset.none);
+  };
+  window.__crowPads = (list) => { pads = Array.isArray(list) ? list : []; };
+  const api = ENABLED;
   if (!api) {
     state.textContent = state.dataset.dis;
     document.body.classList.add('off');
   }
-  // WebKit exposes a pad only after a button press while this page has focus (W3C gamepad
-  // user activation); `gamepadconnected` marks that moment, polling then follows the state.
+  // The pad last used stays selected while it is connected.
   let index = null, frames = 0;
-  window.addEventListener('gamepadconnected', (e) => { index = e.gamepad.index; });
-  window.addEventListener('gamepaddisconnected', (e) => { if (e.gamepad.index === index) index = null; });
   const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(3);
   function frame() {
     frames++;
-    const pads = api ? navigator.getGamepads() : [];
     text('d-js', yn(true) + ' (' + frames + ')');
     text('d-secure', yn(window.isSecureContext));
     text('d-focus', yn(document.hasFocus()));
     text('d-vis', yn(document.visibilityState === 'visible'));
-    text('d-slots', api ? Array.from(pads).filter(Boolean).length + ' / ' + pads.length : '—');
+    text('d-slots', api ? pads.length + ' / ' + names.length : '—');
     if (api) {
-      const pad = (index !== null && pads[index]) || Array.from(pads).find(Boolean) || null;
+      const used = pads.find((p) => p.buttons.some((b) => b.pressed));
+      if (used) index = used.index;
+      const pad = pads.find((p) => p.index === index) || pads[0] || null;
       document.body.classList.toggle('live', !!pad);
       text('state', pad ? state.dataset.on : state.dataset.off);
       state.classList.toggle('on', !!pad);
@@ -51,7 +55,8 @@
       for (const [id, x, y] of [['ls', 0, 1], ['rs', 2, 3]]) {
         $(id).setAttribute('transform', 'translate(' + (ax[x] || 0) * 28 + ' ' + (ax[y] || 0) * 28 + ')');
       }
-      text('raw', pad ? pad.id : '—');
+      const real = pad && names.find((p) => p.index === pad.index);
+      text('raw', real ? real.name : '—');
       text('spoof', pad ? PAD_ID : '—');
       text('map', pad ? pad.mapping || '—' : '—');
       text('counts', pad ? pad.buttons.length + ' / ' + pad.axes.length : '—');

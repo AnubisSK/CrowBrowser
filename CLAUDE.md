@@ -44,9 +44,9 @@ Goal: Extreme memory efficiency, zero bloat, modern web compatibility, zero-comp
 - Networking/Filters: Network-level domain blocking for ads/telemetry before navigation (`wry::RequestAsync` / custom protocol handler).
 
 ### Linux System Packages
-- Arch / CachyOS: `sudo pacman -S webkit2gtk-4.1 gtk3 pkg-config libsoup3`
-- Debian / Ubuntu: `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev pkg-config libsoup-3.0-dev build-essential`
-- Fedora: `sudo dnf install webkit2gtk4.1-devel gtk3-devel pkgconf libsoup3-devel`
+- Arch / CachyOS: `sudo pacman -S webkit2gtk-4.1 gtk3 pkg-config libsoup3 systemd-libs`
+- Debian / Ubuntu: `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev pkg-config libsoup-3.0-dev libudev-dev build-essential`
+- Fedora: `sudo dnf install webkit2gtk4.1-devel gtk3-devel pkgconf libsoup3-devel systemd-devel`
 
 ## Dev Commands
 - Build: `cargo build`

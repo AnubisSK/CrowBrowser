@@ -37,52 +37,78 @@
     for (const k of ['WebGLRenderingContext', 'WebGL2RenderingContext']) delete window[k];
   }
 
-  // Gamepads: setting "gamepad_enabled", flipped for sites listed in the shield popover. Off: the
-  // API is removed (macOS also switches it off in WebKit when no site needs it) and connect events
-  // never reach the page. On: every pad reports one generic id, so model, vendor and product ids
-  // cannot be read; mapping, buttons and axes stay real so games work, and every connected pad is
-  // returned (only empty slots are null). A page's first read is signalled to Crow.
+  // Gamepads: setting "gamepad_enabled", flipped for sites listed in the shield popover. WebKit's
+  // own gamepads are never used (switched off on macOS; on Linux its events are dropped here).
+  // Off: the API is removed and connect events never reach the page. On: Crow's native bridge
+  // (src/gamepad.rs) feeds the top frame with the W3C standard layout, every pad under the one
+  // generic id `PAD_ID`; frames get an empty list. Like the spec, pads stay hidden until a button
+  // or stick is used on this page. A page's first read is signalled to Crow.
   const GAMEPAD = /*GAMEPAD*/false !== listed(/*GAMEPAD_FLIP*/[]);
-  const PAD_ID = /*PAD_ID*/'';
   const PAD_EVENTS = ['gamepadconnected', 'gamepaddisconnected'];
   if (!GAMEPAD) {
     for (const k of ['getGamepads', 'webkitGetGamepads']) delete Navigator.prototype[k];
     for (const k of ['ongamepadconnected', 'ongamepaddisconnected']) { delete Window.prototype[k]; delete window[k]; }
     for (const k of ['Gamepad', 'GamepadEvent', 'GamepadButton', 'GamepadHapticActuator']) delete window[k];
     for (const type of PAD_EVENTS) window.addEventListener(type, (e) => e.stopImmediatePropagation(), true);
-  } else if (Navigator.prototype.getGamepads) {
-    const proxies = new WeakMap();
-    const wrap = (g) => {
-      if (!g) return g;
-      let p = proxies.get(g);
-      if (!p) {
-        p = new Proxy(g, {
-          get(target, key) {
-            if (key === 'id') return PAD_ID;
-            const v = Reflect.get(target, key);
-            return typeof v === 'function' ? v.bind(target) : v;
-          },
-        });
-        proxies.set(g, p);
-      }
-      return p;
+  } else {
+    // Crow dispatches the state (JSON string) on `document` under a per-session event name.
+    const parse = JSON.parse, freeze = Object.freeze, now = performance.now.bind(performance);
+    const define = Object.defineProperty, isArray = Array.isArray;
+    const ours = new WeakSet();
+    let shown = new Map(), exposed = false, told = false;
+    delete Navigator.prototype.webkitGetGamepads;
+    for (const type of PAD_EVENTS) {
+      window.addEventListener(type, (e) => { if (!ours.has(e)) e.stopImmediatePropagation(); }, true);
+    }
+    const native = Object.prototype.hasOwnProperty.call(Window.prototype, 'ongamepadconnected');
+    const fire = (type, pad) => {
+      const e = new Ev(type);
+      define(e, 'gamepad', { value: pad, enumerable: true });
+      ours.add(e);
+      try { dispatch.call(window, e); } catch (x) {}
+      const on = !native && window['on' + type];
+      if (typeof on === 'function') { try { on.call(window, e); } catch (x) {} }
     };
-    const map = Array.prototype.map;
-    let told = false;
-    const getGamepads0 = Navigator.prototype.getGamepads;
-    Navigator.prototype.getGamepads = mask(function getGamepads() {
-      const pads = getGamepads0.apply(this, arguments);
+    const pad = (p, t) => freeze({
+      id: String(p.id),
+      index: p.index | 0,
+      connected: true,
+      mapping: p.mapping === 'standard' ? 'standard' : '',
+      timestamp: t,
+      axes: freeze(p.axes.map(Number)),
+      buttons: freeze(p.buttons.map((b) => freeze({ pressed: !!b.pressed, touched: !!b.touched, value: +b.value || 0 }))),
+      vibrationActuator: null,
+    });
+    const used = (p) => p.buttons.some((b) => b.pressed) || p.axes.some((a) => a > 0.5 || a < -0.5);
+    doc.addEventListener(PAD_EVENT + 'p', (e) => {
+      e.stopImmediatePropagation();
+      let list;
+      try { list = parse(e.detail); } catch (x) { return; }
+      if (!isArray(list)) return;
+      const t = now();
+      const pads = list.filter((p) => p && isArray(p.buttons) && isArray(p.axes)).map((p) => pad(p, t));
+      if (!exposed && !pads.some(used)) return;
+      exposed = true;
+      const next = new Map(pads.map((p) => [p.index, p]));
+      for (const [i, p] of shown) if (!next.has(i)) fire('gamepaddisconnected', freeze({ ...p, connected: false }));
+      for (const [i, p] of next) if (!shown.has(i)) fire('gamepadconnected', p);
+      shown = next;
+    }, true);
+    const getGamepads = function getGamepads() {
       if (!told) {
         told = true;
         signal(PAD_EVENT);
       }
-      return map.call(pads, wrap);
-    }, getGamepads0);
-    const d = window.GamepadEvent && Object.getOwnPropertyDescriptor(GamepadEvent.prototype, 'gamepad');
-    if (d && d.get) {
-      const get = mask({ get gamepad() { return wrap(d.get.call(this)); } }.__lookupGetter__('gamepad'), d.get);
-      Object.defineProperty(GamepadEvent.prototype, 'gamepad', { configurable: d.configurable, enumerable: d.enumerable, get });
-    }
+      const out = [];
+      for (const p of shown.values()) out[p.index] = p;
+      for (let i = 0; i < out.length; i++) if (!out[i]) out[i] = null;
+      return out;
+    };
+    const getGamepads0 = Navigator.prototype.getGamepads;
+    define(Navigator.prototype, 'getGamepads', {
+      value: getGamepads0 ? mask(getGamepads, getGamepads0) : getGamepads,
+      writable: true, configurable: true, enumerable: true,
+    });
   }
 
   // Sites whose app code (web components, Turbo frames, fetch-driven hydration, Gmail's "adn ads"

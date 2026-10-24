@@ -207,9 +207,9 @@ pub fn take_blocked_hosts() -> Vec<(String, u32)> {
     Vec::new()
 }
 
-/// WebKitGTK 2.40 has no gamepad switch (`WebKitFeature` is 2.42+): with `gamepad` off the
-/// page-side shim removes the API.
-pub fn config(store: &Store, _adblock: bool, _gamepad: bool) -> Config {
+/// WebKitGTK 2.40 has no gamepad switch (`WebKitFeature` is 2.42+): the page shim replaces the
+/// API with Crow's bridge (`gamepad.rs`) and drops WebKit's own gamepad events.
+pub fn config(store: &Store, _adblock: bool) -> Config {
     let container = CONTAINER_ROOTS.with(|r| r.borrow().iter().find(|v| v.context().as_ref() == Some(store)).cloned());
     Config(container.unwrap_or_else(root))
 }
@@ -300,11 +300,6 @@ fn start_downloads(w: &webkit2gtk::WebView, d: &webkit2gtk::PolicyDecision, t: P
 /// Built-in page `html` under the document address `base` (see `app::INTERNAL_BASE`).
 pub fn load_internal(v: &WebView, html: &str, base: &str) {
     v.webview().load_html(html, Some(base));
-}
-
-/// Not available on Linux (WebKitGTK reads pads through libmanette itself).
-pub fn system_gamepads() -> Option<Vec<String>> {
-    None
 }
 
 /// Runs `js` at document start in every frame of `v`, in Crow's isolated JS world (see

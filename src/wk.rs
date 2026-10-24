@@ -164,11 +164,13 @@ fn file_prefs(c: &WKWebViewConfiguration) {
     }
 }
 
-/// Gamepad API on or off. WKWebView enables it by default; the only switch is the private
-/// feature list (`_features` / `_setEnabled:forFeature:`, guarded). There is no `gamepadEnabled`
-/// preference key: KVC on it would throw. Without the SPI the page-side shim still removes the API.
+/// WebKit's Gamepad API off: pages get controllers from Crow's own bridge (`gamepad.rs`, page
+/// shim in `defuser.js`), so WebKit never opens them. WKWebView enables it by default; the only
+/// switch is the private feature list (`_features` / `_setEnabled:forFeature:`, guarded). There
+/// is no `gamepadEnabled` preference key: KVC on it would throw. Without the SPI the page-side
+/// shim still drops WebKit's gamepad events.
 #[cfg(target_os = "macos")]
-fn gamepad_prefs(c: &WKWebViewConfiguration, on: bool) {
+fn gamepad_prefs(c: &WKWebViewConfiguration) {
     unsafe {
         let Some(cls) = AnyClass::get(c"WKPreferences") else { return };
         let prefs: *mut AnyObject = msg_send![c, preferences];
@@ -183,7 +185,7 @@ fn gamepad_prefs(c: &WKWebViewConfiguration, on: bool) {
         for f in features {
             let key: *mut NSString = msg_send![&*f, key];
             if key.as_ref().is_some_and(|k| k.to_string() == "GamepadsEnabled") {
-                let _: () = msg_send![prefs, _setEnabled: on, forFeature: &*f];
+                let _: () = msg_send![prefs, _setEnabled: false, forFeature: &*f];
             }
         }
     }
@@ -194,36 +196,6 @@ pub fn load_internal(v: &WebView, html: &str, base: &str) {
     unsafe {
         let url = objc2_foundation::NSURL::URLWithString(&NSString::from_str(base));
         let _: *mut AnyObject = msg_send![&*v.webview(), loadHTMLString: &*NSString::from_str(html), baseURL: url.as_deref()];
-    }
-}
-
-unsafe extern "C" {
-    fn dlopen(path: *const std::ffi::c_char, mode: std::ffi::c_int) -> *mut c_void;
-}
-
-/// Game controllers macOS itself sees (GameController framework), for the crow:gamepad
-/// diagnostics. The framework is loaded only when asked (WebKit loads it anyway for gamepads).
-pub fn system_gamepads() -> Option<Vec<String>> {
-    static LOAD: std::sync::Once = std::sync::Once::new();
-    LOAD.call_once(|| unsafe {
-        dlopen(c"/System/Library/Frameworks/GameController.framework/GameController".as_ptr(), 1);
-    });
-    unsafe {
-        let cls = AnyClass::get(c"GCController")?;
-        let list: *mut NSArray<AnyObject> = msg_send![cls, controllers];
-        let list = list.as_ref()?;
-        let text = |o: *mut NSString| o.as_ref().map(ToString::to_string);
-        Some(
-            list.iter()
-                .map(|c| {
-                    let name = text(msg_send![&*c, vendorName]).unwrap_or_else(|| "?".into());
-                    match text(msg_send![&*c, productCategory]) {
-                        Some(kind) if kind != name => format!("{name} ({kind})"),
-                        _ => name,
-                    }
-                })
-                .collect(),
-        )
     }
 }
 
@@ -246,7 +218,7 @@ pub fn add_isolated_script(v: &WebView, js: &str) {
 /// WebKit runs element fullscreen in its own window on macOS: nothing for the app to resize.
 pub fn on_fullscreen(_f: impl Fn(u32, bool) + 'static) {}
 
-pub fn config(store: &Store, adblock: bool, gamepad: bool) -> Config {
+pub fn config(store: &Store, adblock: bool) -> Config {
     unsafe {
         let c = WKWebViewConfiguration::new(mtm());
         c.setWebsiteDataStore(store);
@@ -256,7 +228,7 @@ pub fn config(store: &Store, adblock: bool, gamepad: bool) -> Config {
         media_prefs(&c);
         storage_prefs(&c);
         file_prefs(&c);
-        gamepad_prefs(&c, gamepad);
+        gamepad_prefs(&c);
         pip_prefs(&c);
         Config(c)
     }
@@ -268,6 +240,7 @@ pub fn popup_config(features: NewWindowFeatures) -> Config {
     media_prefs(&c);
     storage_prefs(&c);
     file_prefs(&c);
+    gamepad_prefs(&c);
     Config(c)
 }
 

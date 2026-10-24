@@ -177,7 +177,7 @@ impl Settings {
         listed(&self.webgl_off, host)
     }
 
-    /// Some site may use gamepads: WebKit's switch must stay on (the page shim decides per site).
+    /// Some site may use gamepads: the native bridge is needed (the page shim decides per site).
     pub fn gamepad_anywhere(&self) -> bool {
         self.gamepad_enabled || !self.gamepad_sites.is_empty()
     }

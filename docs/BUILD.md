@@ -92,9 +92,9 @@ Rovnaký kód, platformovo závislá vrstva je v `src/wk.rs` (macOS) a `src/wk_g
 Balíky:
 
 ```sh
-sudo pacman -S webkit2gtk-4.1 gtk3 pkg-config libsoup3                                  # Arch / CachyOS
-sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev pkg-config libsoup-3.0-dev build-essential  # Debian / Ubuntu
-sudo dnf install webkit2gtk4.1-devel gtk3-devel pkgconf libsoup3-devel                  # Fedora
+sudo pacman -S webkit2gtk-4.1 gtk3 pkg-config libsoup3 systemd-libs                                  # Arch / CachyOS
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev pkg-config libsoup-3.0-dev libudev-dev build-essential  # Debian / Ubuntu
+sudo dnf install webkit2gtk4.1-devel gtk3-devel pkgconf libsoup3-devel systemd-devel                  # Fedora
 ```
 
 | Príkaz | Výsledok |

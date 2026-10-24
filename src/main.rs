@@ -15,6 +15,7 @@ mod app;
 mod cert;
 mod default_browser;
 mod download;
+mod gamepad;
 mod settings;
 mod update;
 mod vault;
