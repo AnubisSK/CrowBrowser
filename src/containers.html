@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #222226; --line: #33333a; --fg: #e6e6e9; --mute: #9a9aa3; --hover: #2c2c32;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; --bg: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76; --hover: #f2f2f5; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font: 13px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; color: var(--fg);
+    user-select: none; -webkit-user-select: none; cursor: default;
+  }
+  #card { background: var(--bg); border: 1px solid var(--line); overflow: hidden; padding: 6px; }
+  h1 { font-size: 12px; font-weight: 600; color: var(--mute); padding: 6px 10px 4px; }
+  button { all: unset; display: flex; gap: 10px; align-items: flex-start; width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 7px; }
+  button:hover, button:focus-visible { background: var(--hover); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 3px; flex: none; background: var(--mute); }
+  .personal { background: #3b82f6; } .work { background: #f59e0b; } .isolated { background: #a855f7; }
+  .name { font-weight: 600; }
+  .sub { color: var(--mute); font-size: 11.5px; margin-top: 2px; line-height: 1.35; }
+</style>
+</head>
+<body>
+<div id="card"></div>
+<script>
+  // Container picker under "+": each container is its own in-memory cookie/storage jar.
+  const send = (m) => window.ipc.postMessage(m);
+  const card = document.getElementById('card');
+  const items = [['default', '', 'ct_default', 'ct_default_desc'], ['personal', 'personal', 'ct_personal', 'ct_personal_desc'],
+                 ['work', 'work', 'ct_work', 'ct_work_desc'], ['isolated', 'isolated', 'ct_isolated', 'ct_isolated_desc']];
+  function render() {
+    const head = document.createElement('h1'); head.textContent = t('ct_title');
+    card.replaceChildren(head, ...items.map(([key, cls, name, desc]) => {
+      const b = document.createElement('button');
+      const dot = document.createElement('span'); dot.className = 'dot ' + cls;
+      const text = document.createElement('span');
+      const n = document.createElement('div'); n.className = 'name'; n.textContent = t(name);
+      const d = document.createElement('div'); d.className = 'sub'; d.textContent = t(desc);
+      text.append(n, d);
+      b.append(dot, text);
+      b.onclick = () => send('new-tab-container:' + key);
+      return b;
+    }));
+    requestAnimationFrame(() => send('site-size:' + Math.ceil(document.body.scrollHeight)));
+  }
+  window.onLanguage = () => render();
+  document.onkeydown = (e) => { if (e.key === 'Escape') send('site-close'); };
+  window.onblur = () => send('site-close');
+  render();
+</script>
+</body>
+</html>
