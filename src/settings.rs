@@ -37,6 +37,10 @@ pub struct Settings {
     pub gamepad_sites: Vec<String>,
     /// Sites (and subdomains) where WebGL is off (shield popover).
     pub webgl_off: Vec<String>,
+    /// CrowClarity on every tab with a video (off: battery; ✨ in the toolbar per tab).
+    pub clarity: bool,
+    /// CrowClarity also sharpens through the WebGL CAS shader (more GPU work than the filters).
+    pub clarity_sharpen: bool,
 }
 
 /// UI languages with dictionaries in `locales.json`.
@@ -60,6 +64,8 @@ impl Default for Settings {
             gamepad_enabled: false,
             gamepad_sites: Vec::new(),
             webgl_off: Vec::new(),
+            clarity: false,
+            clarity_sharpen: false,
         }
     }
 }
@@ -78,6 +84,16 @@ pub fn data_dir() -> PathBuf {
         .filter(|p| p.is_absolute())
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"))
         .join("crow")
+}
+
+/// `%APPDATA%\Crow` (roaming profile, user-only ACL).
+#[cfg(all(target_os = "windows", not(test)))]
+pub fn data_dir() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("AppData\\Roaming"))
+        .join("Crow")
 }
 
 /// Tests never touch the real profile: a per-process temp dir instead.
@@ -148,6 +164,8 @@ impl Settings {
             "adblock_easylist" if matches!(v, "on" | "off") => self.adblock_easylist = v == "on",
             "adblock_hosts" if matches!(v, "on" | "off") => self.adblock_hosts = v == "on",
             "gamepad_enabled" if matches!(v, "on" | "off") => self.gamepad_enabled = v == "on",
+            "clarity" if matches!(v, "on" | "off") => self.clarity = v == "on",
+            "clarity_sharpen" if matches!(v, "on" | "off") => self.clarity_sharpen = v == "on",
             "language" if LANGUAGES.contains(&v) => self.language = v.into(),
             "zoom" => match v.parse::<f64>() {
                 Ok(z) if (0.25..=3.0).contains(&z) => self.zoom = z,

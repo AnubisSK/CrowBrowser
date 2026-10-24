@@ -55,8 +55,11 @@ document.addEventListener(e + 'g', () => { window.__crowGl++; }, true); })();";
 /// (metadata loaded: before that WebKit refuses the mode).
 const PAGE_READ: &str = "JSON.stringify([window.__crowPad | 0, window.__crowGl | 0, \
 Array.from(document.querySelectorAll('video')).some(v => v.readyState > 0) ? 1 : 0])";
+/// CrowClarity video enhancement, isolated world of every frame; inert until `apply_clarity`.
+const CLARITY_JS: &str = include_str!("clarity.js");
 /// Picture-in-picture toggle (macOS): the largest playing video, else the largest one. Run by
-/// the app, so WebKit counts it as a user gesture.
+/// the app, so WebKit counts it as a user gesture. Windows: `wk::toggle_pip`.
+#[cfg(not(target_os = "windows"))]
 const PIP_JS: &str = "(() => { const vs = Array.from(document.querySelectorAll('video')).filter(v => v.readyState > 0); \
 const on = vs.find(v => v.webkitPresentationMode === 'picture-in-picture'); \
 if (on) { on.webkitSetPresentationMode('inline'); return 'inline'; } \
@@ -289,7 +292,7 @@ impl TabCtx {
             })
             .with_new_window_req_handler(move |url, features| ctx.popup(id, url, features));
         // Linux: downloads are watched once on the shared context (wk::watch_downloads).
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let (p3, p4) = (self.proxy.clone(), self.proxy.clone());
             b = b
@@ -327,6 +330,7 @@ impl TabCtx {
         wk::set_rules(&view, blocking);
         wk::watch(&view, id);
         wk::add_isolated_script(&view, &PAGE_LISTEN_JS.replace("/*EVENT*/''", &js(&self.pad_event)));
+        wk::add_isolated_script(&view, CLARITY_JS);
         if let Some(url) = url {
             view.load_url(url)?;
         }
@@ -359,8 +363,9 @@ impl TabCtx {
     /// Internal UI with `window.ipc`. Strict CSP: no network, no external scripts/styles/frames;
     /// only its own inline code. Tab views never get an IPC handler, so wry never injects
     /// `window.ipc` there (popups inherit the opener tab's configuration, also without IPC).
-    /// The view never leaves its own document (`with_html` loads as `about:blank`): any other
-    /// navigation is refused, so `window.ipc` can never reach web content.
+    /// The view never leaves its own document (`with_html` loads as `about:blank`; WebView2's
+    /// `NavigateToString` as a `data:text/html` URL): any other navigation is refused, so
+    /// `window.ipc` can never reach web content.
     fn ui_view(&self, html: &str, rect: Rect) -> Option<WebView> {
         const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'\">";
         // Dictionaries + `t()` go in first, so the page's own script can use them right away.
@@ -370,11 +375,17 @@ impl TabCtx {
             .replace("</", "<\\/");
         let html = html.replacen("<head>", &format!("<head>{CSP}<script>{i18n}</script>"), 1);
         let p = self.proxy.clone();
+        let html = wk::ui_html(html);
+        // Caption buttons start in the window's current state (later: `setMax` on resize).
+        #[cfg(target_os = "windows")]
+        let html = if self.window.is_maximized() { html.replacen("class=\"windows\"", "class=\"windows maximized\"", 1) } else { html };
         let b = wk::ui_builder()
-            .with_html(wk::ui_html(html))
+            .with_html(html)
             .with_background_color(bg_of(&self.window))
             .with_focused(true)
-            .with_navigation_handler(|url| url == "about:blank")
+            .with_navigation_handler(|url| {
+                url == "about:blank" || (cfg!(target_os = "windows") && url.starts_with("data:text/html"))
+            })
             .with_ipc_handler(move |req| {
                 let _ = p.send_event(UserEvent::Ipc(req.into_body()));
             });
@@ -494,8 +505,10 @@ struct Tab {
     gamepad: bool,
     /// WebGL contexts refused on the current page (site has WebGL off).
     webgl_blocks: u32,
-    /// The current page has a video (picture-in-picture chip, macOS).
+    /// The current page has a video (picture-in-picture and CrowClarity chips).
     video: bool,
+    /// CrowClarity forced on/off on this tab (toolbar ✨); None = the global setting.
+    clarity: Option<bool>,
     /// Cookie/storage jar of the tab (`Container::Default` = the vault-backed one).
     container: Container,
 }
@@ -528,6 +541,7 @@ impl Tab {
             gamepad: false,
             webgl_blocks: 0,
             video: false,
+            clarity: None,
             container: Container::Default,
         }
     }
@@ -712,6 +726,27 @@ impl Session {
         self.tabs.iter().filter_map(|t| t.view.as_ref())
     }
 
+    /// Exit: every view goes, tab and closed-tab addresses, titles and pending downloads are
+    /// overwritten in memory; vault contents and key zeroize when the session drops.
+    fn wipe(&mut self) {
+        self.site = None;
+        self.panel = None;
+        for mut a in self.asks.drain(..) {
+            a.url.zeroize();
+            a.name.zeroize();
+        }
+        for t in &mut self.tabs {
+            t.drop_view();
+            t.url.zeroize();
+            t.title.zeroize();
+            t.icon.zeroize();
+        }
+        self.tabs.clear();
+        self.containers.clear();
+        self.closed.iter_mut().for_each(Zeroize::zeroize);
+        self.closed.clear();
+    }
+
     fn close_panel(&mut self) -> bool {
         self.site = None;
         if self.panel.take().is_none() {
@@ -763,6 +798,8 @@ impl Session {
             "blocked": cur.map_or(0, |t| t.blocked),
             "gamepad": cur.is_some_and(|t| t.gamepad),
             "video": wk::PIP && cur.is_some_and(|t| t.video),
+            "hasVideo": cur.is_some_and(|t| t.video),
+            "clarity": cur.is_some_and(|t| t.clarity.unwrap_or(cfg.clarity)),
             "bookmarked": self.data.bookmarks.iter().any(|b| b.url == url),
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
             "panel": if self.panel.is_some() { self.panel_section.as_str() } else { "" },
@@ -1041,6 +1078,14 @@ impl App {
                 wk::set_bounds(v, site_rect(w, s.site_x, s.site_h));
             }
         }
+        // Maximize / restore glyph of the drawn caption buttons, top resize strip (Windows).
+        #[cfg(target_os = "windows")]
+        {
+            let js = format!("setMax({})", w.is_maximized());
+            for v in self.lock.iter().chain(self.s.as_ref().map(|s| &s.toolbar)) {
+                let _ = v.evaluate_script(&js);
+            }
+        }
     }
 
     /// Greys out the drawn window controls (Linux) like macOS does for inactive windows.
@@ -1181,6 +1226,9 @@ impl App {
                 if on {
                     s.site = None;
                 }
+                // WebView2 only reports it: the window goes fullscreen here.
+                #[cfg(target_os = "windows")]
+                self.ctx.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
                 // WebKit fullscreens the window itself; this makes the view fill it.
                 self.resize();
             }
@@ -1281,12 +1329,21 @@ impl App {
     }
 
     /// NSApp terminated from outside (Dock, logout): synchronous save with last known cookies.
-    /// The gamepad worker is stopped and joined.
+    /// The gamepad worker is stopped and joined. The event loop then ends the process without
+    /// running destructors, so the session is wiped here (`Session::wipe`, then the vault key and
+    /// contents zeroize on drop) and the engine's in-memory stores are torn down.
     pub fn shutdown(&mut self) {
         if let Some(s) = &mut self.s {
             s.save_now(&self.cfg);
         }
         self.pads = None;
+        if let Some(mut s) = self.s.take() {
+            s.wipe();
+        }
+        self.lock = None;
+        self.incoming.iter_mut().for_each(Zeroize::zeroize);
+        self.incoming.clear();
+        wk::shutdown();
     }
 
     /// Controller input goes to the active tab only: focused window, unlocked session, a site
@@ -1338,6 +1395,24 @@ impl App {
                 let w = &self.ctx.window;
                 if w.fullscreen().is_none() && wk::left_button_down() {
                     let _ = w.drag_window();
+                }
+            }
+            // Caption buttons of the borderless window (Windows).
+            #[cfg(target_os = "windows")]
+            "window-minimize" | "window-maximize" | "window-close" => wk::caption(name),
+            // Top edge of the borderless window (Windows): the toolbar view covers it, so a
+            // press on its resize strip starts the system resize loop.
+            #[cfg(target_os = "windows")]
+            "resize" => {
+                use tao::window::ResizeDirection;
+                let w = &self.ctx.window;
+                let dir = match arg {
+                    "nw" => ResizeDirection::NorthWest,
+                    "ne" => ResizeDirection::NorthEast,
+                    _ => ResizeDirection::North,
+                };
+                if w.fullscreen().is_none() && !w.is_maximized() && wk::left_button_down() {
+                    let _ = w.drag_resize_window(dir);
                 }
             }
             "quit" | "win-close" => self.quit(),
@@ -1746,6 +1821,9 @@ impl App {
             (Some("http"), _) => "http",
             _ => "",
         };
+        if t.clarity.unwrap_or(self.cfg.clarity) {
+            apply_clarity(&self.cfg, t);
+        }
         match &t.view {
             Some(v) if url.starts_with("http") => {
                 wk::eval_isolated(v, FAV_JS, |_| {});
@@ -2590,6 +2668,11 @@ impl App {
                         self.ctx.adblock.set(self.cfg.adblock);
                         s.apply_rules_all(&self.cfg);
                     }
+                    "clarity" | "clarity_sharpen" => {
+                        for t in &s.tabs {
+                            apply_clarity(&self.cfg, t);
+                        }
+                    }
                     // Hidden tabs are unloaded now; the visible one is rebuilt when the panel closes.
                     "gamepad_enabled" => {
                         s.sync(&self.cfg);
@@ -2777,10 +2860,25 @@ impl App {
                 self.persist(After::Nothing);
                 self.shim_changed(true);
             }
+            // ✨ in the toolbar: CrowClarity on/off for this tab only, confirmed by a toast.
+            "clarity" => {
+                let cfg = &self.cfg;
+                let Some(t) = s.tabs.get_mut(s.active) else { return };
+                let on = !t.clarity.unwrap_or(cfg.clarity);
+                t.clarity = Some(on);
+                apply_clarity(cfg, t);
+                s.note(if on { "clarity_on" } else { "clarity_off" }, &[]);
+                s.sync(cfg);
+            }
             "pip" => {
                 let Some(v) = s.view() else { return };
                 let p = self.ctx.proxy.clone();
+                #[cfg(not(target_os = "windows"))]
                 wk::eval_isolated(v, PIP_JS, move |r| {
+                    let _ = p.send_event(UserEvent::Pip(r));
+                });
+                #[cfg(target_os = "windows")]
+                wk::toggle_pip(v, move |r| {
                     let _ = p.send_event(UserEvent::Pip(r));
                 });
             }
@@ -3062,6 +3160,15 @@ pub fn theme_of(name: &str) -> Option<Theme> {
         "light" => Some(Theme::Light),
         _ => None,
     }
+}
+
+/// Pushes the tab's CrowClarity state into its page (main frame, isolated world). Sharpening
+/// shader only where the site may use WebGL; everything stays on the local GPU.
+fn apply_clarity(cfg: &Settings, t: &Tab) {
+    let Some(v) = t.view.as_ref().filter(|_| t.url.starts_with("http")) else { return };
+    let on = t.clarity.unwrap_or(cfg.clarity);
+    let sharp = cfg.clarity_sharpen && !cfg.webgl_off_for(&host_of(&t.url));
+    wk::eval_isolated(v, &format!("window.__crowClarity && window.__crowClarity({on}, {sharp})"), |_| {});
 }
 
 fn bg_of(window: &Window) -> RGBA {

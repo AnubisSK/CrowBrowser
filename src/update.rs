@@ -133,6 +133,9 @@ fn pick_asset(assets: &[RelAsset]) -> Option<Asset> {
         e.extend([".AppImage", ".tar.gz"]);
         e
     };
+    // `crow-browser-setup-v<version>.exe` (package/windows/installer.iss).
+    #[cfg(target_os = "windows")]
+    let exts: Vec<&str> = vec![".msi", ".exe", ".zip"];
     let arch = std::env::consts::ARCH;
     let other_arch = |n: &str| {
         let n = n.to_ascii_lowercase();
@@ -208,19 +211,26 @@ fn download_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Downloads")
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn download_dir() -> PathBuf {
     crate::wk::download_dir()
 }
 
 /// Creates (or truncates) `path` readable only by the user; curl then writes into it and keeps
 /// the mode.
+#[cfg(unix)]
 pub fn private_file(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::fs::PermissionsExt;
     fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
     // An existing file keeps its old mode: enforce it.
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+/// Windows: files under the user profile inherit its owner-only ACL; just create/truncate.
+#[cfg(windows)]
+pub fn private_file(path: &Path) -> std::io::Result<()> {
+    fs::OpenOptions::new().write(true).create(true).truncate(true).open(path).map(drop)
 }
 
 fn sha256_of(path: &Path) -> Option<String> {

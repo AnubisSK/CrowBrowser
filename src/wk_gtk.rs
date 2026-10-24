@@ -19,7 +19,7 @@ use tao::{
     window::{Theme, Window},
 };
 use webkit2gtk::{
-    CacheModel, CookieManagerExt, TLSErrorsPolicy, DownloadExt, PolicyDecisionExt, PolicyDecisionType,
+    CacheModel, CookieManagerExt, HardwareAccelerationPolicy, TLSErrorsPolicy, DownloadExt, PolicyDecisionExt, PolicyDecisionType,
     ResponsePolicyDecisionExt, SettingsExt, URIRequestExt, URIResponseExt, UserContentManagerExt, WebContext,
     WebContextExt, WebProcessTerminationReason, WebViewExt, WebsiteDataManagerExt, WebsiteDataTypes,
 };
@@ -586,6 +586,12 @@ fn watch_fullscreen(v: &WebView, tab: u32) {
         s.set_allow_file_access_from_file_urls(false);
         s.set_allow_universal_access_from_file_urls(false);
         s.set_enable_write_console_messages_to_stdout(false);
+        // Video and its CSS filters / WebGL (CrowClarity) composited on the GPU (GL, DMABuf
+        // buffers on 2.40+), never in the software fallback; the user's
+        // WEBKIT_DISABLE_COMPOSITING_MODE escape hatch for broken drivers is respected.
+        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+            s.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
+        }
     }
     let notify = move |on: bool| {
         if let Some(f) = ON_FULLSCREEN.with(|o| o.borrow().clone()) {
@@ -1015,6 +1021,9 @@ pub fn decide_download(key: u32, allow: bool, _url: &str, _view: Option<&WebView
         f(uri.to_string(), path);
     }
 }
+
+/// Native exit: the ephemeral contexts go with the process; nothing on disk to remove.
+pub fn shutdown() {}
 
 /// Never opens/executes a downloaded file: highlights it in the file manager (FileManager1),
 /// falls back to opening its parent folder.

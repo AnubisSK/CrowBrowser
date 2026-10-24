@@ -797,6 +797,9 @@ pub fn decide_download(_key: u32, allow: bool, url: &str, view: Option<&WebView>
     }
 }
 
+/// Native exit: the non-persistent stores go with the process; nothing on disk to remove.
+pub fn shutdown() {}
+
 /// Never opens/executes a downloaded file, only highlights it in Finder.
 pub fn reveal(path: &str) {
     let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
