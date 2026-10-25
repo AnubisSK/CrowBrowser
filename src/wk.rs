@@ -2,9 +2,18 @@
 //! plus the small platform surface `app.rs` needs (view attach, theme, file actions).
 //! Linux counterpart: `wk_gtk.rs` (same API).
 
-use crate::vault::CookieRec;
+use crate::{
+    proxy::{Endpoint, ProxyMode, ProxyProtocol},
+    vault::CookieRec,
+};
 use block2::RcBlock;
 use objc2::{MainThreadMarker, rc::Retained, runtime::AnyObject};
+use objc2::{
+    encode::{Encoding, RefEncode},
+    msg_send,
+    runtime::{AnyClass, Bool, Imp, Sel},
+    sel,
+};
 use objc2_foundation::{
     NSArray, NSDate, NSError, NSHTTPCookie, NSHTTPCookieDomain, NSHTTPCookieExpires,
     NSHTTPCookieName, NSHTTPCookiePath, NSHTTPCookiePropertyKey, NSHTTPCookieSecure,
@@ -14,12 +23,6 @@ use objc2_web_kit::{
     WKContentRuleList, WKContentRuleListStore, WKContentWorld, WKUserContentController,
     WKUserScript, WKUserScriptInjectionTime, WKWebViewConfiguration, WKWebsiteDataStore,
 };
-use objc2::{
-    encode::{Encoding, RefEncode},
-    msg_send,
-    runtime::{AnyClass, Bool, Imp, Sel},
-    sel,
-};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -28,6 +31,7 @@ use std::{
     rc::Rc,
 };
 use tao::window::{Theme, Window};
+use zeroize::Zeroize;
 use wry::{
     NewWindowFeatures, NewWindowResponse, Rect, WebView, WebViewBuilder, WebViewBuilderExtMacos,
     WebViewExtMacOS,
@@ -72,9 +76,125 @@ fn mtm() -> MainThreadMarker {
     MainThreadMarker::new().expect("main thread")
 }
 
-/// Nothing written to disk by WebKit; persistence goes through the encrypted vault.
+/// Nothing written to disk by WebKit; persistence goes through the encrypted vault. Each store
+/// starts with the current route (`set_proxy`): a new store has no pooled connections.
 pub fn new_store() -> Store {
-    unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm()) }
+    let store = unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm()) };
+    apply_proxy(&store);
+    store
+}
+
+thread_local! {
+    /// Route of web content (`set_proxy`); RAM only, credentials zeroized when replaced.
+    static NET: RefCell<ProxyMode> = const { RefCell::new(ProxyMode::Direct) };
+}
+
+/// No "no proxy" switch in WebKit on macOS: without a proxy configuration a store follows the
+/// system settings, so "direct" is the system route here.
+pub const DIRECT_IS_SYSTEM: bool = true;
+
+/// `WKWebsiteDataStore.proxyConfigurations` (macOS 14+); older systems have no per-store proxy.
+fn proxy_api() -> bool {
+    let ok: Bool = unsafe {
+        msg_send![objc2::class!(WKWebsiteDataStore), instancesRespondToSelector: sel!(setProxyConfigurations:)]
+    };
+    ok.as_bool()
+}
+
+/// Route of web content for stores made from now on (the app rebuilds its stores after a
+/// change). Explicit proxies need macOS 14 (Network.framework proxy configurations).
+pub fn set_proxy(mode: &ProxyMode) -> Result<(), &'static str> {
+    if mode.endpoint().is_some() && !proxy_api() {
+        return Err("proxy_err_unsupported_os");
+    }
+    NET.with(|n| *n.borrow_mut() = mode.clone());
+    Ok(())
+}
+
+const RTLD_LAZY: std::ffi::c_int = 1;
+
+unsafe extern "C" {
+    fn dlopen(path: *const std::ffi::c_char, mode: std::ffi::c_int) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const std::ffi::c_char) -> *mut c_void;
+}
+
+/// Network.framework symbol, looked up at run time: the macOS 14 proxy API must not be a hard
+/// link dependency (the app also runs on Monterey).
+fn network_fn(name: &std::ffi::CStr) -> Option<*mut c_void> {
+    let h = unsafe {
+        dlopen(
+            c"/System/Library/Frameworks/Network.framework/Network".as_ptr(),
+            RTLD_LAZY,
+        )
+    };
+    if h.is_null() {
+        return None;
+    }
+    let f = unsafe { dlsym(h, name.as_ptr()) };
+    (!f.is_null()).then_some(f)
+}
+
+type EndpointCreateHost =
+    unsafe extern "C" fn(*const std::ffi::c_char, *const std::ffi::c_char) -> *mut AnyObject;
+type ProxyCreateSocks = unsafe extern "C" fn(*mut AnyObject) -> *mut AnyObject;
+type ProxyCreateHttp = unsafe extern "C" fn(*mut AnyObject, *mut AnyObject) -> *mut AnyObject;
+type ProxySetLogin =
+    unsafe extern "C" fn(*mut AnyObject, *const std::ffi::c_char, *const std::ffi::c_char);
+
+/// `nw_proxy_config_t` for the endpoint: SOCKSv5 (host names go to the proxy, no local DNS) or
+/// HTTP CONNECT, with the login if any. The C strings holding it are wiped after use.
+fn nw_proxy(e: &Endpoint<'_>) -> Option<Retained<AnyObject>> {
+    unsafe {
+        let host_fn: EndpointCreateHost =
+            std::mem::transmute(network_fn(c"nw_endpoint_create_host")?);
+        let host = std::ffi::CString::new(e.host).ok()?;
+        let port = std::ffi::CString::new(e.port.to_string()).ok()?;
+        let endpoint = Retained::from_raw(host_fn(host.as_ptr(), port.as_ptr()))?;
+        let ep = Retained::as_ptr(&endpoint).cast_mut();
+        let config = match e.protocol {
+            ProxyProtocol::Socks5 => {
+                let f: ProxyCreateSocks =
+                    std::mem::transmute(network_fn(c"nw_proxy_config_create_socksv5")?);
+                f(ep)
+            }
+            ProxyProtocol::Http => {
+                let f: ProxyCreateHttp =
+                    std::mem::transmute(network_fn(c"nw_proxy_config_create_http_connect")?);
+                f(ep, std::ptr::null_mut())
+            }
+        };
+        let config = Retained::from_raw(config)?;
+        if let Some((u, p)) = e.auth {
+            let set: ProxySetLogin =
+                std::mem::transmute(network_fn(c"nw_proxy_config_set_username_and_password")?);
+            let (u, p) = (
+                std::ffi::CString::new(u).ok()?,
+                std::ffi::CString::new(p).ok()?,
+            );
+            set(Retained::as_ptr(&config).cast_mut(), u.as_ptr(), p.as_ptr());
+            u.into_bytes().zeroize();
+            p.into_bytes().zeroize();
+        }
+        Some(config)
+    }
+}
+
+/// Store follows the current route: one proxy configuration, or none (system settings).
+fn apply_proxy(store: &WKWebsiteDataStore) {
+    if !proxy_api() {
+        return;
+    }
+    let configs: Vec<Retained<AnyObject>> = NET.with(|n| {
+        n.borrow()
+            .endpoint()
+            .and_then(|e| nw_proxy(&e))
+            .into_iter()
+            .collect()
+    });
+    let list = NSArray::from_retained_slice(&configs);
+    unsafe {
+        let _: () = msg_send![store, setProxyConfigurations: &*list];
+    }
 }
 
 /// Separate in-memory store of a container: every `nonPersistentDataStore` call is a new,
@@ -96,7 +216,8 @@ fn pip_prefs(c: &WKWebViewConfiguration) {
     unsafe {
         let prefs: *mut AnyObject = msg_send![c, preferences];
         let Some(prefs) = prefs.as_ref() else { return };
-        let ok: Bool = msg_send![prefs, respondsToSelector: sel!(_setAllowsPictureInPictureMediaPlayback:)];
+        let ok: Bool =
+            msg_send![prefs, respondsToSelector: sel!(_setAllowsPictureInPictureMediaPlayback:)];
         if ok.as_bool() {
             let _: () = msg_send![prefs, _setAllowsPictureInPictureMediaPlayback: true];
         }
@@ -151,7 +272,8 @@ fn storage_prefs(c: &WKWebViewConfiguration) {
 #[cfg(target_os = "macos")]
 fn file_prefs(c: &WKWebViewConfiguration) {
     unsafe {
-        let ok: Bool = msg_send![c, respondsToSelector: sel!(_setAllowUniversalAccessFromFileURLs:)];
+        let ok: Bool =
+            msg_send![c, respondsToSelector: sel!(_setAllowUniversalAccessFromFileURLs:)];
         if ok.as_bool() {
             let _: () = msg_send![c, _setAllowUniversalAccessFromFileURLs: false];
         }
@@ -172,7 +294,9 @@ fn file_prefs(c: &WKWebViewConfiguration) {
 #[cfg(target_os = "macos")]
 fn gamepad_prefs(c: &WKWebViewConfiguration) {
     unsafe {
-        let Some(cls) = AnyClass::get(c"WKPreferences") else { return };
+        let Some(cls) = AnyClass::get(c"WKPreferences") else {
+            return;
+        };
         let prefs: *mut AnyObject = msg_send![c, preferences];
         let Some(prefs) = prefs.as_ref() else { return };
         let list: Bool = msg_send![cls, respondsToSelector: sel!(_features)];
@@ -181,10 +305,15 @@ fn gamepad_prefs(c: &WKWebViewConfiguration) {
             return;
         }
         let features: *mut NSArray<AnyObject> = msg_send![cls, _features];
-        let Some(features) = features.as_ref() else { return };
+        let Some(features) = features.as_ref() else {
+            return;
+        };
         for f in features {
             let key: *mut NSString = msg_send![&*f, key];
-            if key.as_ref().is_some_and(|k| k.to_string() == "GamepadsEnabled") {
+            if key
+                .as_ref()
+                .is_some_and(|k| k.to_string() == "GamepadsEnabled")
+            {
                 let _: () = msg_send![prefs, _setEnabled: false, forFeature: &*f];
             }
         }
@@ -211,7 +340,10 @@ pub fn add_isolated_script(v: &WebView, js: &str) {
             false,
             &world,
         );
-        v.webview().configuration().userContentController().addUserScript(&script);
+        v.webview()
+            .configuration()
+            .userContentController()
+            .addUserScript(&script);
     }
 }
 
@@ -248,8 +380,7 @@ pub fn popup_config(features: NewWindowFeatures) -> Config {
 /// Native Safari identity only: a Chrome UA makes Google serve Blink-only layouts that break in WebKit.
 /// `customUserAgent` covers the request header and `navigator.userAgent` alike.
 #[cfg(target_os = "macos")]
-const USER_AGENT: &str =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
 
 /// Tab views (including adopted popups); the browser UI uses `ui_builder`.
 /// `page_js`: the page-world shim (`adblock::defuser`), injected into every frame.
@@ -285,12 +416,13 @@ pub fn eval_isolated(v: &WebView, js: &str, done: impl FnOnce(String) + 'static)
     });
     unsafe {
         let world = WKContentWorld::worldWithName(ns_string!("crow"), mtm());
-        v.webview().evaluateJavaScript_inFrame_inContentWorld_completionHandler(
-            &NSString::from_str(js),
-            None,
-            &world,
-            Some(&block),
-        );
+        v.webview()
+            .evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                &NSString::from_str(js),
+                None,
+                &world,
+                Some(&block),
+            );
     }
 }
 
@@ -306,7 +438,9 @@ pub fn set_bounds(v: &WebView, rect: Rect) {
 }
 
 pub fn popup_response(v: &WebView) -> NewWindowResponse {
-    NewWindowResponse::Create { webview: Retained::into_super(v.webview()) }
+    NewWindowResponse::Create {
+        webview: Retained::into_super(v.webview()),
+    }
 }
 
 pub fn set_rules(v: &WebView, on: bool) {
@@ -372,14 +506,24 @@ pub fn load_rules(id: &'static str, ok: impl Fn() + 'static, fail: impl Fn() + '
             None => fail(),
         }
     });
-    unsafe { store.lookUpContentRuleListForIdentifier_completionHandler(Some(&NSString::from_str(id)), Some(&block)) };
+    unsafe {
+        store.lookUpContentRuleListForIdentifier_completionHandler(
+            Some(&NSString::from_str(id)),
+            Some(&block),
+        )
+    };
 }
 
 /// Disabled list: forgotten here and removed from WebKit's store.
 pub fn drop_rules(id: &'static str) {
     RULES.with(|r| r.borrow_mut().retain(|(i, _)| *i != id));
     if let Some(store) = store() {
-        unsafe { store.removeContentRuleListForIdentifier_completionHandler(Some(&NSString::from_str(id)), Some(&RcBlock::new(|_: *mut NSError| {}))) };
+        unsafe {
+            store.removeContentRuleListForIdentifier_completionHandler(
+                Some(&NSString::from_str(id)),
+                Some(&RcBlock::new(|_: *mut NSError| {})),
+            )
+        };
     }
 }
 
@@ -405,12 +549,16 @@ unsafe extern "C-unwind" fn rule_action(
     action: *mut AnyObject,
     url: *mut AnyObject,
 ) {
-    let Some(action) = (unsafe { action.as_ref() }) else { return };
+    let Some(action) = (unsafe { action.as_ref() }) else {
+        return;
+    };
     let blocked = unsafe {
         let known: Bool = msg_send![action, respondsToSelector: sel!(blockedLoad)];
         known.as_bool() && msg_send![action, blockedLoad]
     };
-    let (true, Some(tab)) = (blocked, tab_of(web_view)) else { return };
+    let (true, Some(tab)) = (blocked, tab_of(web_view)) else {
+        return;
+    };
     let host: Option<String> = unsafe { url.as_ref() }.and_then(|u| {
         let h: *mut NSString = unsafe { msg_send![u, host] };
         unsafe { h.as_ref() }.map(|h| h.to_string().to_ascii_lowercase())
@@ -477,7 +625,11 @@ pub fn on_crash(f: impl Fn(u32) + 'static) {
 }
 
 /// `webViewWebContentProcessDidTerminate:` (WKNavigationDelegate; wry does not implement it).
-unsafe extern "C-unwind" fn web_process_terminated(_this: *mut AnyObject, _cmd: Sel, web_view: *mut AnyObject) {
+unsafe extern "C-unwind" fn web_process_terminated(
+    _this: *mut AnyObject,
+    _cmd: Sel,
+    web_view: *mut AnyObject,
+) {
     let Some(tab) = tab_of(web_view) else { return };
     ON_CRASH.with(|f| {
         if let Some(f) = &*f.borrow() {
@@ -493,7 +645,9 @@ unsafe extern "C-unwind" fn nav_failed(
     _nav: *mut AnyObject,
     error: *mut AnyObject,
 ) {
-    let Some(error) = (unsafe { error.as_ref() }) else { return };
+    let Some(error) = (unsafe { error.as_ref() }) else {
+        return;
+    };
     let (domain, code, url) = unsafe {
         let domain: *mut NSString = msg_send![error, domain];
         let code: isize = msg_send![error, code];
@@ -502,10 +656,23 @@ unsafe extern "C-unwind" fn nav_failed(
             Some(info) => msg_send![info, objectForKey: ns_string!("NSErrorFailingURLStringKey")],
             None => std::ptr::null_mut(),
         };
-        let url = url.cast::<NSString>().as_ref().map(std::string::ToString::to_string).unwrap_or_default();
-        (domain.as_ref().map(std::string::ToString::to_string).unwrap_or_default(), code, url)
+        let url = url
+            .cast::<NSString>()
+            .as_ref()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        (
+            domain
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default(),
+            code,
+            url,
+        )
     };
-    let (Some(tab), true) = (tab_of(web_view), domain == "NSURLErrorDomain") else { return };
+    let (Some(tab), true) = (tab_of(web_view), domain == "NSURLErrorDomain") else {
+        return;
+    };
     if let Some(reason) = tls_reason(code) {
         ON_TLS.with(|f| {
             if let Some(f) = &*f.borrow() {
@@ -529,7 +696,9 @@ static TAB_KEY: u8 = 0;
 /// global pointer map). Tab ids are monotonic and never reused.
 fn set_tab(web_view: *mut AnyObject, tab: Option<u32>) {
     let value = tab.map(|t| NSString::from_str(&t.to_string()));
-    let ptr = value.as_ref().map_or(std::ptr::null_mut(), |v| Retained::as_ptr(v) as *mut AnyObject);
+    let ptr = value.as_ref().map_or(std::ptr::null_mut(), |v| {
+        Retained::as_ptr(v) as *mut AnyObject
+    });
     unsafe {
         objc2::ffi::objc_setAssociatedObject(
             web_view,
@@ -544,14 +713,26 @@ fn tab_of(web_view: *mut AnyObject) -> Option<u32> {
     if web_view.is_null() {
         return None;
     }
-    let v = unsafe { objc2::ffi::objc_getAssociatedObject(web_view, (&raw const TAB_KEY).cast::<c_void>()) };
-    unsafe { v.cast::<NSString>().as_ref() }?.to_string().parse().ok()
+    let v = unsafe {
+        objc2::ffi::objc_getAssociatedObject(web_view, (&raw const TAB_KEY).cast::<c_void>())
+    };
+    unsafe { v.cast::<NSString>().as_ref() }?
+        .to_string()
+        .parse()
+        .ok()
 }
 
 /// Adds `imp` for `sel` to the delegate's class unless the class already implements it.
 unsafe fn add_method(cls: &AnyClass, sel: Sel, imp: Imp, types: &std::ffi::CStr) {
     if cls.instance_method(sel).is_none() {
-        unsafe { objc2::ffi::class_addMethod(std::ptr::from_ref::<AnyClass>(cls).cast_mut(), sel, imp, types.as_ptr()) };
+        unsafe {
+            objc2::ffi::class_addMethod(
+                std::ptr::from_ref::<AnyClass>(cls).cast_mut(),
+                sel,
+                imp,
+                types.as_ptr(),
+            )
+        };
     }
 }
 
@@ -565,12 +746,25 @@ pub fn watch(v: &WebView, tab: u32) {
         let d: *mut AnyObject = msg_send![&*wv, navigationDelegate];
         let Some(d) = d.as_ref() else { return };
         let cls = d.class();
-        let imp: Imp = std::mem::transmute(rule_action as unsafe extern "C-unwind" fn(_, _, _, _, _, _));
+        let imp: Imp =
+            std::mem::transmute(rule_action as unsafe extern "C-unwind" fn(_, _, _, _, _, _));
         add_method(cls, rule_action_sel(), imp, c"v@:@@@@");
-        let imp: Imp = std::mem::transmute(nav_failed as unsafe extern "C-unwind" fn(_, _, _, _, _));
-        add_method(cls, sel!(webView:didFailProvisionalNavigation:withError:), imp, c"v@:@@@");
-        let imp: Imp = std::mem::transmute(web_process_terminated as unsafe extern "C-unwind" fn(_, _, _));
-        add_method(cls, sel!(webViewWebContentProcessDidTerminate:), imp, c"v@:@");
+        let imp: Imp =
+            std::mem::transmute(nav_failed as unsafe extern "C-unwind" fn(_, _, _, _, _));
+        add_method(
+            cls,
+            sel!(webView:didFailProvisionalNavigation:withError:),
+            imp,
+            c"v@:@@@",
+        );
+        let imp: Imp =
+            std::mem::transmute(web_process_terminated as unsafe extern "C-unwind" fn(_, _, _));
+        add_method(
+            cls,
+            sel!(webViewWebContentProcessDidTerminate:),
+            imp,
+            c"v@:@",
+        );
         let _: () = msg_send![&*wv, setNavigationDelegate: d];
     }
 }
@@ -657,7 +851,10 @@ fn to_ns_cookie(c: &CookieRec) -> Option<Retained<NSHTTPCookie>> {
         p.insert(NSHTTPCookieDomain, &*NSString::from_str(&c.domain));
         p.insert(NSHTTPCookiePath, &*NSString::from_str(&c.path));
         if let Some(e) = c.expires {
-            p.insert(NSHTTPCookieExpires, &*NSDate::dateWithTimeIntervalSince1970(e));
+            p.insert(
+                NSHTTPCookieExpires,
+                &*NSDate::dateWithTimeIntervalSince1970(e),
+            );
         }
         if c.secure {
             p.insert(NSHTTPCookieSecure, ns_string!("TRUE"));
@@ -736,13 +933,18 @@ pub fn cert_chain(v: &WebView) -> Option<(Vec<Vec<u8>>, Vec<&'static str>)> {
             if data.is_null() {
                 continue;
             }
-            let bytes = std::slice::from_raw_parts(CFDataGetBytePtr(data), CFDataGetLength(data) as usize);
+            let bytes =
+                std::slice::from_raw_parts(CFDataGetBytePtr(data), CFDataGetLength(data) as usize);
             chain.push(bytes.to_vec());
             CFRelease(data);
         }
     }
     let secure_only: bool = unsafe { msg_send![&*wv, hasOnlySecureContent] };
-    let errors = if secure_only { Vec::new() } else { vec!["cert_err_mixed"] };
+    let errors = if secure_only {
+        Vec::new()
+    } else {
+        vec!["cert_err_mixed"]
+    };
     Some((chain, errors))
 }
 
@@ -802,5 +1004,8 @@ pub fn shutdown() {}
 
 /// Never opens/executes a downloaded file, only highlights it in Finder.
 pub fn reveal(path: &str) {
-    let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
 }

@@ -4,7 +4,7 @@
 //! crash / TLS / network-error reporting, downloads and window-level shortcuts.
 #![allow(clippy::wildcard_imports, clippy::borrow_as_ptr, clippy::type_complexity)] // COM out-params, WebView2 API
 
-use crate::vault::CookieRec;
+use crate::{proxy::ProxyMode, vault::CookieRec};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -78,6 +78,8 @@ pub enum Tls {
 /// Dropping the last handle closes the root; with its last tab the profile's data is gone.
 pub struct StoreInner {
     profile: String,
+    /// Environment of web content when the store was made (`web_env`: carries the proxy).
+    env: ICoreWebView2Environment,
     root: Option<ICoreWebView2Controller>,
 }
 
@@ -92,8 +94,9 @@ impl Drop for StoreInner {
     }
 }
 
-/// Tabs (and adopted popups) are created in their store's profile of the shared environment.
+/// Tabs (and adopted popups) are created in their store's profile and environment.
 pub struct Config {
+    env: ICoreWebView2Environment,
     profile: String,
 }
 
@@ -103,6 +106,9 @@ pub struct Config {
 const BROWSER_ARGS: &str = "--in-memory --incognito \
 --disable-features=msSmartScreenProtection,AutofillServerCommunication,msWebOOUI,msPdfOOUI \
 --disable-sync --disable-gpu-shader-disk-cache --no-first-run";
+/// Proxy part of the arguments for a direct connection (Chromium's default is the system proxy).
+/// The browser UI's environment always has it: the UI never uses the network.
+const DIRECT_ARGS: &str = "--no-proxy-server";
 /// Browser UI (toolbar, panel, lock screen, popovers): its own profile, no state shared with pages.
 const UI_PROFILE: &str = "crow-ui";
 /// Name of Crow's isolated JS world in every frame of a tab.
@@ -156,6 +162,12 @@ struct Rules {
 
 thread_local! {
     static ENV: RefCell<Option<ICoreWebView2Environment>> = const { RefCell::new(None) };
+    /// Environment of web content when it differs from `ENV` (proxy arguments, own folder).
+    static WEB_ENV: RefCell<Option<(String, ICoreWebView2Environment)>> = const { RefCell::new(None) };
+    /// Proxy arguments for web content (`set_proxy`).
+    static NET_ARGS: RefCell<String> = RefCell::new(DIRECT_ARGS.to_string());
+    /// User data folders of the web environments made this run (removed on exit).
+    static NET_DIRS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
     static DATA_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static MAIN_HWND: Cell<isize> = const { Cell::new(0) };
     static NEXT_STORE: Cell<u32> = const { Cell::new(1) };
@@ -227,10 +239,10 @@ fn remove_stale_data() {
     }
 }
 
-fn create_env() -> windows::core::Result<ICoreWebView2Environment> {
+fn create_env(net_args: &str, dir: &Path) -> windows::core::Result<ICoreWebView2Environment> {
     let options = CoreWebView2EnvironmentOptions::default();
     unsafe {
-        options.set_additional_browser_arguments(BROWSER_ARGS.to_string());
+        options.set_additional_browser_arguments(format!("{BROWSER_ARGS} {net_args}"));
         options.set_are_browser_extensions_enabled(false);
         options.set_enable_tracking_prevention(true);
         options.set_allow_single_sign_on_using_os_primary_account(false);
@@ -242,7 +254,7 @@ fn create_env() -> windows::core::Result<ICoreWebView2Environment> {
         let _ = tx.send(hr.and_then(|()| env.ok_or_else(|| E_POINTER.into())));
         Ok(())
     }));
-    let dir = HSTRING::from(data_dir().as_os_str());
+    let dir = HSTRING::from(dir.as_os_str());
     unsafe {
         CreateCoreWebView2EnvironmentWithOptions(
             PCWSTR::null(),
@@ -254,13 +266,41 @@ fn create_env() -> windows::core::Result<ICoreWebView2Environment> {
     wait_with_pump(rx).map_err(|_| windows::core::Error::from(E_FAIL))?
 }
 
-/// The shared environment (created on first use; recreated after its browser process died).
+/// The shared environment: browser UI, and web content while it connects directly (created on
+/// first use; recreated after its browser process died).
 fn env() -> ICoreWebView2Environment {
     ENV.with(|e| {
         e.borrow_mut()
-            .get_or_insert_with(|| create_env().expect("Microsoft Edge WebView2 Runtime is not available"))
+            .get_or_insert_with(|| create_env(DIRECT_ARGS, &data_dir()).expect("Microsoft Edge WebView2 Runtime is not available"))
             .clone()
     })
+}
+
+/// Environment for stores made from now on. A proxy is a browser argument in WebView2, fixed for
+/// an environment's lifetime: another route gets its own environment (and user data folder, as
+/// WebView2 requires), the previous one exits with its last view.
+fn web_env() -> ICoreWebView2Environment {
+    let args = NET_ARGS.with(|a| a.borrow().clone());
+    if args == DIRECT_ARGS {
+        WEB_ENV.with(|w| w.borrow_mut().take());
+        return env();
+    }
+    if let Some(e) = WEB_ENV.with(|w| w.borrow().as_ref().filter(|(a, _)| *a == args).map(|(_, e)| e.clone())) {
+        return e;
+    }
+    let n = NET_DIRS.with(|d| d.borrow().len() + 1);
+    let mut name = data_dir().into_os_string();
+    name.push(format!("-net{n}"));
+    let dir = PathBuf::from(name);
+    NET_DIRS.with(|d| d.borrow_mut().push(dir.clone()));
+    match create_env(&args, &dir) {
+        Ok(e) => {
+            WEB_ENV.with(|w| *w.borrow_mut() = Some((args, e.clone())));
+            e
+        }
+        // Never fall back to a direct environment: the route the user chose or none.
+        Err(e) => panic!("WebView2 environment for the proxy failed: {e}"),
+    }
 }
 
 fn hwnd() -> HWND {
@@ -268,8 +308,8 @@ fn hwnd() -> HWND {
 }
 
 /// Hidden InPrivate view of `profile` in the main window.
-fn root_view(profile: &str) -> windows::core::Result<ICoreWebView2Controller> {
-    let env10: ICoreWebView2Environment10 = env().cast()?;
+fn root_view(profile: &str, env: &ICoreWebView2Environment) -> windows::core::Result<ICoreWebView2Controller> {
+    let env10: ICoreWebView2Environment10 = env.cast()?;
     let (tx, rx) = mpsc::channel();
     let done = CreateCoreWebView2ControllerCompletedHandler::create(Box::new(move |hr, c| {
         let _ = tx.send(hr.and_then(|()| c.ok_or_else(|| E_POINTER.into())));
@@ -295,8 +335,9 @@ fn root_view(profile: &str) -> windows::core::Result<ICoreWebView2Controller> {
 fn make_store() -> Store {
     let n = NEXT_STORE.with(|s| s.replace(s.get() + 1));
     let profile = format!("crow-{n}");
-    let root = root_view(&profile).map_err(|e| eprintln!("webview2 store: {e}")).ok();
-    Rc::new(StoreInner { profile, root })
+    let env = web_env();
+    let root = root_view(&profile, &env).map_err(|e| eprintln!("webview2 store: {e}")).ok();
+    Rc::new(StoreInner { profile, env, root })
 }
 
 /// Fresh in-memory profile for the vault-backed jar of an unlocked session.
@@ -317,7 +358,7 @@ pub fn drop_container_store(_store: &Store) {}
 pub const PIP: bool = true;
 
 pub fn config(store: &Store, _adblock: bool) -> Config {
-    Config { profile: store.profile.clone() }
+    Config { env: store.env.clone(), profile: store.profile.clone() }
 }
 
 fn profile_of(w: &ICoreWebView2) -> Option<String> {
@@ -328,7 +369,8 @@ fn profile_of(w: &ICoreWebView2) -> Option<String> {
 /// window.open target: same environment and profile as the opener (keeps `window.opener`).
 #[allow(clippy::needless_pass_by_value)] // same signature as the other backends
 pub fn popup_config(features: NewWindowFeatures) -> Config {
-    Config { profile: profile_of(&features.opener.webview).unwrap_or_else(|| "crow-1".into()) }
+    let profile = profile_of(&features.opener.webview).unwrap_or_else(|| "crow-1".into());
+    Config { env: features.opener.environment, profile }
 }
 
 /// Tab views (including adopted popups); the browser UI uses `ui_builder`. Browser accelerator
@@ -336,7 +378,7 @@ pub fn popup_config(features: NewWindowFeatures) -> Config {
 /// `page_js`: the page-world shim (`adblock::defuser`), injected into every frame.
 pub fn builder<'a>(config: Config, page_js: String) -> WebViewBuilder<'a> {
     WebViewBuilder::new()
-        .with_environment(env())
+        .with_environment(config.env)
         .with_incognito(true)
         .with_profile_name(config.profile)
         .with_browser_accelerator_keys(false)
@@ -772,8 +814,8 @@ enum Answer {
     Status(i32, &'static str),
 }
 
-fn respond(args: &ICoreWebView2WebResourceRequestedEventArgs, answer: Answer) -> windows::core::Result<()> {
-    let e = env();
+fn respond(env: &ICoreWebView2Environment, args: &ICoreWebView2WebResourceRequestedEventArgs, answer: Answer) -> windows::core::Result<()> {
+    let e = env;
     let res = unsafe {
         match answer {
             Answer::Page(html) => {
@@ -792,7 +834,7 @@ fn respond(args: &ICoreWebView2WebResourceRequestedEventArgs, answer: Answer) ->
 }
 
 /// Built-in page, 404 for anything else under its address, or the content blocker's verdict.
-fn on_request(k: usize, tab: u32, args: &ICoreWebView2WebResourceRequestedEventArgs) -> windows::core::Result<()> {
+fn on_request(env: &ICoreWebView2Environment, k: usize, tab: u32, args: &ICoreWebView2WebResourceRequestedEventArgs) -> windows::core::Result<()> {
     let uri = pwstr(|p| unsafe { args.Request()?.Uri(p) });
     let mut ctx = COREWEBVIEW2_WEB_RESOURCE_CONTEXT::default();
     unsafe { args.ResourceContext(&mut ctx)? };
@@ -808,7 +850,7 @@ fn on_request(k: usize, tab: u32, args: &ICoreWebView2WebResourceRequestedEventA
         (answer, s.top_host.clone(), s.rules)
     });
     if let Some(a) = answer {
-        return respond(args, a);
+        return respond(env, args, a);
     }
     let host = host_of(&uri).to_ascii_lowercase();
     if !rules || host.is_empty() || !(uri.starts_with("http:") || uri.starts_with("https:") || uri.starts_with("ws")) {
@@ -816,7 +858,7 @@ fn on_request(k: usize, tab: u32, args: &ICoreWebView2WebResourceRequestedEventA
     }
     if is_blocked(&host, &top, context_bit(ctx)) {
         count_blocked(tab, &host);
-        return respond(args, Answer::Status(403, "Blocked"));
+        return respond(env, args, Answer::Status(403, "Blocked"));
     }
     Ok(())
 }
@@ -925,6 +967,8 @@ pub fn watch(v: &WebView, tab: u32) {
 
 fn watch_inner(v: &WebView, tab: u32) -> windows::core::Result<()> {
     let (w, k) = (v.webview(), key(v));
+    // Responses must come from the view's own environment (web content may use a proxy one).
+    let env = v.environment();
     with_view(k, |s| s.tab = Some(tab));
     let mut token = 0i64;
     unsafe {
@@ -1016,6 +1060,7 @@ fn watch_inner(v: &WebView, tab: u32) -> windows::core::Result<()> {
                     COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED => {
                         // Every view of the environment is gone; new views get a new one.
                         ENV.with(|e| e.borrow_mut().take());
+                        WEB_ENV.with(|e| e.borrow_mut().take());
                         "browser exited"
                     }
                     _ => return Ok(()),
@@ -1065,7 +1110,7 @@ fn watch_inner(v: &WebView, tab: u32) -> windows::core::Result<()> {
         w.add_WebResourceRequested(
             &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
-                on_request(k, tab, &args)
+                on_request(&env, k, tab, &args)
             })),
             &mut token,
         )?;
@@ -1482,9 +1527,12 @@ pub fn shutdown() {
     VIEWS.with(|m| m.borrow_mut().clear());
     PROFILES.with(|p| p.borrow_mut().clear());
     ENV.with(|e| e.borrow_mut().take());
+    WEB_ENV.with(|e| e.borrow_mut().take());
     // The browser process exits shortly after its last controller closed and holds the folder
     // until then; leftovers are removed on the next start (`remove_stale_data`).
-    if let Some(dir) = DATA_DIR.with(|d| d.borrow().clone()) {
+    let mut dirs: Vec<PathBuf> = NET_DIRS.with(|d| d.borrow_mut().drain(..).collect());
+    dirs.extend(DATA_DIR.with(|d| d.borrow().clone()));
+    for dir in dirs {
         for _ in 0..30 {
             if std::fs::remove_dir_all(&dir).is_ok() || !dir.exists() {
                 break;
@@ -1493,6 +1541,32 @@ pub fn shutdown() {
         }
     }
 }
+
+/// Route of web content for stores made from now on (the app rebuilds its stores after a
+/// change). Chromium's own proxy client: SOCKS5 hands host names to the proxy, any local DNS
+/// lookup is refused outright (`--host-resolver-rules`, no prefetch leaks), WebRTC may not send
+/// UDP outside the proxy, and media / WebSocket traffic follows the same proxy. Chromium has no
+/// SOCKS5 login and WebView2 cannot tell a proxy login prompt from a site's: proxies with
+/// credentials are refused rather than handing the password to web pages.
+pub fn set_proxy(mode: &ProxyMode) -> std::result::Result<(), &'static str> {
+    let args = match (mode, mode.endpoint()) {
+        (_, Some(e)) if e.auth.is_some() => return Err("proxy_err_auth_unsupported"),
+        (_, Some(e)) => format!(
+            "--proxy-server={} \"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE {}\" \
+             --force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+            e.uri("socks5", false).as_str(),
+            e.host
+        ),
+        // Chromium's default without proxy arguments: the system settings (WinINet).
+        (ProxyMode::System, None) => String::new(),
+        _ => DIRECT_ARGS.to_string(),
+    };
+    NET_ARGS.with(|a| *a.borrow_mut() = args);
+    Ok(())
+}
+
+/// A direct connection is its own mode here (`--no-proxy-server`), not the system settings.
+pub const DIRECT_IS_SYSTEM: bool = false;
 
 fn down(vk: VIRTUAL_KEY) -> bool {
     (unsafe { GetKeyState(i32::from(vk.0)) }) < 0

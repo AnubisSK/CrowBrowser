@@ -17,6 +17,7 @@ mod cert;
 mod default_browser;
 mod download;
 mod gamepad;
+mod proxy;
 mod settings;
 mod update;
 mod vault;
@@ -116,6 +117,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut app = App::new(window, event_loop.create_proxy());
+    if std::env::var_os("CROW_SELFTEST").is_some() {
+        app.handle(UserEvent::Ipc("create:selftest-password-123".into()));
+        let p = event_loop.create_proxy();
+        std::thread::spawn(move || {
+            let step = |ms: u64, e: UserEvent| { std::thread::sleep(std::time::Duration::from_millis(ms)); let _ = p.send_event(e); };
+            let ipc = |s: &str| UserEvent::Ipc(s.into());
+            step(4000, UserEvent::OpenUrls(vec!["https://httpbin.org/cookies/set?crow=kept".into()]));
+            step(6000, UserEvent::Menu("probe".into()));
+            step(300, ipc("panel:settings"));
+            step(1500, ipc(r#"set-proxy-mode:{"mode":"tor"}"#));
+            step(4000, ipc("test-proxy-connection"));
+            step(300, ipc("panel-close"));
+            step(6000, UserEvent::Menu("probe".into()));
+            step(300, ipc(r#"set-proxy-mode:{"mode":"custom","protocol":"socks5","host":"127.0.0.1","port":1080,"user":"u","pass":"p"}"#));
+            step(1500, ipc(r#"set-proxy-mode:{"mode":"direct"}"#));
+            step(4000, UserEvent::OpenUrls(vec!["https://httpbin.org/cookies".into()]));
+            step(6000, UserEvent::Menu("probe".into()));
+            step(300, ipc("test-proxy-connection"));
+            step(8000, UserEvent::Menu("quit".into()));
+        });
+    }
     if !urls.is_empty() {
         app.handle(UserEvent::OpenUrls(urls));
     }

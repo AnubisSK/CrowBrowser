@@ -1,5 +1,6 @@
 use crate::{
     adblock, cert, default_browser, download, gamepad,
+    proxy::{self, ProxyMode},
     settings::{self, ENGINES, Settings},
     update,
     vault::{self, Bookmark, CookieRec, Download, HistoryEntry, MAX_HISTORY, Vault, VaultData},
@@ -217,6 +218,12 @@ pub enum UserEvent {
         manual: bool,
     },
     UpdateSaved(Option<PathBuf>),
+    /// Cookies of the store a proxy change replaces (session token).
+    ProxySwitch { cookies: Vec<CookieRec>, token: u64 },
+    /// The new store of a proxy change has its cookies (session token).
+    ProxyReady(u64),
+    /// `test-proxy-connection`: exit address and whether it is Tor, or a `locales.json` key.
+    ProxyTest(Result<(String, bool), &'static str>),
     /// Links handed over by the system (Crow as default browser / command line).
     OpenUrls(Vec<String>),
     /// Default-browser status; `note` = `locales.json` key after a registration attempt.
@@ -277,7 +284,7 @@ impl TabCtx {
     ) -> wry::Result<WebView> {
         let (p1, p2) = (self.proxy.clone(), self.proxy.clone());
         let ctx = self.clone();
-        let mut b = wk::builder(config, self.page_js.borrow().clone())
+        let b = wk::builder(config, self.page_js.borrow().clone())
             .with_background_color(bg_of(&self.window))
             .with_on_page_load_handler(move |ev, url| {
                 let started = matches!(ev, PageLoadEvent::Started);
@@ -293,9 +300,9 @@ impl TabCtx {
             .with_new_window_req_handler(move |url, features| ctx.popup(id, url, features));
         // Linux: downloads are watched once on the shared context (wk::watch_downloads).
         #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
+        let b = {
             let (p3, p4) = (self.proxy.clone(), self.proxy.clone());
-            b = b
+            b
                 .with_download_started_handler(move |url, path| {
                     // WebKit's suggested name goes through the same sanitizing as on Linux.
                     let name = path
@@ -324,8 +331,8 @@ impl TabCtx {
                 })
                 .with_download_completed_handler(move |url, _, ok| {
                     let _ = p4.send_event(UserEvent::DownloadDone { url, ok });
-                });
-        }
+                })
+        };
         let view = wk::attach(b, rect, &self.window)?;
         wk::set_rules(&view, blocking);
         wk::watch(&view, id);
@@ -614,6 +621,25 @@ struct Session {
     lang: Rc<RefCell<String>>,
     /// Last known default-browser status (None = not checked yet).
     default_browser: Option<default_browser::Status>,
+    /// Network route of web content (`proxy`): RAM only, every session starts direct.
+    net: ProxyMode,
+    /// A route change in progress (`App::set_proxy_mode`).
+    net_phase: Option<NetPhase>,
+}
+
+/// Proxy change: the old store's cookies are being exported, then imported into the new one.
+#[derive(Clone, Copy, PartialEq)]
+enum NetPhase {
+    Export,
+    Import,
+}
+
+/// The engines' route goes back to direct with the session (lock, quit): no proxy and no proxy
+/// login outlives it.
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = wk::set_proxy(&ProxyMode::Direct);
+    }
 }
 
 impl Session {
@@ -929,6 +955,9 @@ impl Session {
             "version": update::CURRENT,
             "update": self.update,
             "updateBusy": self.update_busy,
+            "proxy": self.net.state(),
+            "proxyBusy": self.net_phase.is_some(),
+            "proxyDirectIsSystem": wk::DIRECT_IS_SYSTEM,
         })
         .to_string()
     }
@@ -949,6 +978,8 @@ pub struct App {
     next_tick: Instant,
     quit_at: Option<Instant>,
     restore_by: Option<Instant>,
+    /// Deadline of the current proxy-change phase (cookie export / import may never answer).
+    net_by: Option<Instant>,
     update_checked: bool,
     /// Source of `Session::token`: unique per unlock, never reused.
     sessions: u64,
@@ -1023,6 +1054,7 @@ impl App {
             next_tick: Instant::now() + TICK,
             quit_at: None,
             restore_by: None,
+            net_by: None,
             update_checked: false,
             sessions: 0,
             incoming: Vec::new(),
@@ -1052,7 +1084,7 @@ impl App {
     pub fn wake(&self) -> Instant {
         let fav = self.s.as_ref().and_then(|s| s.fav_due);
         let page = self.s.as_ref().map(|s| s.page_due.unwrap_or_else(|| Instant::now() + PAGE_POLL));
-        [self.quit_at, self.restore_by, fav, page]
+        [self.quit_at, self.restore_by, self.net_by, fav, page]
             .into_iter()
             .flatten()
             .fold(self.next_tick, Instant::min)
@@ -1257,6 +1289,17 @@ impl App {
             }
             UserEvent::Gamepads(state) => self.push_pads(&state),
             UserEvent::Update { result, manual } => self.update_result(result, manual),
+            UserEvent::ProxySwitch { cookies, token } => self.proxy_switch(&cookies, token),
+            UserEvent::ProxyReady(token) => self.proxy_ready(token),
+            UserEvent::ProxyTest(r) => {
+                let Some(p) = self.s.as_ref().and_then(|s| s.panel.as_ref()) else { return };
+                let r = match r {
+                    Ok((ip, tor)) => json!({ "ok": true, "ip": ip, "tor": tor }),
+                    Err(key) => json!({ "ok": false, "err": key }),
+                };
+                eprintln!("PROXYTEST {r}");
+                let _ = p.evaluate_script(&format!("window.proxyTest && proxyTest({r})"));
+            }
             UserEvent::UpdateSaved(path) => {
                 let Some(s) = self.s.as_mut() else { return };
                 s.update_busy = false;
@@ -1290,6 +1333,14 @@ impl App {
         if self.restore_by.is_some_and(|r| now >= r) {
             eprintln!("cookie restore timed out; starting session without waiting");
             self.restored(false);
+        }
+        if self.net_by.is_some_and(|d| now >= d) {
+            let (phase, token) = self.s.as_ref().map_or((None, 0), |s| (s.net_phase, s.token));
+            eprintln!("proxy change: cookie transfer timed out; continuing without waiting");
+            match phase {
+                Some(NetPhase::Export) => self.proxy_switch(&[], token),
+                _ => self.proxy_ready(token),
+            }
         }
         if let Some(s) = self.s.as_mut()
             && s.fav_due.is_some_and(|d| now >= d)
@@ -1469,7 +1520,7 @@ impl App {
             .unwrap_or_default();
         self.ctx.adblock.set(self.cfg.adblock);
         *self.ctx.page_js.borrow_mut() =
-            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event);
+            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event, false);
         // The vault is authoritative; the plain copy only serves the next lock screen.
         settings::store_language(&self.cfg.language);
         self.ctx.lang.borrow_mut().clone_from(&self.cfg.language);
@@ -1524,6 +1575,8 @@ impl App {
             update_bar: false,
             update_busy: false,
             default_browser: None,
+            net: ProxyMode::Direct,
+            net_phase: None,
         });
     }
 
@@ -1636,8 +1689,9 @@ impl App {
     /// Page shim for views built from now on; existing views are rebuilt when shown next (the
     /// visible one at once unless a panel is open, then when it closes).
     fn shim_changed(&mut self, now: bool) {
+        let proxied = self.s.as_ref().is_some_and(|s| s.net.proxied());
         *self.ctx.page_js.borrow_mut() =
-            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event);
+            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event, proxied);
         let Some(s) = self.s.as_mut() else { return };
         s.views_stale = true;
         let active = s.active;
@@ -2019,6 +2073,7 @@ impl App {
     /// The page could not be reached: Crow's error page with a retry link and the offline game,
     /// shown in the tab (no IPC) under `INTERNAL_BASE`; the address bar keeps the failed URL.
     fn net_error(&mut self, id: u32, url: String, reason: &'static str) {
+        eprintln!("NETERR {id} {url} {reason}");
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let t = &mut s.tabs[i];
@@ -2036,6 +2091,89 @@ impl App {
             s.site = None;
         }
         s.sync(&self.cfg);
+    }
+
+    /// `set-proxy-mode` (settings panel). The engine takes the route for stores made from now on;
+    /// the session then moves to a new store: cookies exported, every tab view and container
+    /// dropped (no page, socket or pooled connection lives on in the old route), cookies imported,
+    /// the active tab reloaded. Errors and the new state go back to the panel.
+    fn set_proxy_mode(&mut self, arg: &str) {
+        let Some(s) = self.s.as_mut() else { return };
+        if s.net_phase.is_some() {
+            return;
+        }
+        let panel = |s: &Session, js: String| {
+            if let Some(p) = &s.panel {
+                let _ = p.evaluate_script(&js);
+            }
+        };
+        let mode = match ProxyMode::from_request(&s.net, arg).and_then(|m| wk::set_proxy(&m).map(|()| m)) {
+            Ok(m) => m,
+            Err(key) => return panel(s, format!("window.proxyResult && proxyResult(false, {})", js(key))),
+        };
+        if mode == s.net {
+            return panel(s, format!("window.proxyApplied && proxyApplied({})", s.net.state()));
+        }
+        s.net = mode;
+        s.net_phase = Some(NetPhase::Export);
+        self.net_by = Some(Instant::now() + RESTORE_TIMEOUT);
+        let (p, token) = (self.ctx.proxy.clone(), s.token);
+        wk::export_cookies(&s.store, move |cookies| {
+            let _ = p.send_event(UserEvent::ProxySwitch { cookies, token });
+        });
+    }
+
+    /// Old store's cookies are in: everything of the old route goes, the new store gets them.
+    /// Container tabs keep their address but start a new, empty jar.
+    fn proxy_switch(&mut self, cookies: &[CookieRec], token: u64) {
+        let Some(s) = self.s.as_mut().filter(|s| s.token == token && s.net_phase == Some(NetPhase::Export)) else {
+            return;
+        };
+        for t in &mut s.tabs {
+            t.drop_view();
+            t.loading = false;
+            t.tls = "";
+        }
+        s.site = None;
+        s.video_fullscreen = None;
+        for store in s.containers.values() {
+            wk::drop_container_store(store);
+        }
+        s.containers.clear();
+        *self.ctx.page_js.borrow_mut() = adblock::defuser(
+            self.cfg.gamepad_enabled,
+            &self.cfg.gamepad_sites,
+            &self.cfg.webgl_off,
+            &self.ctx.pad_event,
+            s.net.proxied(),
+        );
+        s.store = wk::new_store();
+        s.net_phase = Some(NetPhase::Import);
+        self.net_by = Some(Instant::now() + RESTORE_TIMEOUT);
+        let p = self.ctx.proxy.clone();
+        wk::import_cookies(&s.store, cookies, move || {
+            let _ = p.send_event(UserEvent::ProxyReady(token));
+        });
+    }
+
+    /// New route ready (or the import timed out): tabs load again, the panel shows the state.
+    fn proxy_ready(&mut self, token: u64) {
+        let Some(s) = self.s.as_mut().filter(|s| s.token == token && s.net_phase == Some(NetPhase::Import)) else {
+            return;
+        };
+        self.net_by = None;
+        s.net_phase = None;
+        if let Some(p) = &s.panel {
+            let _ = p.evaluate_script(&format!("window.proxyApplied && proxyApplied({})", s.net.state()));
+        }
+        s.note(if s.net.proxied() { "proxy_applied_proxied" } else { "proxy_applied" }, &[]);
+        // Behind the open panel the tab is rebuilt when the panel closes.
+        if s.panel.is_some() {
+            s.views_stale = true;
+            return s.sync(&self.cfg);
+        }
+        let active = s.active;
+        self.activate(active);
     }
 
     fn icon(&mut self, id: u32, data: String) {
@@ -2927,6 +3065,20 @@ impl App {
             "site-clear" => self.request_site_cookies(true),
             "get-vault-sessions" => self.request_sessions(None),
             "get-default-browser-status" => default_browser::query(self.ctx.proxy.clone(), false),
+            "probe" => {
+                if let Some(v) = s.view() {
+                    wk::eval_isolated(v, "location.href + ' | ' + (document.body ? document.body.innerText.slice(0, 160) : '')", |r| eprintln!("PROBE {r}"));
+                }
+            }
+            "set-proxy-mode" => self.set_proxy_mode(arg),
+            // Probe outside the browser (`proxy::probe`): no cookie, cache or header of the session.
+            "test-proxy-connection" => {
+                let (p, mode) = (self.ctx.proxy.clone(), s.net.clone());
+                std::thread::spawn(move || {
+                    let r = proxy::probe(&mode).map(|x| (x.ip, x.tor));
+                    let _ = p.send_event(UserEvent::ProxyTest(r));
+                });
+            }
             "set-as-default-browser" => default_browser::query(self.ctx.proxy.clone(), true),
             // UI language: vault setting + plain copy for the lock screen, then every open UI
             // view re-renders its text without reloading.

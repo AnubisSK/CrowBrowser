@@ -76,6 +76,19 @@
   .item .user { color: var(--mute); width: 110px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .empty { padding: 32px; text-align: center; color: var(--mute); }
 
+  /* Network & proxy */
+  .plist { display: flex; flex-direction: column; gap: 2px; }
+  .pradio { display: flex; align-items: flex-start; gap: 10px; padding: 6px 0; cursor: pointer; }
+  .pradio input { margin-top: 2px; accent-color: var(--accent); }
+  .pradio small { display: block; color: var(--mute); margin-top: 2px; }
+  .pcustom { margin: 2px 0 8px 26px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 10px; }
+  .pcustom[hidden] { display: none; }
+  .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .pfield { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--mute); }
+  .pfield input, .pfield select { width: 100%; }
+  .badge.tor { background: rgba(125, 78, 200, .2); color: #b48cf2; }
+  .presult.ok { color: var(--ok); } .presult.err { color: var(--danger); } .presult.warn { color: #d29922; }
+
   #toast {
     position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px);
     background: var(--accent); color: #fff; padding: 8px 16px; border-radius: 8px;
@@ -207,6 +220,84 @@
     return row(t('default_browser'), null, h('div', { style: 'display:flex;gap:8px;align-items:center' }, badge, btn));
   }
 
+  // Network & proxy (RAM only: every session starts direct). Answers from the backend:
+  // `proxyApplied(state)`, `proxyResult(false, key)`, `proxyTest({ ok, ip, tor, err })`.
+  function proxySection() {
+    const P = D.proxy || { mode: 'direct' };
+    let mode = P.mode;
+    const field = (label, el) => h('label', { class: 'pfield' }, h('span', {}, label), el);
+    const proto = h('select');
+    proto.add(new Option('SOCKS5', 'socks5'));
+    proto.add(new Option('HTTP', 'http'));
+    proto.value = P.protocol || 'socks5';
+    const hostI = h('input', { type: 'text', spellcheck: 'false', autocomplete: 'off', placeholder: '127.0.0.1' });
+    hostI.value = P.host || '';
+    const portI = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'off', placeholder: '1080', class: 'port' });
+    portI.value = P.port || '';
+    const userI = h('input', { type: 'text', spellcheck: 'false', autocomplete: 'off' });
+    userI.value = P.user || '';
+    const passI = h('input', { type: 'password', autocomplete: 'new-password', placeholder: P.hasPass ? t('proxy_pass_kept') : '' });
+    const applyBtn = h('button', { class: 'btn primary' }, t('proxy_apply'));
+    const custom = h('div', { class: 'pcustom' },
+      h('div', { class: 'pgrid' }, field(t('proxy_protocol'), proto), field(t('proxy_host'), hostI), field(t('proxy_port'), portI),
+        field(t('proxy_user'), userI), field(t('proxy_pass'), passI)),
+      h('div', {}, applyBtn));
+    const badge = h('span', { class: 'badge' });
+    const result = h('small', { class: 'presult' });
+    const testBtn = h('button', { class: 'btn' }, t('proxy_test'));
+    const radios = [];
+    const opt = (v, label, sub) => {
+      const r = h('input', { type: 'radio', name: 'proxy', value: v });
+      r.onchange = () => { mode = v; paint(); if (v !== 'custom') apply(); };
+      radios.push(r);
+      return h('label', { class: 'pradio' }, r, h('div', {}, label, sub ? h('small', {}, sub) : null));
+    };
+    const list = h('div', { class: 'plist' },
+      opt('direct', t('proxy_direct'), D.proxyDirectIsSystem ? t('proxy_direct_is_system') : null),
+      opt('system', t('proxy_system')),
+      opt('custom', t('proxy_custom')),
+      custom,
+      opt('tor', t('proxy_tor'), t('proxy_tor_desc')));
+    let busy = !!D.proxyBusy;
+    function paint() {
+      for (const r of radios) { r.checked = r.value === mode; r.disabled = busy; }
+      custom.hidden = mode !== 'custom';
+      applyBtn.disabled = testBtn.disabled = busy;
+      const active = P.mode;
+      badge.classList.toggle('on', active === 'tor' || active === 'custom');
+      badge.classList.toggle('tor', active === 'tor');
+      badge.textContent = busy ? t('proxy_switching') : active === 'tor' ? '🧅 ' + t('proxy_badge_tor')
+        : active === 'custom' ? t('proxy_badge_custom') : active === 'system' ? t('proxy_system') : t('proxy_badge_direct');
+    }
+    function apply() {
+      busy = true; paint(); result.textContent = '';
+      send('set-proxy-mode:' + JSON.stringify({ mode, protocol: proto.value, host: hostI.value.trim(),
+        port: Number(portI.value) || 0, user: userI.value, pass: passI.value, keep_pass: !passI.value && !!P.hasPass }));
+      passI.value = '';
+    }
+    applyBtn.onclick = apply;
+    testBtn.onclick = () => {
+      testBtn.disabled = true; result.className = 'presult'; result.textContent = t('proxy_testing');
+      send('test-proxy-connection');
+    };
+    window.proxyApplied = (st) => {
+      Object.keys(P).forEach(k => delete P[k]); Object.assign(P, st); D.proxy = P;
+      mode = P.mode; busy = false; passI.placeholder = P.hasPass ? t('proxy_pass_kept') : ''; paint();
+    };
+    window.proxyResult = (ok, key) => { busy = false; mode = P.mode; paint(); if (!ok) toast(t(key), true); };
+    window.proxyTest = (r) => {
+      testBtn.disabled = busy;
+      result.className = 'presult ' + (r.ok ? (P.mode === 'tor' && !r.tor ? 'warn' : 'ok') : 'err');
+      result.textContent = !r.ok ? t(r.err)
+        : r.tor ? t('proxy_test_tor', r.ip) : P.mode === 'tor' ? t('proxy_test_not_tor', r.ip) : t('proxy_test_ok', r.ip);
+    };
+    paint();
+    return h('section', {},
+      h('div', { class: 'row' }, h('div', {}, t('proxy_route'), h('small', {}, t('proxy_desc'))), badge),
+      h('div', { class: 'row', style: 'display:block' }, list),
+      h('div', { class: 'row' }, h('div', {}, t('proxy_test_title'), result), testBtn));
+  }
+
   const views = {
     settings() {
       const home = h('input', { type: 'text', spellcheck: 'false' });
@@ -249,6 +340,8 @@
             select('unload', [[1, t('unload_minute', 1)], [5, t('unload_minutes', 5)], [15, t('unload_minutes', 15)], [30, t('unload_minutes', 30)], [60, t('unload_hour')], [0, t('never')]])),
           row(t('clarity_setting'), t('clarity_setting_desc'), seg('clarity', [['on', t('switch_on')], ['off', t('switch_off')]])),
           row(t('clarity_sharpen'), t('clarity_sharpen_desc'), seg('clarity_sharpen', [['on', t('switch_on')], ['off', t('switch_off')]]))),
+        h('h2', {}, t('proxy_section')),
+        proxySection(),
         h('h2', {}, t('privacy')),
         h('section', {},
           row(t('adblock_full'), t('adblock_desc', '~/Library/Application Support/Crow/blocklist.txt'),
