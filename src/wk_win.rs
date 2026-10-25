@@ -980,7 +980,22 @@ fn watch_inner(v: &WebView, tab: u32) -> windows::core::Result<()> {
             &NavigationStartingEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
                 let uri = pwstr(|p| args.Uri(p));
+                // `file:` only from Crow itself (address bar, session): a redirect, or a link
+                // clicked in a non-`file:` document, must not enumerate the disk.
+                let local = uri.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:"));
+                let (mut redirected, mut gesture) = (windows::core::BOOL::default(), windows::core::BOOL::default());
+                if local {
+                    args.IsRedirected(&mut redirected)?;
+                    args.IsUserInitiated(&mut gesture)?;
+                }
                 let refuse = with_view(k, |s| {
+                    if local {
+                        let from_web = !s.nav_uri.is_empty()
+                            && !s.nav_uri.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:"));
+                        if redirected.as_bool() || (gesture.as_bool() && from_web) {
+                            return true;
+                        }
+                    }
                     let internal = !s.internal_base.is_empty() && uri.starts_with(&s.internal_base);
                     if internal && !std::mem::take(&mut s.internal_pending) {
                         return true; // only Crow opens built-in pages

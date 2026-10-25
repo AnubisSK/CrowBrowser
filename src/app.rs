@@ -1257,6 +1257,11 @@ impl App {
                 s.video_fullscreen = if on { Some(tab) } else { s.video_fullscreen.filter(|t| *t != tab) };
                 if on {
                     s.site = None;
+                    // Fullscreen hides all Crow chrome: name the site so it cannot pose as the UI.
+                    if let Some(i) = s.tab_idx(tab) {
+                        let host = host_of(&s.tabs[i].url);
+                        s.toast(&format!("{host} prešiel do režimu celej obrazovky (ESC pre návrat)"));
+                    }
                 }
                 // WebView2 only reports it: the window goes fullscreen here.
                 #[cfg(target_os = "windows")]

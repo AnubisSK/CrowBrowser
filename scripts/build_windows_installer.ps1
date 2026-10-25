@@ -138,12 +138,16 @@ try {
 
     Step 5 'Installer'
     New-Item -ItemType Directory -Force $Dist | Out-Null
-    & $Iscc /Qp "/DAppVersion=$Version" $Iss
+        & $Iscc /Qp "/DAppVersion=$Version" $Iss
     if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
-
-    Step 6 'Done'
     $Setup = Join-Path $Dist "crow-browser-setup-v$Version.exe"
     if (-not (Test-Path $Setup)) { throw "installer not produced: $Setup" }
+    if ($sign -and $env:CROW_SIGN_CERT) {
+        & $sign.Source sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $env:CROW_SIGN_CERT $Setup
+        if ($LASTEXITCODE -ne 0) { throw 'signtool failed (installer)' }
+    }
+
+    Step 6 'Done'
     $hash = (Get-FileHash -Algorithm SHA256 $Setup).Hash.ToLower()
     Write-Host ''
     Write-Host "Installer: $Setup" -ForegroundColor Green

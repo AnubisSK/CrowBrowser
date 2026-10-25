@@ -53,6 +53,13 @@ use tao::platform::unix::EventLoopBuilderExtUnix;
 static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // DLL planting: delay-loaded / LoadLibrary'd DLLs come only from System32, never from the
+    // exe or current directory.
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories};
+        let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
     #[allow(unused_mut)]
     let mut builder = EventLoopBuilder::<UserEvent>::with_user_event();
     #[cfg(target_os = "linux")]

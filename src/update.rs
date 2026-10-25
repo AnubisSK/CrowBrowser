@@ -276,7 +276,9 @@ pub fn download(proxy: EventLoopProxy<UserEvent>, asset: Asset) {
         let ok = fetched.is_some_and(|s| s.success())
             && asset.sha256.as_deref().is_some_and(|want| sha256_of(&part).as_deref() == Some(want))
             && fs::rename(&part, &path).is_ok();
-        if !ok {
+        if ok {
+            crate::download::quarantine(&path);
+        } else {
             let _ = fs::remove_file(&part);
         }
         send(UserEvent::DownloadDone { url: asset.url.clone(), ok });
