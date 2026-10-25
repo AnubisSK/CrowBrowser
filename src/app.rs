@@ -1297,7 +1297,6 @@ impl App {
                     Ok((ip, tor)) => json!({ "ok": true, "ip": ip, "tor": tor }),
                     Err(key) => json!({ "ok": false, "err": key }),
                 };
-                eprintln!("PROXYTEST {r}");
                 let _ = p.evaluate_script(&format!("window.proxyTest && proxyTest({r})"));
             }
             UserEvent::UpdateSaved(path) => {
@@ -2073,7 +2072,6 @@ impl App {
     /// The page could not be reached: Crow's error page with a retry link and the offline game,
     /// shown in the tab (no IPC) under `INTERNAL_BASE`; the address bar keeps the failed URL.
     fn net_error(&mut self, id: u32, url: String, reason: &'static str) {
-        eprintln!("NETERR {id} {url} {reason}");
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let t = &mut s.tabs[i];
@@ -3065,11 +3063,6 @@ impl App {
             "site-clear" => self.request_site_cookies(true),
             "get-vault-sessions" => self.request_sessions(None),
             "get-default-browser-status" => default_browser::query(self.ctx.proxy.clone(), false),
-            "probe" => {
-                if let Some(v) = s.view() {
-                    wk::eval_isolated(v, "location.href + ' | ' + (document.body ? document.body.innerText.slice(0, 160) : '')", |r| eprintln!("PROBE {r}"));
-                }
-            }
             "set-proxy-mode" => self.set_proxy_mode(arg),
             // Probe outside the browser (`proxy::probe`): no cookie, cache or header of the session.
             "test-proxy-connection" => {
