@@ -11,11 +11,12 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{self, Write},
-    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 use zeroize::{Zeroize, Zeroizing};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 const MAGIC: &[u8; 6] = b"CROWV1";
 const HEADER: usize = 6 + 16;
@@ -213,17 +214,20 @@ impl Vault {
         fs::create_dir_all(&dir)?;
         let tmp = dir.join(".vault.tmp");
         let res = (|| {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?;
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            opts.mode(0o600);
+            let mut f = opts.open(&tmp)?;
             f.write_all(&out)?;
             f.sync_all()?;
+            // Windows: MoveFileExW(MOVEFILE_REPLACE_EXISTING), atomic on the same volume.
             fs::rename(&tmp, path())?;
-            // Persist the rename itself.
-            fs::File::open(&dir)?.sync_all()
+            // Persist the rename itself (directories cannot be opened for fsync on Windows;
+            // NTFS journals the rename).
+            #[cfg(unix)]
+            fs::File::open(&dir)?.sync_all()?;
+            Ok(())
         })();
         if res.is_err() {
             let _ = fs::remove_file(&tmp);

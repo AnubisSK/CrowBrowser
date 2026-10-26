@@ -1,3 +1,4 @@
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![warn(clippy::pedantic)]
 #![allow(
     clippy::doc_markdown,
@@ -16,10 +17,12 @@ mod cert;
 mod default_browser;
 mod download;
 mod gamepad;
+mod proxy;
 mod settings;
 mod update;
 mod vault;
 #[cfg_attr(target_os = "linux", path = "wk_gtk.rs")]
+#[cfg_attr(target_os = "windows", path = "wk_win.rs")]
 mod wk;
 
 use app::{App, UserEvent};
@@ -50,6 +53,13 @@ use tao::platform::unix::EventLoopBuilderExtUnix;
 static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // DLL planting: delay-loaded / LoadLibrary'd DLLs come only from System32, never from the
+    // exe or current directory.
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories};
+        let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    }
     #[allow(unused_mut)]
     let mut builder = EventLoopBuilder::<UserEvent>::with_user_event();
     #[cfg(target_os = "linux")]
@@ -104,6 +114,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = proxy.send_event(UserEvent::Menu(cmd));
         });
     }
+    #[cfg(target_os = "windows")]
+    {
+        // No menu bar: shortcuts come from every WebView2 controller (`AcceleratorKeyPressed`).
+        let proxy = event_loop.create_proxy();
+        wk::init_window(&window, move |cmd| {
+            let _ = proxy.send_event(UserEvent::Menu(cmd));
+        });
+    }
 
     let mut app = App::new(window, event_loop.create_proxy());
     if !urls.is_empty() {
@@ -142,8 +160,9 @@ fn set_app_icon(_: &Window) {
     }
 }
 
-/// X11 window icon; Wayland takes it from com.crow.browser.desktop (scripts/install_linux.sh).
-#[cfg(target_os = "linux")]
+/// X11 window icon (Wayland takes it from com.crow.browser.desktop, scripts/install_linux.sh);
+/// Windows: title bar and taskbar icon.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn set_app_icon(window: &Window) {
     let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!("../assets/icon-256.png")));
     let Ok(mut reader) = decoder.read_info() else { return };

@@ -57,11 +57,20 @@ cat > "$APP/Contents/Info.plist" <<EOF
       </array>
     </dict>
   </array>
+  <key>NSCameraUsageDescription</key>
+  <string>CrowBrowser requires access to the camera for WebRTC video conferencing.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>CrowBrowser requires access to the microphone for WebRTC audio calls.</string>
 </dict>
 </plist>
 EOF
 
-# Ad-hoc signature: required for a stable identity (Keychain, WebKit) on the local machine.
-codesign --force --deep --sign - "$APP"
+# Code signature with Hardened Runtime and Entitlements (ad-hoc or developer cert)
+ENTITLEMENTS="assets/Crow.entitlements"
+if [ -f "$ENTITLEMENTS" ]; then
+  codesign --force --deep --options runtime --entitlements "$ENTITLEMENTS" --sign - "$APP"
+else
+  codesign --force --deep --sign - "$APP"
+fi
 
 echo "Hotovo: $APP  (presuň do /Applications alebo spusti: open $APP)"

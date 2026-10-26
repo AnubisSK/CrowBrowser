@@ -40,6 +40,20 @@
   body.blurred #lights:not(:hover) span { background: var(--lights-off, #4a4a50); }
   #lights svg { width: 8px; height: 8px; fill: none; stroke: rgba(0,0,0,.55); stroke-width: 3; stroke-linecap: round; opacity: 0; }
   #lights:hover svg { opacity: 1; }
+  /* Windows (borderless, client-side decorations): caption buttons top right, the page moves
+     the window, the 4 px strip on top resizes it. */
+  #caps, #rsz { display: none; }
+  body.windows #caps { display: flex; position: fixed; top: 0; right: 0; height: 32px; z-index: 10; }
+  #caps button { width: 46px; height: 100%; border: 0; border-radius: 0; background: transparent; color: var(--fg);
+    display: grid; place-items: center; }
+  #caps button:hover { background: rgba(128, 128, 128, .18); }
+  #caps .close:hover { background: #e81123; color: #fff; }
+  #caps .close:active { background: #f1707a; color: #fff; }
+  body.blurred #caps button:not(:hover) { color: var(--mute); }
+  #caps svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1; }
+  #caps .restore, body.maximized #caps .max { display: none; }
+  body.maximized #caps .restore { display: block; }
+  body.windows:not(.maximized) #rsz { display: block; position: fixed; left: 0; right: 0; top: 0; height: 4px; z-index: 20; cursor: ns-resize; }
   .shake { animation: shake .35s; }
   @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
 </style>
@@ -50,6 +64,12 @@
     <span class="m" data-c="win-min"><svg viewBox="0 0 10 10"><path d="M1.5 5h7"/></svg></span>
     <span class="x" data-c="win-max"><svg viewBox="0 0 10 10"><path d="M5 1.5v7M1.5 5h7"/></svg></span>
   </div>
+  <div id="caps">
+    <button type="button" data-c="window-minimize"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
+    <button type="button" data-c="window-maximize"><svg class="max" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg><svg class="restore" viewBox="0 0 10 10"><path d="M2.5 2.5V.5h7v7h-2"/><rect x=".5" y="2.5" width="7" height="7"/></svg></button>
+    <button type="button" class="close" data-c="window-close"><svg viewBox="0 0 10 10"><path d="M.5.5l9 9M9.5.5l-9 9"/></svg></button>
+  </div>
+  <div id="rsz"></div>
   <form class="card" id="card" autocomplete="off">
     <div class="logo">/*LOGO*/</div>
     <h1 id="h"></h1>
@@ -88,6 +108,13 @@
   document.querySelectorAll('#lights span').forEach(l => l.onclick = () => send(l.dataset.c));
   dragOn($('lights'), (e) => e.target.id === 'lights');
   function setFocus(on) { document.body.classList.toggle('blurred', !on); }
+  document.querySelectorAll('#caps button').forEach(b => b.onclick = () => send(b.dataset.c));
+  function setMax(on) { document.body.classList.toggle('maximized', on); }
+  $('rsz').addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    send('resize:' + (e.clientX < 8 ? 'nw' : e.clientX >= innerWidth - 8 ? 'ne' : 'n'));
+  });
 
   $('card').onsubmit = (e) => {
     e.preventDefault();

@@ -1,10 +1,16 @@
 //! WebKitGTK glue (Linux), same API as `wk.rs`: shared ephemeral context, cookie export/import,
 //! content filters (same JSON rule format as Safari), downloads, window chrome and shortcuts.
 
-use crate::vault::CookieRec;
+use crate::{
+    proxy::{ProxyMode, ProxyProtocol},
+    vault::CookieRec,
+};
 use gtk::{
     gdk, gio,
-    glib::{self, translate::FromGlibPtrContainer},
+    glib::{
+        self,
+        translate::{FromGlibPtrContainer, ToGlibPtr},
+    },
     prelude::*,
 };
 use std::{
@@ -19,10 +25,12 @@ use tao::{
     window::{Theme, Window},
 };
 use webkit2gtk::{
-    CacheModel, CookieManagerExt, TLSErrorsPolicy, DownloadExt, PolicyDecisionExt, PolicyDecisionType,
+    AuthenticationRequestExt, CacheModel, CookieManagerExt, HardwareAccelerationPolicy, NetworkProxyMode, NetworkProxySettings,
+    TLSErrorsPolicy, DownloadExt, PolicyDecisionExt, PolicyDecisionType,
     ResponsePolicyDecisionExt, SettingsExt, URIRequestExt, URIResponseExt, UserContentManagerExt, WebContext,
     WebContextExt, WebProcessTerminationReason, WebViewExt, WebsiteDataManagerExt, WebsiteDataTypes,
 };
+use zeroize::Zeroizing;
 use wry::{
     NewWindowFeatures, NewWindowResponse, Rect, WebView, WebViewBuilder, WebViewBuilderExtUnix,
     WebViewExtUnix,
@@ -152,6 +160,8 @@ thread_local! {
     static CONTAINER_ROOTS: RefCell<Vec<webkit2gtk::WebView>> = const { RefCell::new(Vec::new()) };
     /// Download prompt hookup, also attached to container contexts.
     static DOWNLOAD_HOOK: RefCell<Option<Rc<dyn Fn(&WebContext)>>> = const { RefCell::new(None) };
+    /// Route of web content (`set_proxy`); RAM only, credentials zeroized when replaced.
+    static NET: RefCell<ProxyMode> = const { RefCell::new(ProxyMode::Direct) };
 }
 
 /// Ephemeral context: nothing on disk, certificate errors refuse the load.
@@ -161,8 +171,49 @@ fn ephemeral_context() -> WebContext {
     // Explicit: certificate errors refuse the load, never an "ignore" fallback.
     if let Some(m) = ctx.website_data_manager() {
         m.set_tls_errors_policy(TLSErrorsPolicy::Fail);
+        apply_proxy(&m);
     }
     ctx
+}
+
+/// Route of the context's network process (`set_proxy`). GIO's SOCKS5 client hands host names
+/// to the proxy (no local DNS) and takes the login from the URI; an HTTP proxy's login is only
+/// given to the proxy's own challenge (`watch`). Loopback stays local.
+fn apply_proxy(m: &webkit2gtk::WebsiteDataManager) {
+    NET.with(|n| {
+        let mode = n.borrow();
+        match (&*mode, mode.endpoint()) {
+            (_, Some(e)) => {
+                let uri = e.uri("socks5", e.protocol == ProxyProtocol::Socks5);
+                let mut s = NetworkProxySettings::new(Some(uri.as_str()), &["localhost", "127.0.0.0/8", "::1"]);
+                m.set_network_proxy_settings(NetworkProxyMode::Custom, Some(&mut s));
+            }
+            (ProxyMode::System, None) => m.set_network_proxy_settings(NetworkProxyMode::Default, None),
+            _ => m.set_network_proxy_settings(NetworkProxyMode::NoProxy, None),
+        }
+    });
+}
+
+/// Route of web content for stores made from now on (the app rebuilds its stores after a
+/// change). The shared context is replaced, so no pooled connection of the old route is reused.
+#[allow(clippy::unnecessary_wraps)] // same signature as the other backends
+pub fn set_proxy(mode: &ProxyMode) -> Result<(), &'static str> {
+    NET.with(|n| *n.borrow_mut() = mode.clone());
+    ROOT.with(|r| r.borrow_mut().take());
+    CONTAINER_ROOTS.with(|r| r.borrow_mut().clear());
+    Ok(())
+}
+
+/// A direct connection is its own mode here (`NoProxy`), not the system settings.
+pub const DIRECT_IS_SYSTEM: bool = false;
+
+/// Login for an HTTP proxy's 407 challenge (never for a site's).
+fn proxy_login() -> Option<(Zeroizing<String>, Zeroizing<String>)> {
+    NET.with(|n| {
+        let mode = n.borrow();
+        let e = mode.endpoint().filter(|e| e.protocol == ProxyProtocol::Http)?;
+        e.auth.map(|(u, p)| (Zeroizing::new(u.to_string()), Zeroizing::new(p.to_string())))
+    })
 }
 
 /// Hidden, never-loaded view owning an ephemeral context; views created related to it share
@@ -180,7 +231,13 @@ fn root() -> webkit2gtk::WebView {
 }
 
 pub fn new_store() -> Store {
-    root().context().expect("webkit context")
+    let fresh = ROOT.with(|r| r.borrow().is_none());
+    let ctx = root().context().expect("webkit context");
+    // A replaced context (`set_proxy`) gets the download prompt like the first one.
+    if fresh && let Some(hook) = DOWNLOAD_HOOK.with(|h| h.borrow().clone()) {
+        hook(&ctx);
+    }
+    ctx
 }
 
 /// Separate ephemeral context of a container (own cookies, storage, cache, network process),
@@ -521,7 +578,8 @@ fn net_reason(e: &glib::Error) -> Option<&'static str> {
             Some(Io::TimedOut) => "net_timeout",
             Some(Io::ConnectionRefused) => "net_refused",
             Some(Io::NetworkUnreachable | Io::HostUnreachable) => "net_offline",
-            Some(Io::ConnectionClosed | Io::BrokenPipe) => "net_lost",
+            // G_IO_ERROR_CONNECTION_CLOSED is an alias of BROKEN_PIPE (no own variant in gio 0.18).
+            Some(Io::BrokenPipe) => "net_lost",
             _ => "net_generic",
         }
     })
@@ -538,6 +596,33 @@ pub fn on_crash(f: impl Fn(u32) + 'static) {
 /// `terminate_web_process`, which it never calls).
 pub fn watch(v: &WebView, tab: u32) {
     watch_fullscreen(v, tab);
+    // Behind a proxy: no WebRTC (ICE over UDP would bypass it) and no DNS prefetching.
+    if NET.with(|n| n.borrow().proxied())
+        && let Some(s) = WebViewExt::settings(&v.webview())
+    {
+        s.set_enable_webrtc(false);
+        s.set_enable_dns_prefetching(false);
+    }
+    v.webview().connect_authenticate(|_, req| {
+        if !req.is_for_proxy() {
+            return false;
+        }
+        match proxy_login() {
+            // A wrong login is not retried forever.
+            Some(_) if req.is_retry() => req.cancel(),
+            Some((u, p)) => {
+                let mut c = webkit2gtk::Credential::new(&u, &p, webkit2gtk::CredentialPersistence::ForSession);
+                unsafe {
+                    webkit2gtk::ffi::webkit_authentication_request_authenticate(
+                        req.to_glib_none().0,
+                        glib::translate::ToGlibPtrMut::to_glib_none_mut(&mut c).0,
+                    );
+                }
+            }
+            None => req.cancel(),
+        }
+        true
+    });
     v.webview().connect_web_process_terminated(move |_, reason| {
         let why = match reason {
             WebProcessTerminationReason::Crashed => "crashed",
@@ -586,6 +671,12 @@ fn watch_fullscreen(v: &WebView, tab: u32) {
         s.set_allow_file_access_from_file_urls(false);
         s.set_allow_universal_access_from_file_urls(false);
         s.set_enable_write_console_messages_to_stdout(false);
+        // Video and its CSS filters / WebGL (CrowClarity) composited on the GPU (GL, DMABuf
+        // buffers on 2.40+), never in the software fallback; the user's
+        // WEBKIT_DISABLE_COMPOSITING_MODE escape hatch for broken drivers is respected.
+        if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+            s.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Always);
+        }
     }
     let notify = move |on: bool| {
         if let Some(f) = ON_FULLSCREEN.with(|o| o.borrow().clone()) {
@@ -1015,6 +1106,9 @@ pub fn decide_download(key: u32, allow: bool, _url: &str, _view: Option<&WebView
         f(uri.to_string(), path);
     }
 }
+
+/// Native exit: the ephemeral contexts go with the process; nothing on disk to remove.
+pub fn shutdown() {}
 
 /// Never opens/executes a downloaded file: highlights it in the file manager (FileManager1),
 /// falls back to opening its parent folder.

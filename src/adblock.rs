@@ -58,8 +58,9 @@ const HIDE: &str = "ins.adsbygoogle, .adsbygoogle, [id^='google_ads_iframe'], [i
 /// empty 200, bait globals are set and hidden bait elements report a non-zero size.
 /// Also the page-side privacy shim: gamepads fed by `gamepad::Bridge` (global `gamepad`, flipped
 /// for `gamepad_flip` sites), WebGL off for `webgl_off` sites, and `event`: per-session event name for Crow's
-/// isolated world. Runs in every frame of every tab.
-pub fn defuser(gamepad: bool, gamepad_flip: &[String], webgl_off: &[String], event: &str) -> String {
+/// isolated world; `no_webrtc` (a proxy or Tor is in use): no WebRTC, whose ICE would reach
+/// STUN servers over UDP outside the proxy. Runs in every frame of every tab.
+pub fn defuser(gamepad: bool, gamepad_flip: &[String], webgl_off: &[String], event: &str, no_webrtc: bool) -> String {
     fn json<T: Serialize + ?Sized>(v: &T) -> String {
         serde_json::to_string(v).unwrap_or_default()
     }
@@ -67,6 +68,7 @@ pub fn defuser(gamepad: bool, gamepad_flip: &[String], webgl_off: &[String], eve
         .replace("/*GAMEPAD*/false", if gamepad { "true" } else { "false" })
         .replace("/*GAMEPAD_FLIP*/[]", &json(gamepad_flip))
         .replace("/*WEBGL_OFF*/[]", &json(webgl_off))
+        .replace("/*NO_WEBRTC*/false", if no_webrtc { "true" } else { "false" })
         .replace("/*PAD_EVENT*/''", &json(event))
 }
 

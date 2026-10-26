@@ -1,5 +1,6 @@
 use crate::{
     adblock, cert, default_browser, download, gamepad,
+    proxy::{self, ProxyMode},
     settings::{self, ENGINES, Settings},
     update,
     vault::{self, Bookmark, CookieRec, Download, HistoryEntry, MAX_HISTORY, Vault, VaultData},
@@ -55,8 +56,11 @@ document.addEventListener(e + 'g', () => { window.__crowGl++; }, true); })();";
 /// (metadata loaded: before that WebKit refuses the mode).
 const PAGE_READ: &str = "JSON.stringify([window.__crowPad | 0, window.__crowGl | 0, \
 Array.from(document.querySelectorAll('video')).some(v => v.readyState > 0) ? 1 : 0])";
+/// CrowClarity video enhancement, isolated world of every frame; inert until `apply_clarity`.
+const CLARITY_JS: &str = include_str!("clarity.js");
 /// Picture-in-picture toggle (macOS): the largest playing video, else the largest one. Run by
-/// the app, so WebKit counts it as a user gesture.
+/// the app, so WebKit counts it as a user gesture. Windows: `wk::toggle_pip`.
+#[cfg(not(target_os = "windows"))]
 const PIP_JS: &str = "(() => { const vs = Array.from(document.querySelectorAll('video')).filter(v => v.readyState > 0); \
 const on = vs.find(v => v.webkitPresentationMode === 'picture-in-picture'); \
 if (on) { on.webkitSetPresentationMode('inline'); return 'inline'; } \
@@ -214,6 +218,12 @@ pub enum UserEvent {
         manual: bool,
     },
     UpdateSaved(Option<PathBuf>),
+    /// Cookies of the store a proxy change replaces (session token).
+    ProxySwitch { cookies: Vec<CookieRec>, token: u64 },
+    /// The new store of a proxy change has its cookies (session token).
+    ProxyReady(u64),
+    /// `test-proxy-connection`: exit address and whether it is Tor, or a `locales.json` key.
+    ProxyTest(Result<(String, bool), &'static str>),
     /// Links handed over by the system (Crow as default browser / command line).
     OpenUrls(Vec<String>),
     /// Default-browser status; `note` = `locales.json` key after a registration attempt.
@@ -274,7 +284,7 @@ impl TabCtx {
     ) -> wry::Result<WebView> {
         let (p1, p2) = (self.proxy.clone(), self.proxy.clone());
         let ctx = self.clone();
-        let mut b = wk::builder(config, self.page_js.borrow().clone())
+        let b = wk::builder(config, self.page_js.borrow().clone())
             .with_background_color(bg_of(&self.window))
             .with_on_page_load_handler(move |ev, url| {
                 let started = matches!(ev, PageLoadEvent::Started);
@@ -289,10 +299,10 @@ impl TabCtx {
             })
             .with_new_window_req_handler(move |url, features| ctx.popup(id, url, features));
         // Linux: downloads are watched once on the shared context (wk::watch_downloads).
-        #[cfg(target_os = "macos")]
-        {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let b = {
             let (p3, p4) = (self.proxy.clone(), self.proxy.clone());
-            b = b
+            b
                 .with_download_started_handler(move |url, path| {
                     // WebKit's suggested name goes through the same sanitizing as on Linux.
                     let name = path
@@ -321,12 +331,13 @@ impl TabCtx {
                 })
                 .with_download_completed_handler(move |url, _, ok| {
                     let _ = p4.send_event(UserEvent::DownloadDone { url, ok });
-                });
-        }
+                })
+        };
         let view = wk::attach(b, rect, &self.window)?;
         wk::set_rules(&view, blocking);
         wk::watch(&view, id);
         wk::add_isolated_script(&view, &PAGE_LISTEN_JS.replace("/*EVENT*/''", &js(&self.pad_event)));
+        wk::add_isolated_script(&view, CLARITY_JS);
         if let Some(url) = url {
             view.load_url(url)?;
         }
@@ -359,8 +370,9 @@ impl TabCtx {
     /// Internal UI with `window.ipc`. Strict CSP: no network, no external scripts/styles/frames;
     /// only its own inline code. Tab views never get an IPC handler, so wry never injects
     /// `window.ipc` there (popups inherit the opener tab's configuration, also without IPC).
-    /// The view never leaves its own document (`with_html` loads as `about:blank`): any other
-    /// navigation is refused, so `window.ipc` can never reach web content.
+    /// The view never leaves its own document (`with_html` loads as `about:blank`; WebView2's
+    /// `NavigateToString` as a `data:text/html` URL): any other navigation is refused, so
+    /// `window.ipc` can never reach web content.
     fn ui_view(&self, html: &str, rect: Rect) -> Option<WebView> {
         const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'\">";
         // Dictionaries + `t()` go in first, so the page's own script can use them right away.
@@ -370,11 +382,17 @@ impl TabCtx {
             .replace("</", "<\\/");
         let html = html.replacen("<head>", &format!("<head>{CSP}<script>{i18n}</script>"), 1);
         let p = self.proxy.clone();
+        let html = wk::ui_html(html);
+        // Caption buttons start in the window's current state (later: `setMax` on resize).
+        #[cfg(target_os = "windows")]
+        let html = if self.window.is_maximized() { html.replacen("class=\"windows\"", "class=\"windows maximized\"", 1) } else { html };
         let b = wk::ui_builder()
-            .with_html(wk::ui_html(html))
+            .with_html(html)
             .with_background_color(bg_of(&self.window))
             .with_focused(true)
-            .with_navigation_handler(|url| url == "about:blank")
+            .with_navigation_handler(|url| {
+                url == "about:blank" || (cfg!(target_os = "windows") && url.starts_with("data:text/html"))
+            })
             .with_ipc_handler(move |req| {
                 let _ = p.send_event(UserEvent::Ipc(req.into_body()));
             });
@@ -494,8 +512,10 @@ struct Tab {
     gamepad: bool,
     /// WebGL contexts refused on the current page (site has WebGL off).
     webgl_blocks: u32,
-    /// The current page has a video (picture-in-picture chip, macOS).
+    /// The current page has a video (picture-in-picture and CrowClarity chips).
     video: bool,
+    /// CrowClarity forced on/off on this tab (toolbar ✨); None = the global setting.
+    clarity: Option<bool>,
     /// Cookie/storage jar of the tab (`Container::Default` = the vault-backed one).
     container: Container,
 }
@@ -528,6 +548,7 @@ impl Tab {
             gamepad: false,
             webgl_blocks: 0,
             video: false,
+            clarity: None,
             container: Container::Default,
         }
     }
@@ -600,6 +621,25 @@ struct Session {
     lang: Rc<RefCell<String>>,
     /// Last known default-browser status (None = not checked yet).
     default_browser: Option<default_browser::Status>,
+    /// Network route of web content (`proxy`): RAM only, every session starts direct.
+    net: ProxyMode,
+    /// A route change in progress (`App::set_proxy_mode`).
+    net_phase: Option<NetPhase>,
+}
+
+/// Proxy change: the old store's cookies are being exported, then imported into the new one.
+#[derive(Clone, Copy, PartialEq)]
+enum NetPhase {
+    Export,
+    Import,
+}
+
+/// The engines' route goes back to direct with the session (lock, quit): no proxy and no proxy
+/// login outlives it.
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = wk::set_proxy(&ProxyMode::Direct);
+    }
 }
 
 impl Session {
@@ -712,6 +752,27 @@ impl Session {
         self.tabs.iter().filter_map(|t| t.view.as_ref())
     }
 
+    /// Exit: every view goes, tab and closed-tab addresses, titles and pending downloads are
+    /// overwritten in memory; vault contents and key zeroize when the session drops.
+    fn wipe(&mut self) {
+        self.site = None;
+        self.panel = None;
+        for mut a in self.asks.drain(..) {
+            a.url.zeroize();
+            a.name.zeroize();
+        }
+        for t in &mut self.tabs {
+            t.drop_view();
+            t.url.zeroize();
+            t.title.zeroize();
+            t.icon.zeroize();
+        }
+        self.tabs.clear();
+        self.containers.clear();
+        self.closed.iter_mut().for_each(Zeroize::zeroize);
+        self.closed.clear();
+    }
+
     fn close_panel(&mut self) -> bool {
         self.site = None;
         if self.panel.take().is_none() {
@@ -763,6 +824,8 @@ impl Session {
             "blocked": cur.map_or(0, |t| t.blocked),
             "gamepad": cur.is_some_and(|t| t.gamepad),
             "video": wk::PIP && cur.is_some_and(|t| t.video),
+            "hasVideo": cur.is_some_and(|t| t.video),
+            "clarity": cur.is_some_and(|t| t.clarity.unwrap_or(cfg.clarity)),
             "bookmarked": self.data.bookmarks.iter().any(|b| b.url == url),
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
             "panel": if self.panel.is_some() { self.panel_section.as_str() } else { "" },
@@ -892,6 +955,9 @@ impl Session {
             "version": update::CURRENT,
             "update": self.update,
             "updateBusy": self.update_busy,
+            "proxy": self.net.state(),
+            "proxyBusy": self.net_phase.is_some(),
+            "proxyDirectIsSystem": wk::DIRECT_IS_SYSTEM,
         })
         .to_string()
     }
@@ -912,6 +978,8 @@ pub struct App {
     next_tick: Instant,
     quit_at: Option<Instant>,
     restore_by: Option<Instant>,
+    /// Deadline of the current proxy-change phase (cookie export / import may never answer).
+    net_by: Option<Instant>,
     update_checked: bool,
     /// Source of `Session::token`: unique per unlock, never reused.
     sessions: u64,
@@ -986,6 +1054,7 @@ impl App {
             next_tick: Instant::now() + TICK,
             quit_at: None,
             restore_by: None,
+            net_by: None,
             update_checked: false,
             sessions: 0,
             incoming: Vec::new(),
@@ -1015,7 +1084,7 @@ impl App {
     pub fn wake(&self) -> Instant {
         let fav = self.s.as_ref().and_then(|s| s.fav_due);
         let page = self.s.as_ref().map(|s| s.page_due.unwrap_or_else(|| Instant::now() + PAGE_POLL));
-        [self.quit_at, self.restore_by, fav, page]
+        [self.quit_at, self.restore_by, self.net_by, fav, page]
             .into_iter()
             .flatten()
             .fold(self.next_tick, Instant::min)
@@ -1039,6 +1108,14 @@ impl App {
             }
             if let Some(v) = &s.site {
                 wk::set_bounds(v, site_rect(w, s.site_x, s.site_h));
+            }
+        }
+        // Maximize / restore glyph of the drawn caption buttons, top resize strip (Windows).
+        #[cfg(target_os = "windows")]
+        {
+            let js = format!("setMax({})", w.is_maximized());
+            for v in self.lock.iter().chain(self.s.as_ref().map(|s| &s.toolbar)) {
+                let _ = v.evaluate_script(&js);
             }
         }
     }
@@ -1180,7 +1257,15 @@ impl App {
                 s.video_fullscreen = if on { Some(tab) } else { s.video_fullscreen.filter(|t| *t != tab) };
                 if on {
                     s.site = None;
+                    // Fullscreen hides all Crow chrome: name the site so it cannot pose as the UI.
+                    if let Some(i) = s.tab_idx(tab) {
+                        let host = host_of(&s.tabs[i].url);
+                        s.toast(&format!("{host} prešiel do režimu celej obrazovky (ESC pre návrat)"));
+                    }
                 }
+                // WebView2 only reports it: the window goes fullscreen here.
+                #[cfg(target_os = "windows")]
+                self.ctx.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
                 // WebKit fullscreens the window itself; this makes the view fill it.
                 self.resize();
             }
@@ -1209,6 +1294,16 @@ impl App {
             }
             UserEvent::Gamepads(state) => self.push_pads(&state),
             UserEvent::Update { result, manual } => self.update_result(result, manual),
+            UserEvent::ProxySwitch { cookies, token } => self.proxy_switch(&cookies, token),
+            UserEvent::ProxyReady(token) => self.proxy_ready(token),
+            UserEvent::ProxyTest(r) => {
+                let Some(p) = self.s.as_ref().and_then(|s| s.panel.as_ref()) else { return };
+                let r = match r {
+                    Ok((ip, tor)) => json!({ "ok": true, "ip": ip, "tor": tor }),
+                    Err(key) => json!({ "ok": false, "err": key }),
+                };
+                let _ = p.evaluate_script(&format!("window.proxyTest && proxyTest({r})"));
+            }
             UserEvent::UpdateSaved(path) => {
                 let Some(s) = self.s.as_mut() else { return };
                 s.update_busy = false;
@@ -1242,6 +1337,14 @@ impl App {
         if self.restore_by.is_some_and(|r| now >= r) {
             eprintln!("cookie restore timed out; starting session without waiting");
             self.restored(false);
+        }
+        if self.net_by.is_some_and(|d| now >= d) {
+            let (phase, token) = self.s.as_ref().map_or((None, 0), |s| (s.net_phase, s.token));
+            eprintln!("proxy change: cookie transfer timed out; continuing without waiting");
+            match phase {
+                Some(NetPhase::Export) => self.proxy_switch(&[], token),
+                _ => self.proxy_ready(token),
+            }
         }
         if let Some(s) = self.s.as_mut()
             && s.fav_due.is_some_and(|d| now >= d)
@@ -1281,12 +1384,21 @@ impl App {
     }
 
     /// NSApp terminated from outside (Dock, logout): synchronous save with last known cookies.
-    /// The gamepad worker is stopped and joined.
+    /// The gamepad worker is stopped and joined. The event loop then ends the process without
+    /// running destructors, so the session is wiped here (`Session::wipe`, then the vault key and
+    /// contents zeroize on drop) and the engine's in-memory stores are torn down.
     pub fn shutdown(&mut self) {
         if let Some(s) = &mut self.s {
             s.save_now(&self.cfg);
         }
         self.pads = None;
+        if let Some(mut s) = self.s.take() {
+            s.wipe();
+        }
+        self.lock = None;
+        self.incoming.iter_mut().for_each(Zeroize::zeroize);
+        self.incoming.clear();
+        wk::shutdown();
     }
 
     /// Controller input goes to the active tab only: focused window, unlocked session, a site
@@ -1338,6 +1450,24 @@ impl App {
                 let w = &self.ctx.window;
                 if w.fullscreen().is_none() && wk::left_button_down() {
                     let _ = w.drag_window();
+                }
+            }
+            // Caption buttons of the borderless window (Windows).
+            #[cfg(target_os = "windows")]
+            "window-minimize" | "window-maximize" | "window-close" => wk::caption(name),
+            // Top edge of the borderless window (Windows): the toolbar view covers it, so a
+            // press on its resize strip starts the system resize loop.
+            #[cfg(target_os = "windows")]
+            "resize" => {
+                use tao::window::ResizeDirection;
+                let w = &self.ctx.window;
+                let dir = match arg {
+                    "nw" => ResizeDirection::NorthWest,
+                    "ne" => ResizeDirection::NorthEast,
+                    _ => ResizeDirection::North,
+                };
+                if w.fullscreen().is_none() && !w.is_maximized() && wk::left_button_down() {
+                    let _ = w.drag_resize_window(dir);
                 }
             }
             "quit" | "win-close" => self.quit(),
@@ -1394,7 +1524,7 @@ impl App {
             .unwrap_or_default();
         self.ctx.adblock.set(self.cfg.adblock);
         *self.ctx.page_js.borrow_mut() =
-            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event);
+            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event, false);
         // The vault is authoritative; the plain copy only serves the next lock screen.
         settings::store_language(&self.cfg.language);
         self.ctx.lang.borrow_mut().clone_from(&self.cfg.language);
@@ -1449,6 +1579,8 @@ impl App {
             update_bar: false,
             update_busy: false,
             default_browser: None,
+            net: ProxyMode::Direct,
+            net_phase: None,
         });
     }
 
@@ -1561,8 +1693,9 @@ impl App {
     /// Page shim for views built from now on; existing views are rebuilt when shown next (the
     /// visible one at once unless a panel is open, then when it closes).
     fn shim_changed(&mut self, now: bool) {
+        let proxied = self.s.as_ref().is_some_and(|s| s.net.proxied());
         *self.ctx.page_js.borrow_mut() =
-            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event);
+            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event, proxied);
         let Some(s) = self.s.as_mut() else { return };
         s.views_stale = true;
         let active = s.active;
@@ -1746,6 +1879,9 @@ impl App {
             (Some("http"), _) => "http",
             _ => "",
         };
+        if t.clarity.unwrap_or(self.cfg.clarity) {
+            apply_clarity(&self.cfg, t);
+        }
         match &t.view {
             Some(v) if url.starts_with("http") => {
                 wk::eval_isolated(v, FAV_JS, |_| {});
@@ -1958,6 +2094,89 @@ impl App {
             s.site = None;
         }
         s.sync(&self.cfg);
+    }
+
+    /// `set-proxy-mode` (settings panel). The engine takes the route for stores made from now on;
+    /// the session then moves to a new store: cookies exported, every tab view and container
+    /// dropped (no page, socket or pooled connection lives on in the old route), cookies imported,
+    /// the active tab reloaded. Errors and the new state go back to the panel.
+    fn set_proxy_mode(&mut self, arg: &str) {
+        let Some(s) = self.s.as_mut() else { return };
+        if s.net_phase.is_some() {
+            return;
+        }
+        let panel = |s: &Session, js: String| {
+            if let Some(p) = &s.panel {
+                let _ = p.evaluate_script(&js);
+            }
+        };
+        let mode = match ProxyMode::from_request(&s.net, arg).and_then(|m| wk::set_proxy(&m).map(|()| m)) {
+            Ok(m) => m,
+            Err(key) => return panel(s, format!("window.proxyResult && proxyResult(false, {})", js(key))),
+        };
+        if mode == s.net {
+            return panel(s, format!("window.proxyApplied && proxyApplied({})", s.net.state()));
+        }
+        s.net = mode;
+        s.net_phase = Some(NetPhase::Export);
+        self.net_by = Some(Instant::now() + RESTORE_TIMEOUT);
+        let (p, token) = (self.ctx.proxy.clone(), s.token);
+        wk::export_cookies(&s.store, move |cookies| {
+            let _ = p.send_event(UserEvent::ProxySwitch { cookies, token });
+        });
+    }
+
+    /// Old store's cookies are in: everything of the old route goes, the new store gets them.
+    /// Container tabs keep their address but start a new, empty jar.
+    fn proxy_switch(&mut self, cookies: &[CookieRec], token: u64) {
+        let Some(s) = self.s.as_mut().filter(|s| s.token == token && s.net_phase == Some(NetPhase::Export)) else {
+            return;
+        };
+        for t in &mut s.tabs {
+            t.drop_view();
+            t.loading = false;
+            t.tls = "";
+        }
+        s.site = None;
+        s.video_fullscreen = None;
+        for store in s.containers.values() {
+            wk::drop_container_store(store);
+        }
+        s.containers.clear();
+        *self.ctx.page_js.borrow_mut() = adblock::defuser(
+            self.cfg.gamepad_enabled,
+            &self.cfg.gamepad_sites,
+            &self.cfg.webgl_off,
+            &self.ctx.pad_event,
+            s.net.proxied(),
+        );
+        s.store = wk::new_store();
+        s.net_phase = Some(NetPhase::Import);
+        self.net_by = Some(Instant::now() + RESTORE_TIMEOUT);
+        let p = self.ctx.proxy.clone();
+        wk::import_cookies(&s.store, cookies, move || {
+            let _ = p.send_event(UserEvent::ProxyReady(token));
+        });
+    }
+
+    /// New route ready (or the import timed out): tabs load again, the panel shows the state.
+    fn proxy_ready(&mut self, token: u64) {
+        let Some(s) = self.s.as_mut().filter(|s| s.token == token && s.net_phase == Some(NetPhase::Import)) else {
+            return;
+        };
+        self.net_by = None;
+        s.net_phase = None;
+        if let Some(p) = &s.panel {
+            let _ = p.evaluate_script(&format!("window.proxyApplied && proxyApplied({})", s.net.state()));
+        }
+        s.note(if s.net.proxied() { "proxy_applied_proxied" } else { "proxy_applied" }, &[]);
+        // Behind the open panel the tab is rebuilt when the panel closes.
+        if s.panel.is_some() {
+            s.views_stale = true;
+            return s.sync(&self.cfg);
+        }
+        let active = s.active;
+        self.activate(active);
     }
 
     fn icon(&mut self, id: u32, data: String) {
@@ -2590,6 +2809,11 @@ impl App {
                         self.ctx.adblock.set(self.cfg.adblock);
                         s.apply_rules_all(&self.cfg);
                     }
+                    "clarity" | "clarity_sharpen" => {
+                        for t in &s.tabs {
+                            apply_clarity(&self.cfg, t);
+                        }
+                    }
                     // Hidden tabs are unloaded now; the visible one is rebuilt when the panel closes.
                     "gamepad_enabled" => {
                         s.sync(&self.cfg);
@@ -2777,10 +3001,25 @@ impl App {
                 self.persist(After::Nothing);
                 self.shim_changed(true);
             }
+            // ✨ in the toolbar: CrowClarity on/off for this tab only, confirmed by a toast.
+            "clarity" => {
+                let cfg = &self.cfg;
+                let Some(t) = s.tabs.get_mut(s.active) else { return };
+                let on = !t.clarity.unwrap_or(cfg.clarity);
+                t.clarity = Some(on);
+                apply_clarity(cfg, t);
+                s.note(if on { "clarity_on" } else { "clarity_off" }, &[]);
+                s.sync(cfg);
+            }
             "pip" => {
                 let Some(v) = s.view() else { return };
                 let p = self.ctx.proxy.clone();
+                #[cfg(not(target_os = "windows"))]
                 wk::eval_isolated(v, PIP_JS, move |r| {
+                    let _ = p.send_event(UserEvent::Pip(r));
+                });
+                #[cfg(target_os = "windows")]
+                wk::toggle_pip(v, move |r| {
                     let _ = p.send_event(UserEvent::Pip(r));
                 });
             }
@@ -2829,6 +3068,15 @@ impl App {
             "site-clear" => self.request_site_cookies(true),
             "get-vault-sessions" => self.request_sessions(None),
             "get-default-browser-status" => default_browser::query(self.ctx.proxy.clone(), false),
+            "set-proxy-mode" => self.set_proxy_mode(arg),
+            // Probe outside the browser (`proxy::probe`): no cookie, cache or header of the session.
+            "test-proxy-connection" => {
+                let (p, mode) = (self.ctx.proxy.clone(), s.net.clone());
+                std::thread::spawn(move || {
+                    let r = proxy::probe(&mode).map(|x| (x.ip, x.tor));
+                    let _ = p.send_event(UserEvent::ProxyTest(r));
+                });
+            }
             "set-as-default-browser" => default_browser::query(self.ctx.proxy.clone(), true),
             // UI language: vault setting + plain copy for the lock screen, then every open UI
             // view re-renders its text without reloading.
@@ -3062,6 +3310,15 @@ pub fn theme_of(name: &str) -> Option<Theme> {
         "light" => Some(Theme::Light),
         _ => None,
     }
+}
+
+/// Pushes the tab's CrowClarity state into its page (main frame, isolated world). Sharpening
+/// shader only where the site may use WebGL; everything stays on the local GPU.
+fn apply_clarity(cfg: &Settings, t: &Tab) {
+    let Some(v) = t.view.as_ref().filter(|_| t.url.starts_with("http")) else { return };
+    let on = t.clarity.unwrap_or(cfg.clarity);
+    let sharp = cfg.clarity_sharpen && !cfg.webgl_off_for(&host_of(&t.url));
+    wk::eval_isolated(v, &format!("window.__crowClarity && window.__crowClarity({on}, {sharp})"), |_| {});
 }
 
 fn bg_of(window: &Window) -> RGBA {

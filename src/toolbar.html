@@ -123,6 +123,12 @@
   @media (max-width: 900px) { #pad .txt { display: none; } }
   #pip { display: none; color: var(--accent); }
   #pip.show { display: grid; animation: padin .35s ease-out; }
+  /* CrowClarity (✨): shown with a video; lit while the tab's video is enhanced. */
+  #clarity { display: none; font-size: 14px; line-height: 1; opacity: .5; }
+  #clarity.show { display: grid; animation: padin .35s ease-out; }
+  #clarity.on { opacity: 1; background: rgba(91, 141, 239, .14); }
+  #clarity.flash { animation: clarityflash .6s ease-out; }
+  @keyframes clarityflash { 0% { transform: scale(1); } 40% { transform: scale(1.25); } 100% { transform: scale(1); } }
   #dl.busy { color: var(--accent); }
   #dl.busy::after { content: ''; position: absolute; top: 5px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
 
@@ -144,6 +150,28 @@
   body.blurred #lights:not(:hover) span { background: var(--lights-off, #4a4a50); }
   #lights svg { width: 8px; height: 8px; fill: none; stroke: rgba(0,0,0,.55); stroke-width: 3; stroke-linecap: round; opacity: 0; }
   #lights:hover svg { opacity: 1; }
+  /* Windows (borderless, client-side decorations): the tab strip is the title bar. Its empty
+     space moves the window, the 4 px strip on top resizes it, caption buttons on the right. */
+  #caps, #rsz { display: none; }
+  body.windows #tabrow { padding: 4px 0 0 8px; -webkit-app-region: drag; app-region: drag; }
+  body.windows.maximized #tabrow { padding-top: 0; }
+  body.windows .tab, body.windows #tabrow button { -webkit-app-region: no-drag; app-region: no-drag; }
+  body.windows #caps { display: flex; align-self: stretch; margin: -4px 0 0 8px; }
+  body.windows.maximized #caps { margin-top: 0; }
+  #caps button { width: 46px; height: 100%; border-radius: 0; color: var(--fg); }
+  #caps button:hover { background: var(--hover); }
+  #caps button:active { background: var(--active); }
+  #caps .close:hover { background: #e81123; color: #fff; }
+  #caps .close:active { background: #f1707a; color: #fff; }
+  body.blurred #caps button:not(:hover) { color: var(--mute); }
+  #caps svg { width: 10px; height: 10px; stroke-width: 1; stroke-linecap: square; stroke-linejoin: miter; }
+  #caps .restore, body.maximized #caps .max { display: none; }
+  body.maximized #caps .restore { display: block; }
+  body.windows:not(.maximized) #rsz { display: block; position: absolute; left: 0; right: 0; top: 0; height: 4px; z-index: 20;
+    cursor: ns-resize; -webkit-app-region: no-drag; app-region: no-drag; }
+  body.windows:not(.maximized) #rsz::before, body.windows:not(.maximized) #rsz::after { content: ''; position: absolute; top: 0; width: 8px; height: 4px; }
+  body.windows:not(.maximized) #rsz::before { left: 0; cursor: nwse-resize; }
+  body.windows:not(.maximized) #rsz::after { right: 0; cursor: nesw-resize; }
 
   #toast {
     position: absolute; right: 10px; top: 7px; max-width: 45%; padding: 4px 12px; border-radius: 12px;
@@ -162,7 +190,13 @@
   <div id="tabrow" class="row">
     <div id="tabs"></div>
     <button id="newtab" data-i18n-title="new_tab" data-hint=" (⌘T)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+    <div id="caps">
+      <button data-c="window-minimize"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
+      <button data-c="window-maximize"><svg class="max" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg><svg class="restore" viewBox="0 0 10 10"><path d="M2.5 2.5V.5h7v7h-2"/><rect x=".5" y="2.5" width="7" height="7"/></svg></button>
+      <button class="close" data-c="window-close"><svg viewBox="0 0 10 10"><path d="M.5.5l9 9M9.5.5l-9 9"/></svg></button>
+    </div>
   </div>
+  <div id="rsz"></div>
   <div id="nav" class="row">
     <button id="back" data-i18n-title="back" data-hint=" (⌘[)"><svg viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg></button>
     <button id="forward" data-i18n-title="forward" data-hint=" (⌘])"><svg viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg></button>
@@ -178,6 +212,7 @@
       <button id="star" data-i18n-title="bookmark_page" data-hint=" (⌘D)"><svg viewBox="0 0 24 24"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg></button>
     </div>
     <button id="pip" data-i18n-title="pip_title"><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="11" width="8" height="7" rx="1"/></svg></button>
+    <button id="clarity" data-i18n-title="clarity_title"><span aria-hidden="true">✨</span></button>
     <button id="pad" data-i18n-title="gamepad_chip"><span aria-hidden="true">🎮</span><span class="txt" data-i18n="gamepad_chip"></span></button>
     <button id="shield" data-i18n-title="adblock"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span id="shieldn"></span></button>
     <button id="bms" data-i18n-title="bookmarks" data-hint=" (⌘⌥B)"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
@@ -233,6 +268,11 @@
   // Shield: click = stats popover (per-site switch inside), ⌥/Alt+click = global switch.
   $('pad').onclick = () => send('gamepad-open:' + Math.round($('pad').getBoundingClientRect().left));
   $('pip').onclick = () => send('pip');
+  $('clarity').onclick = () => {
+    const b = $('clarity');
+    b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash');
+    send('clarity');
+  };
   // "+" right click: open the new tab in a container.
   $('newtab').oncontextmenu = (e) => { e.preventDefault(); send('container-menu:' + Math.round($('newtab').getBoundingClientRect().left)); };
   $('shield').onclick = (e) => send(e.altKey ? 'toggle-adblock' : 'shield-open:' + Math.round($('shield').getBoundingClientRect().left));
@@ -262,6 +302,14 @@
   document.querySelectorAll('#lights span').forEach(l => l.onclick = () => send(l.dataset.c));
   dragOn($('lights'), (e) => e.target.id === 'lights');
   function setFocus(on) { document.body.classList.toggle('blurred', !on); }
+  // Windows caption buttons and top-edge resize (corners: 8 px).
+  document.querySelectorAll('#caps button').forEach(b => b.onclick = () => send(b.dataset.c));
+  function setMax(on) { document.body.classList.toggle('maximized', on); }
+  $('rsz').addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    send('resize:' + (e.clientX < 8 ? 'nw' : e.clientX >= innerWidth - 8 ? 'ne' : 'n'));
+  });
   $('tabrow').ondblclick = (e) => { if (e.target.id === 'tabrow' || e.target.id === 'tabs') send('new-tab'); };
 
   // Tab reordering: drag past the threshold, reorder the DOM live, commit the index on release.
@@ -358,6 +406,8 @@
     setBlocked(st.blocked || 0);
     $('pad').classList.toggle('show', !!st.gamepad);
     $('pip').classList.toggle('show', !!st.video);
+    $('clarity').classList.toggle('show', !!st.hasVideo);
+    $('clarity').classList.toggle('on', !!st.clarity);
     $('dl').classList.toggle('busy', st.downloads > 0);
     for (const [id, sec] of [['bms', 'bookmarks'], ['hist', 'history'], ['dl', 'downloads'], ['settings', 'settings']])
       $(id).classList.toggle('on', st.panel === sec);
