@@ -362,6 +362,17 @@ pub fn add_isolated_script(v: &WebView, js: &str) {
     }
 }
 
+/// Built-in UI page under `base`: `loadHTMLString` needs no request interception here.
+pub fn load_ui_internal(v: &WebView, html: &str, base: &str) {
+    load_internal(v, html, base);
+}
+
+/// Every session gets its own `nonPersistentDataStore` (`new_store`), freed with it: nothing
+/// is on disk to prepare or remove around a profile.
+pub fn begin_profile(_id: &str) {}
+pub fn wipe_retired() {}
+pub fn end_profile() {}
+
 /// WebKit runs element fullscreen in its own window on macOS: nothing for the app to resize.
 pub fn on_fullscreen(_f: impl Fn(u32, bool) + 'static) {}
 

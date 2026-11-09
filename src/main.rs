@@ -17,6 +17,7 @@ mod cert;
 mod default_browser;
 mod download;
 mod gamepad;
+mod profile;
 mod proxy;
 mod settings;
 mod update;

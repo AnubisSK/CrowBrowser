@@ -173,6 +173,9 @@
   body.windows:not(.maximized) #rsz::before { left: 0; cursor: nwse-resize; }
   body.windows:not(.maximized) #rsz::after { right: 0; cursor: nesw-resize; }
 
+  #profile { display: flex; align-items: center; gap: 5px; max-width: 130px; margin: 0 4px; color: var(--mute); font-size: 12px; cursor: default; }
+  #avatar { flex: none; width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: #fff; font-size: 11px; font-weight: 600; }
+  #pname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #toast {
     position: absolute; right: 10px; top: 7px; max-width: 45%; padding: 4px 12px; border-radius: 12px;
     background: var(--accent); color: #fff; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -220,6 +223,8 @@
     <button id="hist" data-i18n-title="history" data-hint=" (⌘Y)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></button>
     <button id="dl" data-i18n-title="downloads" data-hint=" (⌘⌥L)"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></button>
     <button id="settings" data-i18n-title="settings" data-hint=" (⌘,)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+    <span id="profile"><span id="avatar"></span><span id="pname"></span></span>
+    <button id="btn-lock" data-i18n-title="lock" data-hint=" (⌃⌘L)"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5M21 12H9"/></svg></button>
   </div>
   <div id="find" class="row">
     <input id="fq" spellcheck="false" autocomplete="off" data-i18n-ph="find_in_page">
@@ -263,7 +268,7 @@
 
   const click = { login: 'panel:logins', newtab: 'new-tab', back: 'back', forward: 'forward', home: 'home', star: 'bookmark',
                   bms: 'panel:bookmarks', hist: 'panel:history', dl: 'panel:downloads',
-                  settings: 'panel:settings', fclose: 'find-close', 'btn-passwords': 'open-passwords' };
+                  settings: 'panel:settings', fclose: 'find-close', 'btn-passwords': 'open-passwords', 'btn-lock': 'lock' };
   for (const [id, cmd] of Object.entries(click)) $(id).onclick = () => send(cmd);
   $('reload').onclick = () => send(S.loading ? 'stop' : 'reload');
   // Shield: click = stats popover (per-site switch inside), ⌥/Alt+click = global switch.
@@ -405,6 +410,9 @@
     $('shield').title = t('adblock') + ': ' + (!st.adblock ? t('adblock_off_everywhere') : st.siteAllowed ? t('adblock_off_for', st.host) : t('adblock_on'))
       + ' (' + t('shield_hint') + ')';
     setBlocked(st.blocked || 0);
+    $('avatar').textContent = [...(st.profile || '')].slice(0, 1).join('').toUpperCase();
+    $('pname').textContent = st.profile || '';
+    $('profile').title = t('profile_active', st.profile || '');
     $('pad').classList.toggle('show', !!st.gamepad);
     $('pip').classList.toggle('show', !!st.video);
     $('clarity').classList.toggle('show', !!st.hasVideo);

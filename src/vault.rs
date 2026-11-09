@@ -1,7 +1,7 @@
 //! Encrypted on-disk store: Argon2id (64 MiB) -> XChaCha20-Poly1305.
 //! Layout: MAGIC | salt(16) | nonce(24) | ciphertext+tag. Header is authenticated as AAD.
 
-use crate::settings::{Settings, data_dir};
+use crate::settings::Settings;
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -140,8 +140,10 @@ pub struct VaultData {
     pub blocked_total: u64,
 }
 
+/// Open vault of one profile: where it lives and its key, zeroized on drop (lock, quit).
 pub struct Vault {
-    salt: [u8; 16],
+    dir: PathBuf,
+    salt: Zeroizing<[u8; 16]>,
     key: Zeroizing<[u8; 32]>,
 }
 
@@ -149,10 +151,6 @@ pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
-
-fn path() -> PathBuf {
-    data_dir().join("vault.bin")
 }
 
 fn derive(password: &str, salt: &[u8]) -> Zeroizing<[u8; 32]> {
@@ -165,23 +163,27 @@ fn derive(password: &str, salt: &[u8]) -> Zeroizing<[u8; 32]> {
 }
 
 impl Vault {
-    pub fn exists() -> bool {
-        path().exists()
+    pub fn file(dir: &Path) -> PathBuf {
+        dir.join("vault.bin")
     }
 
-    pub fn create(password: &str) -> Self {
-        let mut salt = [0u8; 16];
-        OsRng.fill_bytes(&mut salt);
-        Self { key: derive(password, &salt), salt }
+    pub fn exists(dir: &Path) -> bool {
+        Self::file(dir).is_file()
     }
 
-    pub fn unlock(password: &str) -> Result<(Self, VaultData), &'static str> {
-        let bytes = fs::read(path()).map_err(|_| "vault_unreadable")?;
+    pub fn create(dir: &Path, password: &str) -> Self {
+        let mut salt = Zeroizing::new([0u8; 16]);
+        OsRng.fill_bytes(salt.as_mut());
+        Self { dir: dir.to_path_buf(), key: derive(password, salt.as_slice()), salt }
+    }
+
+    pub fn unlock(dir: &Path, password: &str) -> Result<(Self, VaultData), &'static str> {
+        let bytes = fs::read(Self::file(dir)).map_err(|_| "vault_unreadable")?;
         if bytes.len() < HEADER + NONCE + 16 || &bytes[..6] != MAGIC {
             return Err("vault_corrupt");
         }
-        let salt: [u8; 16] = bytes[6..HEADER].try_into().unwrap();
-        let key = derive(password, &salt);
+        let salt = Zeroizing::new(<[u8; 16]>::try_from(&bytes[6..HEADER]).unwrap());
+        let key = derive(password, salt.as_slice());
         let plain = XChaCha20Poly1305::new(Key::from_slice(&*key))
             .decrypt(
                 XNonce::from_slice(&bytes[HEADER..HEADER + NONCE]),
@@ -190,7 +192,7 @@ impl Vault {
             .map_err(|_| "wrong_password")?;
         let plain = Zeroizing::new(plain);
         let data = serde_json::from_slice(&plain).map_err(|_| "vault_corrupt")?;
-        Ok((Self { salt, key }, data))
+        Ok((Self { dir: dir.to_path_buf(), salt, key }, data))
     }
 
     /// Password change as one transaction: fresh random salt (`OsRng`) and Argon2id key, `data`
@@ -198,21 +200,23 @@ impl Vault {
     /// that succeeds does `self` switch to the new key (the old one is zeroized on drop); on any
     /// error the vault on disk and in memory both stay on the old password.
     pub fn rotate_key(&mut self, new_password: &str, data: &VaultData) -> io::Result<()> {
-        let next = Self::create(new_password);
+        let next = Self::create(&self.dir, new_password);
         next.save(data)?;
         *self = next;
         Ok(())
     }
 
     pub fn verify(&self, password: &str) -> bool {
-        *derive(password, &self.salt) == *self.key
+        // Compares every byte: no early exit to time.
+        let other = derive(password, self.salt.as_slice());
+        other.iter().zip(self.key.iter()).fold(0u8, |d, (a, b)| d | (a ^ b)) == 0
     }
 
     pub fn save(&self, data: &VaultData) -> io::Result<()> {
         let plain = Zeroizing::new(serde_json::to_vec(data)?);
         let mut out = Vec::with_capacity(HEADER + NONCE + plain.len() + 16);
         out.extend_from_slice(MAGIC);
-        out.extend_from_slice(&self.salt);
+        out.extend_from_slice(self.salt.as_slice());
         let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
         let ct = XChaCha20Poly1305::new(Key::from_slice(&*self.key))
             .encrypt(&nonce, Payload { msg: &plain, aad: &out[..HEADER] })
@@ -222,8 +226,8 @@ impl Vault {
 
         // Transactional: full write + fsync to .vault.tmp, then atomic rename over vault.bin.
         // On any error the previous vault.bin stays intact.
-        let dir = data_dir();
-        fs::create_dir_all(&dir)?;
+        let dir = &self.dir;
+        fs::create_dir_all(dir)?;
         let tmp = dir.join(".vault.tmp");
         let res = (|| {
             let mut opts = fs::OpenOptions::new();
@@ -234,11 +238,11 @@ impl Vault {
             f.write_all(&out)?;
             f.sync_all()?;
             // Windows: MoveFileExW(MOVEFILE_REPLACE_EXISTING), atomic on the same volume.
-            fs::rename(&tmp, path())?;
+            fs::rename(&tmp, Self::file(dir))?;
             // Persist the rename itself (directories cannot be opened for fsync on Windows;
             // NTFS journals the rename).
             #[cfg(unix)]
-            fs::File::open(&dir)?.sync_all()?;
+            fs::File::open(dir)?.sync_all()?;
             Ok(())
         })();
         if res.is_err() {
@@ -247,18 +251,17 @@ impl Vault {
         res
     }
 
-    pub fn destroy() {
-        let _ = fs::remove_file(path());
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// All tests share the one vault file in the test data dir.
-    static LOCK: Mutex<()> = Mutex::new(());
+    fn dir_for(test: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("crow-vault-test-{}-{test}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
 
     fn sample() -> VaultData {
         let mut data = VaultData::default();
@@ -278,43 +281,43 @@ mod tests {
 
     #[test]
     fn roundtrip_with_correct_password() {
-        let _g = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let v = Vault::create("correct horse");
+        let dir = dir_for("roundtrip");
+        let v = Vault::create(&dir, "correct horse");
         v.save(&sample()).unwrap();
-        assert!(Vault::exists());
-        let bytes = fs::read(path()).unwrap();
+        assert!(Vault::exists(&dir));
+        let bytes = fs::read(Vault::file(&dir)).unwrap();
         assert_eq!(&bytes[..6], MAGIC);
         assert!(!bytes.windows(11).any(|w| w == b"example.com"), "plaintext leaked");
-        let (v2, data) = Vault::unlock("correct horse").unwrap();
+        let (v2, data) = Vault::unlock(&dir, "correct horse").unwrap();
         assert_sample(&data);
         assert!(v2.verify("correct horse"));
-        Vault::destroy();
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn wrong_password_fails() {
-        let _g = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let v = Vault::create("right");
+        let dir = dir_for("wrong");
+        let v = Vault::create(&dir, "right");
         v.save(&sample()).unwrap();
         assert!(!v.verify("wrong"));
-        assert_eq!(Vault::unlock("wrong").err(), Some("wrong_password"));
-        Vault::destroy();
+        assert_eq!(Vault::unlock(&dir, "wrong").err(), Some("wrong_password"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn rotate_key_reencrypts_under_new_password() {
-        let _g = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut v = Vault::create("old");
+        let dir = dir_for("rotate");
+        let mut v = Vault::create(&dir, "old");
         v.save(&sample()).unwrap();
-        let old_salt = v.salt;
+        let old_salt = *v.salt;
         v.rotate_key("new", &sample()).unwrap();
-        assert_ne!(v.salt, old_salt);
+        assert_ne!(*v.salt, old_salt);
         assert!(v.verify("new"));
         assert!(!v.verify("old"));
-        assert!(!data_dir().join(".vault.tmp").exists());
-        assert_eq!(Vault::unlock("old").err(), Some("wrong_password"));
-        let (_, data) = Vault::unlock("new").unwrap();
+        assert!(!dir.join(".vault.tmp").exists());
+        assert_eq!(Vault::unlock(&dir, "old").err(), Some("wrong_password"));
+        let (_, data) = Vault::unlock(&dir, "new").unwrap();
         assert_sample(&data);
-        Vault::destroy();
+        let _ = fs::remove_dir_all(dir);
     }
 }

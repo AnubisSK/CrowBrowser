@@ -115,6 +115,8 @@ const UI_PROFILE: &str = "crow-ui";
 const WORLD: &str = "crow";
 /// Folder prefix of the per-run user data folder in `%TEMP%` (removed on exit / next start).
 const DATA_PREFIX: &str = "crow-wv2-";
+/// Folder tag of the lock screen's environment (no profile is open).
+const LOCK_TAG: &str = "lock";
 /// A hung page reports "unresponsive" repeatedly; one crash report per tab in this window.
 const CRASH_DEBOUNCE: Duration = Duration::from_secs(5);
 
@@ -168,6 +170,12 @@ thread_local! {
     static NET_ARGS: RefCell<String> = RefCell::new(DIRECT_ARGS.to_string());
     /// User data folders of the web environments made this run (removed on exit).
     static NET_DIRS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    /// Whose user data folder comes next: a profile id, or `LOCK_TAG` before any unlock.
+    static DATA_TAG: RefCell<String> = RefCell::new(LOCK_TAG.to_string());
+    /// Folders of environments that ended, not yet handed to a wipe.
+    static RETIRED: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    /// Wipes in progress; the next profile starts only after they ended.
+    static WIPES: RefCell<Vec<std::thread::JoinHandle<()>>> = const { RefCell::new(Vec::new()) };
     static DATA_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
     static MAIN_HWND: Cell<isize> = const { Cell::new(0) };
     static NEXT_STORE: Cell<u32> = const { Cell::new(1) };
@@ -206,8 +214,9 @@ fn pwstr(f: impl FnOnce(&mut PWSTR) -> windows::core::Result<()>) -> String {
     take_pwstr(p)
 }
 
-/// Per-run user data folder in `%TEMP%`. WebView2 needs one for runtime-level state; browsing
-/// data never lands there (InPrivate profiles). Removed on exit, leftovers of dead runs on start.
+/// User data folder in `%TEMP%`, one per unlocked profile session (`crow-wv2-<id>-<pid>-<nanos>`)
+/// and one for the lock screen. WebView2 needs one for runtime-level state; browsing data never
+/// lands there (InPrivate profiles). Removed when the session ends, leftovers of dead runs on start.
 fn data_dir() -> PathBuf {
     DATA_DIR.with(|d| {
         d.borrow_mut()
@@ -215,7 +224,8 @@ fn data_dir() -> PathBuf {
                 let nanos = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |t| t.subsec_nanos());
-                std::env::temp_dir().join(format!("{DATA_PREFIX}{}-{nanos:08x}", std::process::id()))
+                let tag = DATA_TAG.with(|t| t.borrow().clone());
+                std::env::temp_dir().join(format!("{DATA_PREFIX}{tag}-{}-{nanos:08x}", std::process::id()))
             })
             .clone()
     })
@@ -227,7 +237,12 @@ fn remove_stale_data() {
     let own = data_dir();
     for e in dir.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        let Some(pid) = name.strip_prefix(DATA_PREFIX).and_then(|r| r.split('-').next()?.parse::<u32>().ok()) else {
+        let Some(rest) = name.strip_prefix(DATA_PREFIX) else { continue };
+        let mut parts = rest.split('-');
+        let first = parts.next().unwrap_or("");
+        // `<tag>-<pid>-<nanos>`; folders of older versions have no tag.
+        let tagged = first == LOCK_TAG || first.len() == 16;
+        let Some(pid) = (if tagged { parts.next() } else { Some(first) }).and_then(|p| p.parse::<u32>().ok()) else {
             continue;
         };
         let alive = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
@@ -237,6 +252,59 @@ fn remove_stale_data() {
             let _ = std::fs::remove_dir_all(e.path());
         }
     }
+}
+
+/// Deletes `dirs`. The browser process exits shortly after its last controller closed and holds
+/// its folder until then; what still fails is removed on the next start (`remove_stale_data`).
+fn remove_dirs(dirs: Vec<PathBuf>) {
+    for dir in dirs {
+        for _ in 0..30 {
+            if std::fs::remove_dir_all(&dir).is_ok() || !dir.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// The environments in use end: their folders are queued for `wipe_retired`.
+fn retire_env() {
+    ENV.with(|e| e.borrow_mut().take());
+    WEB_ENV.with(|e| e.borrow_mut().take());
+    PROFILES.with(|p| p.borrow_mut().clear());
+    let mut dirs: Vec<PathBuf> = NET_DIRS.with(|d| d.borrow_mut().drain(..).collect());
+    dirs.extend(DATA_DIR.with(|d| d.borrow_mut().take()));
+    RETIRED.with(|r| r.borrow_mut().extend(dirs));
+}
+
+fn join_wipes() {
+    for w in WIPES.with(|w| std::mem::take(&mut *w.borrow_mut())) {
+        let _ = w.join();
+    }
+}
+
+/// Views created from now on run in a new environment and folder of profile `id`. A previous
+/// profile's folder is gone first.
+pub fn begin_profile(id: &str) {
+    join_wipes();
+    retire_env();
+    DATA_TAG.with(|t| id.clone_into(&mut t.borrow_mut()));
+}
+
+/// Deletes the folders of ended environments once their last view has closed (off the UI thread).
+pub fn wipe_retired() {
+    let dirs = RETIRED.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    if !dirs.is_empty() {
+        WIPES.with(|w| w.borrow_mut().push(std::thread::spawn(move || remove_dirs(dirs))));
+    }
+}
+
+/// The profile session closed all its views: its environment and folder go.
+pub fn end_profile() {
+    VIEWS.with(|m| m.borrow_mut().clear());
+    retire_env();
+    DATA_TAG.with(|t| LOCK_TAG.clone_into(&mut t.borrow_mut()));
+    wipe_retired();
 }
 
 fn create_env(net_args: &str, dir: &Path) -> windows::core::Result<ICoreWebView2Environment> {
@@ -481,6 +549,23 @@ pub fn load_internal(v: &WebView, html: &str, base: &str) {
         let _ = unsafe { v.webview().AddWebResourceRequestedFilter(&filter, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL) };
     }
     let _ = v.load_url(base);
+}
+
+/// Browser UI page under `base`, served from memory like `load_internal`. Only the request
+/// interception of `watch` is needed: the view's navigation handler admits this one address.
+pub fn load_ui_internal(v: &WebView, html: &str, base: &str) {
+    let (w, k, env) = (v.webview(), key(v), v.environment());
+    let mut token = 0i64;
+    let _ = unsafe {
+        w.add_WebResourceRequested(
+            &WebResourceRequestedEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                on_request(&env, k, 0, &args)
+            })),
+            &mut token,
+        )
+    };
+    load_internal(v, html, base);
 }
 
 /// DevTools protocol call on `w`; `done` gets the parsed result (None on failure).
@@ -1547,20 +1632,9 @@ pub fn caption(cmd: &str) {
 pub fn shutdown() {
     VIEWS.with(|m| m.borrow_mut().clear());
     PROFILES.with(|p| p.borrow_mut().clear());
-    ENV.with(|e| e.borrow_mut().take());
-    WEB_ENV.with(|e| e.borrow_mut().take());
-    // The browser process exits shortly after its last controller closed and holds the folder
-    // until then; leftovers are removed on the next start (`remove_stale_data`).
-    let mut dirs: Vec<PathBuf> = NET_DIRS.with(|d| d.borrow_mut().drain(..).collect());
-    dirs.extend(DATA_DIR.with(|d| d.borrow().clone()));
-    for dir in dirs {
-        for _ in 0..30 {
-            if std::fs::remove_dir_all(&dir).is_ok() || !dir.exists() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
+    retire_env();
+    join_wipes();
+    remove_dirs(RETIRED.with(|r| std::mem::take(&mut *r.borrow_mut())));
 }
 
 /// Route of web content for stores made from now on (the app rebuilds its stores after a

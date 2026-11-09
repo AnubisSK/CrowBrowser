@@ -359,6 +359,17 @@ pub fn load_internal(v: &WebView, html: &str, base: &str) {
     v.webview().load_html(html, Some(base));
 }
 
+pub fn load_ui_internal(v: &WebView, html: &str, base: &str) {
+    load_internal(v, html, base);
+}
+
+/// The next session starts on a fresh ephemeral context (`new_store`); nothing is on disk.
+pub fn begin_profile(_id: &str) {}
+pub fn wipe_retired() {}
+pub fn end_profile() {
+    ROOT.with(|r| r.borrow_mut().take());
+}
+
 /// Runs `js` at document start in every frame of `v`, in Crow's isolated JS world (see
 /// `eval_isolated`). Called before the view's first load.
 pub fn add_isolated_script(v: &WebView, js: &str) {

@@ -28,6 +28,11 @@
     background: var(--accent); color: #fff; font: inherit; font-weight: 600;
   }
   button.primary:disabled { opacity: .6; }
+  #profiles { display: grid; gap: 6px; margin-bottom: 12px; max-height: 176px; overflow-y: auto; }
+  .prof { display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 10px; border-radius: 9px; border: 1px solid transparent; background: var(--input); color: var(--fg); font: inherit; text-align: left; }
+  .prof.on { border-color: var(--accent); }
+  .prof .av { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; }
+  .prof .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .err { color: var(--danger); min-height: 18px; margin-top: 10px; }
   .warn { font-size: 12px; margin: 14px 0 0; }
   .link { background: none; border: 0; color: var(--mute); font: inherit; font-size: 12px; margin-top: 14px; text-decoration: underline; }
@@ -74,15 +79,18 @@
     <div class="logo">/*LOGO*/</div>
     <h1 id="h"></h1>
     <p id="d"></p>
+    <div id="profiles"></div>
+    <input type="text" id="name" maxlength="40" spellcheck="false" data-i18n-ph="profile_name">
     <input type="password" id="pw" autofocus>
     <input type="password" id="pw2" data-i18n-ph="repeat_password">
     <button class="primary" id="go" type="submit"></button>
     <div class="err" id="err"></div>
     <p class="warn" id="warn" data-i18n="pw_not_saved_warning"></p>
+    <button class="link" id="other" type="button"></button>
     <button class="link" id="reset" type="button" data-i18n="forgot_password"></button>
   </form>
 <script>
-  const MODE = /*MODE*/;
+  const PROFILES = /*PROFILES*/;
   const $ = (id) => document.getElementById(id);
   const send = (m) => window.ipc.postMessage(m);
   // Window drag: plain left press on the empty strip itself, never on controls; the default
@@ -93,15 +101,50 @@
     e.preventDefault();
     send('drag');
   });
-  const create = MODE === 'create';
+  let create = !PROFILES.length, selected = PROFILES[0] || null;
+  const shown = (id, on) => { $(id).style.display = on ? '' : 'none'; };
 
-  $('h').textContent = t(create ? 'welcome' : 'locked');
-  $('d').textContent = t(create ? 'create_desc' : 'unlock_desc');
-  $('pw').placeholder = t(create ? 'new_password_hint' : 'master_password');
-  $('go').textContent = t(create ? 'create_vault' : 'unlock');
-  $('pw2').style.display = create ? '' : 'none';
-  $('warn').style.display = create ? '' : 'none';
-  $('reset').style.display = create ? 'none' : '';
+  function pick(p) {
+    selected = p;
+    render();
+  }
+
+  function row(p) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'prof' + (p === selected ? ' on' : '');
+    b.onclick = () => pick(p);
+    const av = document.createElement('span');
+    av.className = 'av';
+    av.textContent = [...p.name].slice(0, 1).join('').toUpperCase();
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = p.name;
+    b.append(av, nm);
+    return b;
+  }
+
+  function render() {
+    $('h').textContent = t(!create ? 'locked' : PROFILES.length ? 'profile_new' : 'welcome');
+    $('d').textContent = t(create ? 'create_desc' : 'unlock_desc');
+    $('pw').placeholder = t(create ? 'new_password_hint' : 'master_password');
+    $('go').textContent = t(create ? 'create_vault' : 'unlock');
+    $('profiles').replaceChildren(...(create ? [] : PROFILES.map(row)));
+    if (create && !PROFILES.length && !$('name').value) $('name').value = t('profile_personal');
+    shown('profiles', !create);
+    shown('name', create);
+    shown('pw2', create);
+    shown('warn', create);
+    shown('reset', !create);
+    shown('other', PROFILES.length > 0);
+    $('other').textContent = t(create ? 'back' : 'profile_new');
+    $('err').textContent = '';
+    $('pw').value = ''; $('pw2').value = '';
+    $(create ? 'name' : 'pw').focus();
+  }
+
+  $('other').onclick = () => { create = !create; render(); };
+  render();
 
   dragOn(document.body, (e) => e.target === document.body);
 
@@ -120,6 +163,7 @@
     e.preventDefault();
     const pw = $('pw').value;
     if (create) {
+      if (!$('name').value.trim()) return fail(t('profile_name_invalid'));
       if ([...pw].length < 8) return fail(t('pw_too_short'));
       if (pw !== $('pw2').value) return fail(t('pw_mismatch'));
     }
@@ -128,7 +172,7 @@
     $('go').disabled = true;
     $('go').textContent = t(create ? 'creating' : 'unlocking');
     // let the label repaint before key derivation blocks the UI thread
-    setTimeout(() => send((create ? 'create:' : 'unlock:') + pw), 60);
+    setTimeout(() => send(create ? 'create:' + JSON.stringify({ name: $('name').value, password: pw }) : 'unlock:' + selected.id + ':' + pw), 60);
   };
 
   function fail(msg) {
@@ -147,7 +191,7 @@
       setTimeout(() => { reset.classList.remove('armed'); reset.textContent = t('forgot_password'); }, 4000);
       return;
     }
-    send('reset');
+    if (selected) send('reset:' + selected.id);
   };
 </script>
 </body>

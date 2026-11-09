@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf, sync::OnceLock};
+use zeroize::Zeroize;
 
 pub const ENGINES: &[(&str, &str, &str)] = &[
     ("ddg", "DuckDuckGo", "https://duckduckgo.com/?q="),
@@ -134,6 +135,17 @@ pub fn store_language(code: &str) {
 }
 
 impl Settings {
+    /// Session over: what the profile chose (sites, homepage) is overwritten, defaults remain.
+    pub fn wipe(&mut self) {
+        for s in [&mut self.search, &mut self.homepage, &mut self.startup, &mut self.theme, &mut self.language] {
+            s.zeroize();
+        }
+        for list in [&mut self.adblock_allow, &mut self.gamepad_sites, &mut self.webgl_off] {
+            list.iter_mut().for_each(Zeroize::zeroize);
+        }
+        *self = Self::default();
+    }
+
     /// Migrates the old plaintext settings.conf (if any) and deletes it.
     pub fn take_legacy() -> Option<Self> {
         let path = data_dir().join("settings.conf");

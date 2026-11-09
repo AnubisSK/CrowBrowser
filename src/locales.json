@@ -1,5 +1,13 @@
 {
   "sk": {
+    "profile_personal": "Osobný",
+    "profile_name": "Názov profilu",
+    "profile_new": "Nový profil",
+    "profile_active": "Profil: {0}",
+    "profile_missing": "Profil sa nenašiel",
+    "profile_name_invalid": "Zadaj názov profilu (najviac 40 znakov)",
+    "profile_name_taken": "Profil s týmto názvom už existuje",
+    "login_wait": "Príliš veľa pokusov. Skús znova o {0} s",
     "passwords": "Heslá",
     "pw_lead": "Prihlásenia sú šifrované v trezore Crow a dešifrujú sa len v pamäti. Stránky nikdy nevidia heslá ani kľúč trezoru.",
     "pw_saved": "Uložené prihlásenia",
@@ -514,6 +522,14 @@
     "default_browser_failed": "Predvolený prehliadač sa nepodarilo nastaviť"
   },
   "cs": {
+    "profile_personal": "Osobní",
+    "profile_name": "Název profilu",
+    "profile_new": "Nový profil",
+    "profile_active": "Profil: {0}",
+    "profile_missing": "Profil nebyl nalezen",
+    "profile_name_invalid": "Zadejte název profilu (nejvýše 40 znaků)",
+    "profile_name_taken": "Profil s tímto názvem už existuje",
+    "login_wait": "Příliš mnoho pokusů. Zkuste to znovu za {0} s",
     "passwords": "Hesla",
     "pw_lead": "Přihlášení jsou šifrovaná v trezoru Crow a dešifrují se jen v paměti. Stránky nikdy neuvidí hesla ani klíč trezoru.",
     "pw_saved": "Uložená přihlášení",
@@ -1028,6 +1044,14 @@
     "default_browser_failed": "Výchozí prohlížeč se nepodařilo nastavit"
   },
   "en": {
+    "profile_personal": "Personal",
+    "profile_name": "Profile name",
+    "profile_new": "New profile",
+    "profile_active": "Profile: {0}",
+    "profile_missing": "Profile not found",
+    "profile_name_invalid": "Enter a profile name (40 characters at most)",
+    "profile_name_taken": "A profile with this name already exists",
+    "login_wait": "Too many attempts. Try again in {0} s",
     "passwords": "Passwords",
     "pw_lead": "Logins are encrypted in the Crow vault and decrypted in memory only. Pages never see passwords or the vault key.",
     "pw_saved": "Saved logins",
@@ -1542,6 +1566,14 @@
     "default_browser_failed": "Could not set the default browser"
   },
   "de": {
+    "profile_personal": "Persönlich",
+    "profile_name": "Profilname",
+    "profile_new": "Neues Profil",
+    "profile_active": "Profil: {0}",
+    "profile_missing": "Profil nicht gefunden",
+    "profile_name_invalid": "Profilnamen eingeben (höchstens 40 Zeichen)",
+    "profile_name_taken": "Ein Profil mit diesem Namen existiert bereits",
+    "login_wait": "Zu viele Versuche. Erneut versuchen in {0} s",
     "passwords": "Passwörter",
     "pw_lead": "Anmeldungen sind im Crow-Tresor verschlüsselt und werden nur im Arbeitsspeicher entschlüsselt. Websites sehen weder Passwörter noch den Tresorschlüssel.",
     "pw_saved": "Gespeicherte Anmeldungen",

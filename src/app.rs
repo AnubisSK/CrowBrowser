@@ -1,6 +1,7 @@
 use crate::{
     adblock, cert, default_browser, download, gamepad,
     proxy::{self, ProxyMode},
+    profile::{self, Denied, Profile},
     settings::{self, ENGINES, Settings},
     update,
     vault::{self, Bookmark, CookieRec, Download, HistoryEntry, Login, MAX_HISTORY, Vault, VaultData},
@@ -21,7 +22,7 @@ use tao::{
     window::{Fullscreen, Theme, Window},
 };
 use wry::{NewWindowFeatures, NewWindowResponse, PageLoadEvent, RGBA, Rect, WebView, dpi};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const TABS_H: f64 = 36.0;
 const NAV_H: f64 = 40.0;
@@ -36,6 +37,8 @@ const ZOOM_STEPS: &[f64] = &[
 ];
 const TICK: Duration = Duration::from_secs(30);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
+/// A lock never waits longer than this for the cookie export (`App::lock_session`).
+const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 /// Max wait for WebKit to confirm the cookie import before the session starts anyway.
 const RESTORE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Favicon: polled after load (tab views have no IPC), a 32x32 PNG data URL of bounded size.
@@ -384,6 +387,12 @@ impl TabCtx {
     /// `NavigateToString` as a `data:text/html` URL): any other navigation is refused, so
     /// `window.ipc` can never reach web content.
     fn ui_view(&self, html: &str, rect: Rect) -> Option<WebView> {
+        self.ui_view_at(html, rect, None)
+    }
+
+    /// `base`: the document is served from memory under this address, the only other one the
+    /// view may open (`crow:lock`).
+    fn ui_view_at(&self, html: &str, rect: Rect, base: Option<&'static str>) -> Option<WebView> {
         const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'\">";
         // Dictionaries + `t()` go in first, so the page's own script can use them right away.
         let i18n = include_str!("i18n.js")
@@ -396,17 +405,23 @@ impl TabCtx {
         // Caption buttons start in the window's current state (later: `setMax` on resize).
         #[cfg(target_os = "windows")]
         let html = if self.window.is_maximized() { html.replacen("class=\"windows\"", "class=\"windows maximized\"", 1) } else { html };
-        let b = wk::ui_builder()
-            .with_html(html)
+        let b = if base.is_none() { wk::ui_builder().with_html(html.clone()) } else { wk::ui_builder() };
+        let b = b
             .with_background_color(bg_of(&self.window))
             .with_focused(true)
-            .with_navigation_handler(|url| {
-                url == "about:blank" || (cfg!(target_os = "windows") && url.starts_with("data:text/html"))
+            .with_navigation_handler(move |url| {
+                url == "about:blank"
+                    || (cfg!(target_os = "windows") && url.starts_with("data:text/html"))
+                    || base.is_some_and(|b| url == b)
             })
             .with_ipc_handler(move |req| {
                 let _ = p.send_event(UserEvent::Ipc(req.into_body()));
             });
-        wk::attach(b, rect, &self.window).ok()
+        let v = wk::attach(b, rect, &self.window).ok()?;
+        if let Some(base) = base {
+            wk::load_ui_internal(&v, &html, base);
+        }
+        Some(v)
     }
 }
 
@@ -586,6 +601,8 @@ impl Tab {
 
 struct Session {
     vault: Vault,
+    /// The profile this session authenticated into.
+    profile: Profile,
     data: VaultData,
     store: wk::Store,
     toolbar: WebView,
@@ -826,6 +843,7 @@ impl Session {
             .collect();
         let state = json!({
             "tabs": tabs,
+            "profile": self.profile.name,
             "active": self.active,
             "url": url,
             "loading": cur.is_some_and(|t| t.loading),
@@ -1053,6 +1071,8 @@ pub struct App {
     pub exit: bool,
     next_tick: Instant,
     quit_at: Option<Instant>,
+    /// Lock requested: the session ends by then even if the cookie export never answers.
+    lock_at: Option<Instant>,
     restore_by: Option<Instant>,
     /// Deadline of the current proxy-change phase (cookie export / import may never answer).
     net_by: Option<Instant>,
@@ -1129,6 +1149,7 @@ impl App {
             exit: false,
             next_tick: Instant::now() + TICK,
             quit_at: None,
+            lock_at: None,
             restore_by: None,
             net_by: None,
             update_checked: false,
@@ -1138,16 +1159,27 @@ impl App {
             pad_target: None,
             focused: true,
         };
+        profile::migrate_legacy(&settings::tr(&settings::stored_language(), "profile_personal", &[]));
         app.show_lock();
         app
     }
 
+    /// The gatekeeper: nothing but this view exists until a profile is authenticated. Only names
+    /// and ids reach it.
     fn show_lock(&mut self) {
-        let mode = if Vault::exists() { "unlock" } else { "create" };
+        self.close_lock();
+        let profiles: Vec<_> = profile::list().iter().map(|p| json!({ "id": p.id, "name": p.name })).collect();
         let html = include_str!("lock.html")
-            .replace("/*MODE*/", &js(mode))
+            .replace("/*PROFILES*/", &json!(profiles).to_string().replace("</", "<\\/"))
             .replace("/*LOGO*/", include_str!("../assets/logo.svg"));
-        self.lock = self.ctx.ui_view(&html, full_rect(&self.ctx.window));
+        self.lock = self.ctx.ui_view_at(&html, full_rect(&self.ctx.window), Some(LOCK_BASE));
+    }
+
+    fn close_lock(&mut self) {
+        let Some(v) = self.lock.take() else { return };
+        #[cfg(target_os = "windows")]
+        wk::forget(&v);
+        drop(v);
     }
 
     /// Lock-screen error (`key` in `locales.json`), shown in the UI language.
@@ -1160,7 +1192,7 @@ impl App {
     pub fn wake(&self) -> Instant {
         let fav = self.s.as_ref().and_then(|s| s.fav_due);
         let page = self.s.as_ref().map(|s| s.page_due.unwrap_or_else(|| Instant::now() + PAGE_POLL));
-        [self.quit_at, self.restore_by, self.net_by, fav, page]
+        [self.quit_at, self.lock_at, self.restore_by, self.net_by, fav, page]
             .into_iter()
             .flatten()
             .fold(self.next_tick, Instant::min)
@@ -1415,6 +1447,13 @@ impl App {
             self.exit = true;
             return;
         }
+        if self.lock_at.is_some_and(|l| now >= l) {
+            // Cookie export never answered: the keys must not stay in RAM because of it.
+            if let Some(s) = &mut self.s {
+                s.save_now(&self.cfg);
+            }
+            return self.after_save(After::Lock);
+        }
         if self.restore_by.is_some_and(|r| now >= r) {
             eprintln!("cookie restore timed out; starting session without waiting");
             self.restored(false);
@@ -1476,7 +1515,7 @@ impl App {
         if let Some(mut s) = self.s.take() {
             s.wipe();
         }
-        self.lock = None;
+        self.close_lock();
         self.incoming.iter_mut().for_each(Zeroize::zeroize);
         self.incoming.clear();
         wk::shutdown();
@@ -1573,35 +1612,59 @@ impl App {
 
     fn lock_cmd(&mut self, name: &str, arg: &str) {
         match name {
-            "unlock" => match Vault::unlock(arg) {
-                Ok((vault, data)) => self.start(vault, data),
-                Err(e) => self.lock_fail(e),
-            },
-            "create" if !Vault::exists() => {
-                if arg.chars().count() < 8 {
-                    return self.lock_fail("pw_too_short");
-                }
-                let vault = Vault::create(arg);
-                let data = VaultData::default();
-                match vault.save(&data) {
-                    Ok(()) => self.start(vault, data),
-                    Err(_) => self.lock_fail("vault_save_failed"),
+            "unlock" => {
+                let Some((id, password)) = arg.split_once(':') else { return };
+                let Some(p) = profile::find(id) else { return self.lock_fail("profile_missing") };
+                match p.unlock(password) {
+                    Ok((vault, data)) => self.start(p, vault, data),
+                    Err(Denied::Wait(secs)) => {
+                        if let Some(l) = &self.lock {
+                            let _ = l.evaluate_script(&format!("fail(t('login_wait', {secs}))"));
+                        }
+                    }
+                    Err(Denied::Failed(key)) => self.lock_fail(key),
                 }
             }
+            "create" => {
+                #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+                struct Req {
+                    name: String,
+                    password: String,
+                }
+                let Ok(r) = serde_json::from_str::<Req>(arg) else { return };
+                if r.password.chars().count() < 8 {
+                    return self.lock_fail("pw_too_short");
+                }
+                let p = match profile::create(&r.name) {
+                    Ok(p) => p,
+                    Err(key) => return self.lock_fail(key),
+                };
+                let vault = Vault::create(&p.dir, &r.password);
+                let data = VaultData::default();
+                if vault.save(&data).is_ok() {
+                    self.start(p, vault, data);
+                } else {
+                    p.delete();
+                    self.lock_fail("vault_save_failed");
+                }
+            }
+            // "Forgot the password": this profile only.
             "reset" => {
-                Vault::destroy();
+                if let Some(p) = profile::find(arg) {
+                    p.delete();
+                }
                 self.show_lock();
             }
             _ => {}
         }
     }
 
-    fn start(&mut self, vault: Vault, mut data: VaultData) {
+    fn start(&mut self, profile: Profile, vault: Vault, mut data: VaultData) {
         let legacy = data.settings.is_none();
         self.cfg = data
             .settings
             .take()
-            .or_else(Settings::take_legacy)
+            .or_else(|| if profile.is_legacy() { Settings::take_legacy() } else { None })
             .unwrap_or_default();
         self.ctx.adblock.set(self.cfg.adblock);
         *self.ctx.page_js.borrow_mut() =
@@ -1609,13 +1672,15 @@ impl App {
         // The vault is authoritative; the plain copy only serves the next lock screen.
         settings::store_language(&self.cfg.language);
         self.ctx.lang.borrow_mut().clone_from(&self.cfg.language);
+        wk::begin_profile(&profile.id);
         let w = &self.ctx.window;
         wk::set_theme(w, theme_of(&self.cfg.theme));
         let html = include_str!("toolbar.html").to_string();
         let Some(toolbar) = self.ctx.ui_view(&html, toolbar_rect(w, TABS_H + NAV_H)) else {
             return self.lock_fail("window_failed");
         };
-        self.lock = None;
+        self.close_lock();
+        wk::wipe_retired();
         let store = wk::new_store();
         let p = self.ctx.proxy.clone();
         wk::import_cookies(&store, &data.cookies, move || {
@@ -1628,6 +1693,7 @@ impl App {
             lang: self.ctx.lang.clone(),
             token: self.sessions,
             vault,
+            profile,
             data,
             store,
             toolbar,
@@ -2545,6 +2611,15 @@ impl App {
         s.refresh_panel(&self.cfg);
     }
 
+    /// Hotkey and toolbar button: one last save (bounded by `LOCK_TIMEOUT`), then everything of
+    /// the session goes (`after_save`).
+    fn lock_session(&mut self) {
+        if self.s.is_some() && self.lock_at.is_none() {
+            self.lock_at = Some(Instant::now() + LOCK_TIMEOUT);
+            self.persist(After::Lock);
+        }
+    }
+
     fn quit(&mut self) {
         if self.s.is_some() {
             self.quit_at = Some(Instant::now() + QUIT_TIMEOUT);
@@ -2619,7 +2694,8 @@ impl App {
             After::Quit => self.exit = true,
             After::Lock => {
                 self.restore_by = None;
-                if let Some(s) = self.s.take() {
+                self.lock_at = None;
+                if let Some(mut s) = self.s.take() {
                     for a in &s.asks {
                         wk::decide_download(a.key, false, &a.url, None);
                     }
@@ -2628,9 +2704,13 @@ impl App {
                         wk::clear_store(store, || {});
                         wk::drop_container_store(store);
                     }
+                    s.wipe();
+                    // Dropped here: vault key and decrypted contents zeroize themselves.
                 }
+                wk::end_profile();
                 // Don't reveal the chosen theme (or anything else) while locked.
-                self.cfg = Settings::default();
+                self.cfg.wipe();
+                self.ctx.page_js.borrow_mut().zeroize();
                 wk::set_theme(&self.ctx.window, None);
                 self.show_lock();
             }
@@ -3286,7 +3366,7 @@ impl App {
                 s.site = None;
                 self.session_cmd("panel", "settings");
             }
-            "lock" => self.persist(After::Lock),
+            "lock" => self.lock_session(),
             "panic" => self.panic(),
             _ => {}
         }
@@ -3611,6 +3691,8 @@ const GAME_URL: &str = "crow:game";
 /// `.invalid` never resolves and the pages load nothing (CSP `default-src 'none'`).
 const INTERNAL_BASE: &str = "https://crow.invalid/";
 const PASSWORDS_BASE: &str = "https://crow.invalid/passwords";
+/// Document address of the lock screen (`crow:lock`), the only built-in page with `window.ipc`.
+const LOCK_BASE: &str = "https://crow.invalid/lock";
 
 /// Document address of the built-in page `address`.
 fn internal_base(address: &str) -> &'static str {
