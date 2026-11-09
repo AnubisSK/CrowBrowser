@@ -1,0 +1,64 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; connect-src ws://127.0.0.1:__PORT__; img-src blob:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1b1f; }
+  canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+</style>
+</head>
+<body>
+<canvas id="c" tabindex="0"></canvas>
+<script>
+(() => {
+  // Air-gap surface: the page only ever receives pictures. No IPC, no remote markup; all traffic
+  // is on the loopback socket opened with this page's one-time ticket.
+  const c = document.getElementById('c'), g = c.getContext('2d', { alpha: false });
+  const ws = new WebSocket('ws://127.0.0.1:__PORT__/rbi/__TICKET__');
+  const send = (m) => { if (ws.readyState === 1) ws.send(JSON.stringify(m)); };
+  const size = () => { c.width = innerWidth; c.height = innerHeight; send({ t: 'resize', width: innerWidth, height: innerHeight }); };
+  ws.onopen = () => { size(); c.focus(); };
+  ws.binaryType = 'blob';
+
+  let busy = false, next = null;
+  const draw = (blob) => {
+    busy = true;
+    createImageBitmap(blob).then((b) => { g.drawImage(b, 0, 0, c.width, c.height); b.close(); }).catch(() => {}).finally(() => {
+      busy = false;
+      if (next) { const n = next; next = null; draw(n); }
+    });
+  };
+  ws.onmessage = (e) => { if (busy) next = e.data; else draw(e.data); };
+
+  let resizing = 0;
+  addEventListener('resize', () => { clearTimeout(resizing); resizing = setTimeout(size, 120); });
+  document.addEventListener('visibilitychange', () => send({ t: 'visible', on: !document.hidden }));
+
+  const mods = (e) => (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+  const names = ['left', 'middle', 'right'];
+  const mouse = (kind, e, button) => send({ t: 'mouse', kind, x: e.clientX, y: e.clientY, button, buttons: e.buttons, clicks: e.detail || 0, mods: mods(e) });
+
+  let moved = null;
+  const flush = () => { if (moved) { const e = moved; moved = null; mouse('move', e, names[[1, 4, 2].findIndex((b) => e.buttons & b)] || 'none'); } };
+  c.addEventListener('mousemove', (e) => { if (!moved) requestAnimationFrame(flush); moved = e; });
+  c.addEventListener('mousedown', (e) => { flush(); c.focus(); e.preventDefault(); if (names[e.button]) mouse('down', e, names[e.button]); });
+  c.addEventListener('mouseup', (e) => { flush(); if (names[e.button]) mouse('up', e, names[e.button]); });
+  c.addEventListener('contextmenu', (e) => e.preventDefault());
+  c.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? innerHeight : 1;
+    send({ t: 'wheel', x: e.clientX, y: e.clientY, dx: e.deltaX * unit, dy: e.deltaY * unit, mods: mods(e) });
+  }, { passive: false });
+
+  const key = (kind, e) => {
+    e.preventDefault();
+    const text = kind === 'down' && !e.ctrlKey && !e.metaKey ? ([...e.key].length === 1 ? e.key : e.key === 'Enter' ? '\r' : '') : '';
+    send({ t: 'key', kind, key: e.key, code: e.code, text, vk: e.keyCode, mods: mods(e) });
+  };
+  c.addEventListener('keydown', (e) => key('down', e));
+  c.addEventListener('keyup', (e) => key('up', e));
+})();
+</script>
+</body>
+</html>

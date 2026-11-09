@@ -125,6 +125,15 @@ pub struct Login {
     pub password: String,
 }
 
+/// Remote execution node of this profile. Lives only in the encrypted vault; the UI never gets
+/// the token back and it is wiped on drop (lock, replacement, removal).
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct RemoteServer {
+    pub host: String,
+    pub port: u16,
+    pub token: String,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct VaultData {
@@ -133,6 +142,8 @@ pub struct VaultData {
     pub downloads: Vec<Download>,
     pub cookies: Vec<CookieRec>,
     pub logins: Vec<Login>,
+    /// `crow-server` node; `None` = everything runs locally.
+    pub remote: Option<RemoteServer>,
     /// Display name of the profile, authenticated by the vault (absent in older vaults).
     pub label: String,
     pub session: Urls,

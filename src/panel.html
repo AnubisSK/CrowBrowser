@@ -298,6 +298,43 @@
       h('div', { class: 'row' }, h('div', {}, t('proxy_test_title'), result), testBtn));
   }
 
+  // Remote execution node, stored only in the encrypted vault; the token never comes back here.
+  // Answers from the backend: `remoteState(state)`, `remoteResult(ok, key)`.
+  function remoteSection() {
+    const R = D.remote || {};
+    const field = (label, el) => h('label', { class: 'pfield' }, h('span', {}, label), el);
+    const hostI = h('input', { type: 'text', spellcheck: 'false', autocomplete: 'off', placeholder: 'crow.example.org' });
+    hostI.value = R.host || '';
+    const portI = h('input', { type: 'text', inputmode: 'numeric', autocomplete: 'off', placeholder: '8443', class: 'port' });
+    portI.value = R.port || '';
+    const tokenI = h('input', { type: 'password', autocomplete: 'new-password' });
+    const saveBtn = h('button', { class: 'btn primary' }, t('remote_save'));
+    const testBtn = h('button', { class: 'btn' }, t('proxy_test'));
+    const removeBtn = h('button', { class: 'btn' }, t('remote_remove'));
+    const result = h('small', { class: 'presult' });
+    const paint = () => {
+      tokenI.placeholder = R.hasToken ? t('proxy_pass_kept') : '';
+      testBtn.disabled = removeBtn.disabled = !R.hasToken;
+    };
+    saveBtn.onclick = () => {
+      send('remote-save:' + JSON.stringify({ host: hostI.value.trim(), port: Number(portI.value) || 0, token: tokenI.value, keep_token: !tokenI.value && !!R.hasToken }));
+      tokenI.value = '';
+    };
+    testBtn.onclick = () => { result.className = 'presult'; result.textContent = t('proxy_testing'); send('remote-test'); };
+    removeBtn.onclick = () => send('remote-remove');
+    window.remoteState = (st) => {
+      Object.keys(R).forEach(k => delete R[k]); Object.assign(R, st); D.remote = R;
+      hostI.value = R.host || ''; portI.value = R.port || ''; paint();
+    };
+    window.remoteResult = (ok, key) => { result.className = 'presult ' + (ok ? 'ok' : 'err'); result.textContent = t(key); };
+    paint();
+    return h('section', {},
+      h('div', { class: 'row' }, h('div', {}, t('remote_section'), h('small', {}, t('remote_desc')))),
+      h('div', { class: 'row', style: 'display:block' },
+        h('div', { class: 'pgrid' }, field(t('proxy_host'), hostI), field(t('proxy_port'), portI), field(t('remote_token'), tokenI))),
+      h('div', { class: 'row' }, result, h('div', { style: 'display:flex;gap:8px' }, removeBtn, testBtn, saveBtn)));
+  }
+
   const views = {
     settings() {
       const home = h('input', { type: 'text', spellcheck: 'false' });
@@ -342,6 +379,8 @@
           row(t('clarity_sharpen'), t('clarity_sharpen_desc'), seg('clarity_sharpen', [['on', t('switch_on')], ['off', t('switch_off')]]))),
         h('h2', {}, t('proxy_section')),
         proxySection(),
+        h('h2', {}, t('remote_section')),
+        remoteSection(),
         h('h2', {}, t('privacy')),
         h('section', {},
           row(t('adblock_full'), t('adblock_desc', '~/Library/Application Support/Crow/blocklist.txt'),

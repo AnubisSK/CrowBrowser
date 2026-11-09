@@ -121,6 +121,16 @@
   #pad .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @keyframes padin { from { opacity: 0; transform: translateY(-4px) scale(.96); } to { opacity: 1; transform: none; } }
   @media (max-width: 900px) { #pad .txt { display: none; } }
+  /* Remote execution: where the active tab's content runs (dot: state of the node). */
+  #remotewrap { display: flex; align-items: center; gap: 5px; height: 28px; padding: 0 2px 0 8px; border-radius: 7px; flex: none; }
+  #remotewrap:hover { background: var(--hover); }
+  #remotedot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--mute); opacity: .5; }
+  #remotedot.connecting { background: #d29922; opacity: 1; }
+  #remotedot.on { background: #3fb950; opacity: 1; }
+  #remotedot.error { background: #e5534b; opacity: 1; }
+  #remote { height: 24px; max-width: 120px; border: 0; outline: none; border-radius: 5px; background: transparent; color: var(--icon); font: inherit; font-size: 12px; }
+  #remote option { color: var(--fg); background: var(--nav); }
+  @media (max-width: 760px) { #remote { max-width: 26px; } }
   #pip { display: none; color: var(--accent); }
   #pip.show { display: grid; animation: padin .35s ease-out; }
   /* CrowClarity (✨): shown with a video; lit while the tab's video is enhanced. */
@@ -218,6 +228,7 @@
     <button id="clarity" data-i18n-title="clarity_title"><span aria-hidden="true">✨</span></button>
     <button id="pad" data-i18n-title="gamepad_chip"><span aria-hidden="true">🎮</span><span class="txt" data-i18n="gamepad_chip"></span></button>
     <button id="shield" data-i18n-title="adblock"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span id="shieldn"></span></button>
+    <label id="remotewrap"><span id="remotedot"></span><select id="remote"><option value="direct" data-i18n="remote_direct"></option><option value="eco" data-i18n="remote_eco"></option><option value="rbi" data-i18n="remote_rbi"></option><option value="tunnel" data-i18n="remote_tunnel"></option></select></label>
     <button id="btn-passwords" data-i18n-title="passwords"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><path d="M12 15v2"/></svg></button>
     <button id="bms" data-i18n-title="bookmarks" data-hint=" (⌘⌥B)"><svg viewBox="0 0 24 24"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg></button>
     <button id="hist" data-i18n-title="history" data-hint=" (⌘Y)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg></button>
@@ -282,6 +293,7 @@
   // "+" right click: open the new tab in a container.
   $('newtab').oncontextmenu = (e) => { e.preventDefault(); send('container-menu:' + Math.round($('newtab').getBoundingClientRect().left)); };
   $('shield').onclick = (e) => send(e.altKey ? 'toggle-adblock' : 'shield-open:' + Math.round($('shield').getBoundingClientRect().left));
+  $('remote').onchange = (e) => send('remote-mode:' + e.target.value);
   // Blocked loads on the current page (badge); pushed by the backend as they happen.
   function setBlocked(n) {
     const b = $('shieldn');
@@ -410,6 +422,13 @@
     $('shield').title = t('adblock') + ': ' + (!st.adblock ? t('adblock_off_everywhere') : st.siteAllowed ? t('adblock_off_for', st.host) : t('adblock_on'))
       + ' (' + t('shield_hint') + ')';
     setBlocked(st.blocked || 0);
+    const R = st.remote || { mode: 'direct', status: 'off', configured: false };
+    const sel = $('remote');
+    sel.value = R.mode;
+    for (const o of sel.options) o.disabled = !R.configured && o.value !== 'direct';
+    sel.disabled = !!R.busy;
+    $('remotedot').className = R.status;
+    $('remotewrap').title = R.configured ? t('remote_status_' + R.status) : t('remote_not_configured');
     $('avatar').textContent = [...(st.profile || '')].slice(0, 1).join('').toUpperCase();
     $('pname').textContent = st.profile || '';
     $('profile').title = t('profile_active', st.profile || '');

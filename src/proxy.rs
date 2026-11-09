@@ -105,7 +105,7 @@ impl Drop for Req {
 
 /// Host name, IPv4 or bracket-less IPv6 literal; nothing that could change the meaning of a
 /// proxy URI or a browser command line (spaces, quotes, `@`, `/`, `,`, `;`).
-fn valid_host(h: &str) -> bool {
+pub fn valid_host(h: &str) -> bool {
     !h.is_empty()
         && h.len() <= 253
         && !h.starts_with(['.', '-'])

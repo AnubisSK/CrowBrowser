@@ -1,12 +1,17 @@
 use crate::{
     adblock, cert, default_browser, download, gamepad,
-    proxy::{self, ProxyMode},
     profile::{self, Denied, Profile},
+    proxy::{self, ProxyMode, ProxyProtocol},
+    remote::{self, RbiPage, ReaderPage, Remote, RemoteMode},
     settings::{self, ENGINES, Settings},
     update,
-    vault::{self, Bookmark, CookieRec, Download, HistoryEntry, Login, MAX_HISTORY, Vault, VaultData},
+    vault::{
+        self, Bookmark, CookieRec, Download, HistoryEntry, Login, MAX_HISTORY, RemoteServer, Vault,
+        VaultData,
+    },
     wk,
 };
+use crow_proto::{MIN_TOKEN, RbiCommand, RbiEvent};
 use serde::Deserialize;
 use serde_json::json;
 use std::{
@@ -141,7 +146,10 @@ pub enum UserEvent {
     },
     NewTab(String),
     /// Popup `id` opened by tab `opener` becomes a tab (same container as the opener).
-    AdoptTab { id: u32, opener: u32 },
+    AdoptTab {
+        id: u32,
+        opener: u32,
+    },
     /// A download wants to write to disk; held until the user answers the toolbar prompt.
     /// `key` identifies the pending download inside `wk`, `tab` the requesting tab (if known).
     DownloadAsk {
@@ -190,7 +198,10 @@ pub enum UserEvent {
         revoke: Option<String>,
     },
     /// A tab's page entered/left element fullscreen (Linux; macOS uses WebKit's own window).
-    Fullscreen { tab: u32, on: bool },
+    Fullscreen {
+        tab: u32,
+        on: bool,
+    },
     /// Navigation refused by WebKit because of the server certificate.
     TlsError {
         tab: u32,
@@ -234,11 +245,39 @@ pub enum UserEvent {
     },
     UpdateSaved(Option<PathBuf>),
     /// Cookies of the store a proxy change replaces (session token).
-    ProxySwitch { cookies: Vec<CookieRec>, token: u64 },
+    ProxySwitch {
+        cookies: Vec<CookieRec>,
+        token: u64,
+    },
     /// The new store of a proxy change has its cookies (session token).
     ProxyReady(u64),
     /// `test-proxy-connection`: exit address and whether it is Tor, or a `locales.json` key.
     ProxyTest(Result<(String, bool), &'static str>),
+    /// A tab's top-level navigation, taken over because a remote mode runs its content.
+    RemoteNav {
+        tab: u32,
+        url: String,
+    },
+    /// Eco Reader answer for request `seq` of the tab; errors are `locales.json` keys.
+    RemoteReader {
+        tab: u32,
+        seq: u32,
+        result: Result<ReaderPage, &'static str>,
+    },
+    /// Event of a tab's RBI session.
+    RemoteRbi {
+        tab: u32,
+        session: u64,
+        event: RbiEvent,
+    },
+    /// A tab's RBI session ended (`error`: it was not the surface going away).
+    RemoteClosed {
+        tab: u32,
+        session: u64,
+        error: Option<&'static str>,
+    },
+    /// Result of a node reachability check.
+    RemotePing(Result<(), &'static str>),
     /// Links handed over by the system (Crow as default browser / command line).
     OpenUrls(Vec<String>),
     /// Default-browser status; `note` = `locales.json` key after a registration attempt.
@@ -274,6 +313,8 @@ struct TabCtx {
     page_js: Rc<RefCell<String>>,
     /// Random per-session name of the shim's gamepad event (pages cannot listen for it).
     pad_event: Rc<str>,
+    /// Remote mode, read by each tab's navigation handler.
+    remote_gate: Rc<Cell<RemoteMode>>,
 }
 
 impl TabCtx {
@@ -297,10 +338,22 @@ impl TabCtx {
         rect: Rect,
         blocking: bool,
     ) -> wry::Result<WebView> {
-        let (p1, p2) = (self.proxy.clone(), self.proxy.clone());
+        let (p1, p2, p5) = (self.proxy.clone(), self.proxy.clone(), self.proxy.clone());
         let ctx = self.clone();
+        let gate = self.remote_gate.clone();
         let b = wk::builder(config, self.page_js.borrow().clone())
             .with_background_color(bg_of(&self.window))
+            // The single point every top-level load passes, before any request exists: with a
+            // remote mode on, no web page is ever fetched by this engine.
+            .with_navigation_handler(move |url| {
+                let lower = url.get(..8).unwrap_or(&url).to_ascii_lowercase();
+                let web = lower.starts_with("https://") || lower.starts_with("http://");
+                if !gate.get().intercepts() || !web || is_surface_address(&url) {
+                    return true;
+                }
+                let _ = p5.send_event(UserEvent::RemoteNav { tab: id, url });
+                false
+            })
             .with_on_page_load_handler(move |ev, url| {
                 let started = matches!(ev, PageLoadEvent::Started);
                 let _ = p1.send_event(UserEvent::PageLoad {
@@ -317,41 +370,43 @@ impl TabCtx {
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let b = {
             let (p3, p4) = (self.proxy.clone(), self.proxy.clone());
-            b
-                .with_download_started_handler(move |url, path| {
-                    // WebKit's suggested name goes through the same sanitizing as on Linux.
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let name = download::sanitize(&name);
-                    if wk::take_approved(&url) {
-                        if let Some(dir) = path.parent().map(Path::to_path_buf) {
-                            *path = download::unique_path(&dir, &name);
-                        }
-                        let _ = p3.send_event(UserEvent::DownloadStarted {
-                            url,
-                            path: path.clone(),
-                        });
-                        return true;
+            b.with_download_started_handler(move |url, path| {
+                // WebKit's suggested name goes through the same sanitizing as on Linux.
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let name = download::sanitize(&name);
+                if wk::take_approved(&url) {
+                    if let Some(dir) = path.parent().map(Path::to_path_buf) {
+                        *path = download::unique_path(&dir, &name);
                     }
-                    // No drive-by downloads: cancel, ask the user, retry on approval.
-                    let _ = p3.send_event(UserEvent::DownloadAsk {
-                        key: 0,
-                        tab: Some(id),
+                    let _ = p3.send_event(UserEvent::DownloadStarted {
                         url,
-                        name,
+                        path: path.clone(),
                     });
-                    false
-                })
-                .with_download_completed_handler(move |url, _, ok| {
-                    let _ = p4.send_event(UserEvent::DownloadDone { url, ok });
-                })
+                    return true;
+                }
+                // No drive-by downloads: cancel, ask the user, retry on approval.
+                let _ = p3.send_event(UserEvent::DownloadAsk {
+                    key: 0,
+                    tab: Some(id),
+                    url,
+                    name,
+                });
+                false
+            })
+            .with_download_completed_handler(move |url, _, ok| {
+                let _ = p4.send_event(UserEvent::DownloadDone { url, ok });
+            })
         };
         let view = wk::attach(b, rect, &self.window)?;
         wk::set_rules(&view, blocking);
         wk::watch(&view, id);
-        wk::add_isolated_script(&view, &PAGE_LISTEN_JS.replace("/*EVENT*/''", &js(&self.pad_event)));
+        wk::add_isolated_script(
+            &view,
+            &PAGE_LISTEN_JS.replace("/*EVENT*/''", &js(&self.pad_event)),
+        );
         wk::add_isolated_script(&view, CLARITY_JS);
         let label = settings::tr(&self.lang.borrow(), "pw_badge", &[]);
         wk::add_isolated_script(&view, &AUTOFILL_JS.replace("/*LABEL*/''", &js(&label)));
@@ -408,8 +463,16 @@ impl TabCtx {
         let html = wk::ui_html(html);
         // Caption buttons start in the window's current state (later: `setMax` on resize).
         #[cfg(target_os = "windows")]
-        let html = if self.window.is_maximized() { html.replacen("class=\"windows\"", "class=\"windows maximized\"", 1) } else { html };
-        let b = if base.is_none() { wk::ui_builder().with_html(html.clone()) } else { wk::ui_builder() };
+        let html = if self.window.is_maximized() {
+            html.replacen("class=\"windows\"", "class=\"windows maximized\"", 1)
+        } else {
+            html
+        };
+        let b = if base.is_none() {
+            wk::ui_builder().with_html(html.clone())
+        } else {
+            wk::ui_builder()
+        };
         let b = b
             .with_background_color(bg_of(&self.window))
             .with_focused(true)
@@ -467,7 +530,9 @@ impl Container {
         if s == "default" {
             return Some(Self::Default);
         }
-        Self::ALL.into_iter().find(|c| !c.key().is_empty() && c.key() == s)
+        Self::ALL
+            .into_iter()
+            .find(|c| !c.key().is_empty() && c.key() == s)
     }
 }
 
@@ -488,7 +553,9 @@ fn site_key(host: &str) -> Option<String> {
     let host = host.trim().to_ascii_lowercase();
     let host = host.trim_start_matches("www.");
     let ok = (host.contains('.') || host == "localhost")
-        && host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'));
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'));
     ok.then(|| host.to_string())
 }
 
@@ -547,6 +614,21 @@ struct Tab {
     clarity: Option<bool>,
     /// Cookie/storage jar of the tab (`Container::Default` = the vault-backed one).
     container: Container,
+    /// Showing a remote surface (Eco page or RBI stream); `internal` is set with it.
+    remote: bool,
+    /// The view holds a live RBI surface of this tab (cleared with the view).
+    rbi_live: bool,
+    /// Session of that surface; events of any other one are stale.
+    rbi_session: u64,
+    /// Address last asked of the node; a failed one is what the error page retries.
+    remote_target: String,
+    /// Latest Eco request; an older answer is dropped.
+    reader_seq: u32,
+    /// Eco history: a surface document has no engine history to walk.
+    reader_back: Vec<String>,
+    reader_forward: Vec<String>,
+    /// The Eco request in flight came from Back / Forward: its stacks are already moved.
+    reader_walk: bool,
 }
 
 /// Every way a tab disappears (close, session lock, app exit) releases its view the same way.
@@ -579,11 +661,20 @@ impl Tab {
             video: false,
             clarity: None,
             container: Container::Default,
+            remote: false,
+            rbi_live: false,
+            rbi_session: 0,
+            remote_target: String::new(),
+            reader_seq: 0,
+            reader_back: Vec::new(),
+            reader_forward: Vec::new(),
+            reader_walk: false,
         }
     }
 
     /// Frees the page (unload/close/lock); stops its reporting and releases the view.
     fn drop_view(&mut self) {
+        self.rbi_live = false;
         if let Some(v) = self.view.take() {
             wk::forget(&v);
         }
@@ -656,6 +747,15 @@ struct Session {
     net: ProxyMode,
     /// A route change in progress (`App::set_proxy_mode`).
     net_phase: Option<NetPhase>,
+    /// Connection to the vault's node; made when a remote mode is first used.
+    remote: Option<Remote>,
+    remote_mode: RemoteMode,
+    /// "off" | "connecting" | "on" | "error".
+    remote_status: &'static str,
+    /// Route to return to when Secure Tunnel is switched off.
+    net_before_tunnel: Option<ProxyMode>,
+    /// Shared with the tabs' navigation handlers; back to direct when the session ends.
+    remote_gate: Rc<Cell<RemoteMode>>,
 }
 
 /// Proxy change: the old store's cookies are being exported, then imported into the new one.
@@ -669,6 +769,7 @@ enum NetPhase {
 /// login outlives it.
 impl Drop for Session {
     fn drop(&mut self) {
+        self.remote_gate.set(RemoteMode::Direct);
         let _ = wk::set_proxy(&ProxyMode::Direct);
     }
 }
@@ -710,7 +811,11 @@ impl Session {
         let Some(v) = &t.view else { return };
         if t.internal && t.url == GAMEPAD_URL {
             let list = json!(pads);
-            return wk::eval_isolated(v, &format!("window.__crowSys && window.__crowSys({list})"), |_| {});
+            return wk::eval_isolated(
+                v,
+                &format!("window.__crowSys && window.__crowSys({list})"),
+                |_| {},
+            );
         }
         if !t.url.starts_with("http") {
             return;
@@ -726,7 +831,10 @@ impl Session {
         if c == Container::Default {
             return self.store.clone();
         }
-        self.containers.entry(c).or_insert_with(wk::new_container_store).clone()
+        self.containers
+            .entry(c)
+            .or_insert_with(wk::new_container_store)
+            .clone()
     }
 
     /// Containers without tabs lose their store (and every cookie and cache in it).
@@ -866,6 +974,12 @@ impl Session {
             "adblock": cfg.adblock,
             "host": if url.starts_with("http") { host_of(url) } else { String::new() },
             "siteAllowed": cfg.allowed(&host_of(url)),
+            "remote": {
+                "mode": self.remote_mode.key(),
+                "status": self.remote_status,
+                "configured": self.data.remote.is_some(),
+                "busy": self.net_phase.is_some(),
+            },
             "ask": self.asks.first().map(|a| json!({
                 "id": a.id, "name": a.name, "url": a.url, "more": self.asks.len() - 1, "risk": a.risk,
             })),
@@ -922,7 +1036,12 @@ impl Session {
         let lang = cfg.language.as_str();
         let tr = |k: &str| html_escape(&settings::tr(lang, k, &[]));
         let mut o = String::new();
-        let _ = write!(o, "<section><h2>{} ({})</h2>", tr("pw_saved"), self.data.logins.len());
+        let _ = write!(
+            o,
+            "<section><h2>{} ({})</h2>",
+            tr("pw_saved"),
+            self.data.logins.len()
+        );
         if self.data.logins.is_empty() {
             let _ = write!(o, r#"<p class="note">{}</p>"#, tr("pw_none"));
         } else {
@@ -930,11 +1049,21 @@ impl Session {
             logins.sort_unstable_by(|a, b| (&a.host, &a.username).cmp(&(&b.host, &b.username)));
             o.push_str("<table>");
             for l in logins {
-                let _ = write!(o, r#"<tr><td>{}</td><td>{}</td><td class="n">••••••••</td></tr>"#, html_escape(&l.host), html_escape(&l.username));
+                let _ = write!(
+                    o,
+                    r#"<tr><td>{}</td><td>{}</td><td class="n">••••••••</td></tr>"#,
+                    html_escape(&l.host),
+                    html_escape(&l.username)
+                );
             }
             o.push_str("</table>");
         }
-        let _ = write!(o, r#"</section><section><h2>{}</h2><p class="note">{}</p></section>"#, tr("pw_passkeys"), tr("pw_passkeys_note"));
+        let _ = write!(
+            o,
+            r#"</section><section><h2>{}</h2><p class="note">{}</p></section>"#,
+            tr("pw_passkeys"),
+            tr("pw_passkeys_note")
+        );
         let _ = write!(
             o,
             "<section><h2>{}</h2><table><tr><td>{}</td><td>{}</td></tr><tr><td>Proton Pass</td><td>{}</td></tr></table></section>",
@@ -950,7 +1079,8 @@ impl Session {
     fn login_host(&self) -> Option<String> {
         let t = self.cur()?;
         let host = host_of(&t.url);
-        (!t.internal && !t.tls_error && t.url.starts_with("https://") && !host.is_empty()).then_some(host)
+        (!t.internal && !t.tls_error && t.url.starts_with("https://") && !host.is_empty())
+            .then_some(host)
     }
 
     /// What the login popover may know about `host`: usernames, never passwords.
@@ -971,7 +1101,11 @@ impl Session {
         if let Some(v) = &self.site {
             let _ = v.evaluate_script(&format!("update({})", self.logins_json(host)));
         }
-        for t in self.tabs.iter().filter(|t| t.internal && t.url == PASSWORDS_URL) {
+        for t in self
+            .tabs
+            .iter()
+            .filter(|t| t.internal && t.url == PASSWORDS_URL)
+        {
             if let (Some(v), Some((address, html))) = (&t.view, self.internal(&t.url, cfg)) {
                 wk::load_internal(v, &html, internal_base(address));
             }
@@ -992,43 +1126,87 @@ impl Session {
             (u64::from(self.stats.pad_pages), "sh_pad_pages"),
             (self.stats.webgl, "sh_webgl"),
         ] {
-            let _ = write!(o, r#"<div class="tile"><div class="num">{n}</div><div class="lbl">{}</div></div>"#, tr(k, &[]));
+            let _ = write!(
+                o,
+                r#"<div class="tile"><div class="num">{n}</div><div class="lbl">{}</div></div>"#,
+                tr(k, &[])
+            );
         }
         let _ = write!(o, "</div><section><h2>{}</h2>", tr("sh_domains", &[]));
         let mut domains: Vec<_> = self.stats.domains.iter().collect();
         domains.sort_unstable_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
         if !wk::BLOCK_STATS {
-            let _ = write!(o, r#"<p class="note">{}</p>"#, tr("shield_unavailable", &[]));
+            let _ = write!(
+                o,
+                r#"<p class="note">{}</p>"#,
+                tr("shield_unavailable", &[])
+            );
         } else if domains.is_empty() {
             let _ = write!(o, r#"<p class="note">{}</p>"#, tr("sh_domains_none", &[]));
         } else {
             o.push_str("<table>");
             for (host, n) in domains.into_iter().take(40) {
-                let _ = write!(o, r#"<tr><td>{}</td><td class="n">{n}</td></tr>"#, html_escape(host));
+                let _ = write!(
+                    o,
+                    r#"<tr><td>{}</td><td class="n">{n}</td></tr>"#,
+                    html_escape(host)
+                );
             }
             o.push_str("</table>");
         }
         let on_off = |b: bool| tr(if b { "switch_on" } else { "switch_off" }, &[]);
-        let _ = write!(o, "</section><section><h2>{}</h2><table>", tr("sh_protections", &[]));
+        let _ = write!(
+            o,
+            "</section><section><h2>{}</h2><table>",
+            tr("sh_protections", &[])
+        );
         for (label, value) in [
             (tr("adblock_full", &[""]), on_off(cfg.adblock)),
-            (tr("gamepad_setting", &[]), format!("{} · {}", on_off(cfg.gamepad_enabled), html_escape(adblock::PAD_ID))),
+            (
+                tr("gamepad_setting", &[]),
+                format!(
+                    "{} · {}",
+                    on_off(cfg.gamepad_enabled),
+                    html_escape(adblock::PAD_ID)
+                ),
+            ),
         ] {
             let _ = write!(o, "<tr><td>{label}</td><td>{value}</td></tr>");
         }
         o.push_str("</table></section>");
         let none = tr("sh_none", &[]);
         let _ = write!(o, "<section><h2>{}</h2><table>", tr("sh_sites", &[]));
-        for (k, list) in [("sh_sites_adblock", &cfg.adblock_allow), ("sh_sites_gamepad", &cfg.gamepad_sites), ("sh_sites_webgl", &cfg.webgl_off)] {
-            let v = if list.is_empty() { none.clone() } else { html_escape(&list.join(", ")) };
+        for (k, list) in [
+            ("sh_sites_adblock", &cfg.adblock_allow),
+            ("sh_sites_gamepad", &cfg.gamepad_sites),
+            ("sh_sites_webgl", &cfg.webgl_off),
+        ] {
+            let v = if list.is_empty() {
+                none.clone()
+            } else {
+                html_escape(&list.join(", "))
+            };
             let _ = write!(o, "<tr><td>{}</td><td>{v}</td></tr>", tr(k, &[]));
         }
-        let _ = write!(o, "</table></section><section><h2>{}</h2><table>", tr("sh_containers", &[]));
+        let _ = write!(
+            o,
+            "</table></section><section><h2>{}</h2><table>",
+            tr("sh_containers", &[])
+        );
         for c in Container::ALL {
             let n = self.tabs.iter().filter(|t| t.container == c).count();
-            let _ = write!(o, r#"<tr><td><span class="dot {}"></span>{}</td><td class="n">{n}</td></tr>"#, c.key(), tr(c.label_key(), &[]));
+            let _ = write!(
+                o,
+                r#"<tr><td><span class="dot {}"></span>{}</td><td class="n">{n}</td></tr>"#,
+                c.key(),
+                tr(c.label_key(), &[])
+            );
         }
-        let _ = write!(o, r#"</table><p class="note">{}</p></section>"#, tr("sh_containers_note", &[]));
+        let _ = write!(
+            o,
+            r#"</table><p class="note">{}</p></section>"#,
+            tr("sh_containers_note", &[])
+        );
         o
     }
 
@@ -1059,8 +1237,23 @@ impl Session {
             "proxy": self.net.state(),
             "proxyBusy": self.net_phase.is_some(),
             "proxyDirectIsSystem": wk::DIRECT_IS_SYSTEM,
+            "remote": self.remote_state(),
         })
         .to_string()
+    }
+
+    /// Panel view of the node; the token itself never goes back to the UI.
+    fn remote_state(&self) -> serde_json::Value {
+        self.data.remote.as_ref().map_or_else(
+            || json!({}),
+            |r| json!({ "host": r.host, "port": r.port, "hasToken": true }),
+        )
+    }
+
+    fn panel_eval(&self, script: &str) {
+        if let Some(p) = &self.panel {
+            let _ = p.evaluate_script(script);
+        }
     }
 
     fn refresh_panel(&self, cfg: &Settings) {
@@ -1151,6 +1344,7 @@ impl App {
             lang: Rc::new(RefCell::new(settings::stored_language())),
             page_js: Rc::new(RefCell::new(String::new())),
             pad_event: pad_event_name().into(),
+            remote_gate: Rc::new(Cell::new(RemoteMode::Direct)),
         };
         let mut app = Self {
             ctx,
@@ -1172,7 +1366,11 @@ impl App {
             pad_target: None,
             focused: true,
         };
-        profile::migrate_legacy(&settings::tr(&settings::stored_language(), "profile_personal", &[]));
+        profile::migrate_legacy(&settings::tr(
+            &settings::stored_language(),
+            "profile_personal",
+            &[],
+        ));
         app.show_lock();
         app
     }
@@ -1181,12 +1379,19 @@ impl App {
     /// and ids reach it.
     fn show_lock(&mut self) {
         self.close_lock();
-        let profiles: Vec<_> =
-            profile::list().iter().map(|p| json!({ "id": p.id, "name": p.name, "locked": p.deletion_locked() })).collect();
+        let profiles: Vec<_> = profile::list()
+            .iter()
+            .map(|p| json!({ "id": p.id, "name": p.name, "locked": p.deletion_locked() }))
+            .collect();
         let html = include_str!("lock.html")
-            .replace("/*PROFILES*/", &json!(profiles).to_string().replace("</", "<\\/"))
+            .replace(
+                "/*PROFILES*/",
+                &json!(profiles).to_string().replace("</", "<\\/"),
+            )
             .replace("/*LOGO*/", include_str!("../assets/logo.svg"));
-        self.lock = self.ctx.ui_view_at(&html, full_rect(&self.ctx.window), Some(LOCK_BASE));
+        self.lock = self
+            .ctx
+            .ui_view_at(&html, full_rect(&self.ctx.window), Some(LOCK_BASE));
     }
 
     fn close_lock(&mut self) {
@@ -1205,12 +1410,23 @@ impl App {
 
     pub fn wake(&self) -> Instant {
         let fav = self.s.as_ref().and_then(|s| s.fav_due);
-        let page = self.s.as_ref().map(|s| s.page_due.unwrap_or_else(|| Instant::now() + PAGE_POLL));
+        let page = self
+            .s
+            .as_ref()
+            .map(|s| s.page_due.unwrap_or_else(|| Instant::now() + PAGE_POLL));
         let auth = self.auth_due.as_ref().map(|(_, d)| *d);
-        [self.quit_at, self.lock_at, auth, self.restore_by, self.net_by, fav, page]
-            .into_iter()
-            .flatten()
-            .fold(self.next_tick, Instant::min)
+        [
+            self.quit_at,
+            self.lock_at,
+            auth,
+            self.restore_by,
+            self.net_by,
+            fav,
+            page,
+        ]
+        .into_iter()
+        .flatten()
+        .fold(self.next_tick, Instant::min)
     }
 
     pub fn resize(&self) {
@@ -1219,7 +1435,10 @@ impl App {
             wk::set_bounds(l, full_rect(w));
         }
         if let Some(s) = &self.s {
-            let full = s.video_fullscreen.and_then(|id| s.tab_idx(id)).and_then(|i| s.tabs[i].view.as_ref());
+            let full = s
+                .video_fullscreen
+                .and_then(|id| s.tab_idx(id))
+                .and_then(|i| s.tabs[i].view.as_ref());
             let _ = s.toolbar.set_visible(full.is_none());
             wk::set_bounds(&s.toolbar, toolbar_rect(w, s.top()));
             let c = content_rect(w, s.top());
@@ -1251,7 +1470,12 @@ impl App {
             let _ = v.evaluate_script(&js);
         }
         // Back from the macOS confirmation dialog / system settings: refresh the status.
-        if on && self.s.as_ref().is_some_and(|s| s.panel.is_some() && s.panel_section == "settings") {
+        if on
+            && self
+                .s
+                .as_ref()
+                .is_some_and(|s| s.panel.is_some() && s.panel_section == "settings")
+        {
             default_browser::query(self.ctx.proxy.clone(), false);
         }
     }
@@ -1271,6 +1495,19 @@ impl App {
             UserEvent::Title { tab, title } => self.title(tab, title),
             UserEvent::NewTab(url) => self.open_tab(url),
             UserEvent::OpenUrls(urls) => self.open_external(urls),
+            UserEvent::RemoteNav { tab, url } => self.remote_nav(tab, url),
+            UserEvent::RemoteReader { tab, seq, result } => self.remote_reader(tab, seq, result),
+            UserEvent::RemoteRbi {
+                tab,
+                session,
+                event,
+            } => self.remote_rbi(tab, session, event),
+            UserEvent::RemoteClosed {
+                tab,
+                session,
+                error,
+            } => self.remote_closed(tab, session, error),
+            UserEvent::RemotePing(result) => self.remote_ping(result),
             UserEvent::DefaultBrowser { status, note } => {
                 let Some(s) = self.s.as_mut() else { return };
                 s.default_browser = Some(status);
@@ -1381,18 +1618,26 @@ impl App {
             }
             UserEvent::Fullscreen { tab, on } => {
                 let Some(s) = self.s.as_mut() else { return };
-                s.video_fullscreen = if on { Some(tab) } else { s.video_fullscreen.filter(|t| *t != tab) };
+                s.video_fullscreen = if on {
+                    Some(tab)
+                } else {
+                    s.video_fullscreen.filter(|t| *t != tab)
+                };
                 if on {
                     s.site = None;
                     // Fullscreen hides all Crow chrome: name the site so it cannot pose as the UI.
                     if let Some(i) = s.tab_idx(tab) {
                         let host = host_of(&s.tabs[i].url);
-                        s.toast(&format!("{host} prešiel do režimu celej obrazovky (ESC pre návrat)"));
+                        s.toast(&format!(
+                            "{host} prešiel do režimu celej obrazovky (ESC pre návrat)"
+                        ));
                     }
                 }
                 // WebView2 only reports it: the window goes fullscreen here.
                 #[cfg(target_os = "windows")]
-                self.ctx.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
+                self.ctx
+                    .window
+                    .set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
                 // WebKit fullscreens the window itself; this makes the view fill it.
                 self.resize();
             }
@@ -1401,7 +1646,8 @@ impl App {
                     if errors.is_empty() {
                         s.note("adblock_lists_updated", &[]);
                     } else {
-                        let msg: Vec<_> = errors.iter().map(|&(k, name)| s.tr(k, &[name])).collect();
+                        let msg: Vec<_> =
+                            errors.iter().map(|&(k, name)| s.tr(k, &[name])).collect();
                         s.toast(&msg.join(", "));
                     }
                 }
@@ -1429,7 +1675,9 @@ impl App {
             UserEvent::ProxySwitch { cookies, token } => self.proxy_switch(&cookies, token),
             UserEvent::ProxyReady(token) => self.proxy_ready(token),
             UserEvent::ProxyTest(r) => {
-                let Some(p) = self.s.as_ref().and_then(|s| s.panel.as_ref()) else { return };
+                let Some(p) = self.s.as_ref().and_then(|s| s.panel.as_ref()) else {
+                    return;
+                };
                 let r = match r {
                     Ok((ip, tor)) => json!({ "ok": true, "ip": ip, "tor": tor }),
                     Err(key) => json!({ "ok": false, "err": key }),
@@ -1483,7 +1731,10 @@ impl App {
             self.restored(false);
         }
         if self.net_by.is_some_and(|d| now >= d) {
-            let (phase, token) = self.s.as_ref().map_or((None, 0), |s| (s.net_phase, s.token));
+            let (phase, token) = self
+                .s
+                .as_ref()
+                .map_or((None, 0), |s| (s.net_phase, s.token));
             eprintln!("proxy change: cookie transfer timed out; continuing without waiting");
             match phase {
                 Some(NetPhase::Export) => self.proxy_switch(&[], token),
@@ -1572,16 +1823,25 @@ impl App {
     /// Bridge state to the target tab: the page shim (main world, per-session event name that
     /// pages cannot know) or crow:gamepad's isolated-world driver.
     fn push_pads(&self, state: &str) {
-        let Some(t) = self.s.as_ref().and_then(Session::cur) else { return };
+        let Some(t) = self.s.as_ref().and_then(Session::cur) else {
+            return;
+        };
         let Some(v) = &t.view else { return };
         if self.pad_target.as_ref().is_none_or(|(id, ..)| *id != t.id) {
             return;
         }
         if t.internal {
-            wk::eval_isolated(v, &format!("window.__crowPads && window.__crowPads({state})"), |_| {});
+            wk::eval_isolated(
+                v,
+                &format!("window.__crowPads && window.__crowPads({state})"),
+                |_| {},
+            );
         } else {
             let name = js(&format!("{}p", self.ctx.pad_event));
-            let _ = v.evaluate_script(&format!("document.dispatchEvent(new CustomEvent({name}, {{ detail: {} }}))", js(state)));
+            let _ = v.evaluate_script(&format!(
+                "document.dispatchEvent(new CustomEvent({name}, {{ detail: {} }}))",
+                js(state)
+            ));
         }
     }
 
@@ -1628,7 +1888,9 @@ impl App {
                     Some(Fullscreen::Borderless(None))
                 });
             }
-            "unlock" | "unlock-hidden" | "create" | "reset-ask" | "reset" if self.s.is_none() => self.lock_cmd(name, arg),
+            "unlock" | "unlock-hidden" | "create" | "reset-ask" | "reset" if self.s.is_none() => {
+                self.lock_cmd(name, arg);
+            }
             _ if self.s.as_ref().is_some_and(|s| s.ready) => self.session_cmd(name, arg),
             _ => {}
         }
@@ -1637,8 +1899,12 @@ impl App {
     fn lock_cmd(&mut self, name: &str, arg: &str) {
         match name {
             "unlock" => {
-                let Some((id, password)) = arg.split_once(':') else { return };
-                let Some(p) = profile::find(id) else { return self.lock_fail("profile_missing") };
+                let Some((id, password)) = arg.split_once(':') else {
+                    return;
+                };
+                let Some(p) = profile::find(id) else {
+                    return self.lock_fail("profile_missing");
+                };
                 match p.unlock(password) {
                     Ok((vault, data)) => self.start(p, vault, data),
                     Err(d) => self.lock_denied(&d),
@@ -1650,7 +1916,9 @@ impl App {
                     name: String,
                     password: String,
                 }
-                let Ok(r) = serde_json::from_str::<Req>(arg) else { return };
+                let Ok(r) = serde_json::from_str::<Req>(arg) else {
+                    return;
+                };
                 match profile::unlock_hidden(&r.name, &r.password) {
                     Ok((p, vault, data)) => self.start(p, vault, data),
                     Err(d) => self.lock_denied(&d),
@@ -1664,7 +1932,9 @@ impl App {
                     #[serde(default)]
                     hidden: bool,
                 }
-                let Ok(r) = serde_json::from_str::<Req>(arg) else { return };
+                let Ok(r) = serde_json::from_str::<Req>(arg) else {
+                    return;
+                };
                 if r.password.chars().count() < 8 {
                     return self.lock_fail("pw_too_short");
                 }
@@ -1673,7 +1943,10 @@ impl App {
                     Err(key) => return self.lock_fail(key),
                 };
                 let vault = Vault::create(&p.dir, &r.password);
-                let data = VaultData { label: p.name.clone(), ..VaultData::default() };
+                let data = VaultData {
+                    label: p.name.clone(),
+                    ..VaultData::default()
+                };
                 if vault.save(&data).is_ok() {
                     self.start(p, vault, data);
                 } else {
@@ -1683,7 +1956,9 @@ impl App {
             }
             // "Forgot the password": this profile only, unless deletion is switched off for it.
             "reset-ask" => {
-                let Some(p) = profile::find(arg).filter(|p| !p.deletion_locked()) else { return };
+                let Some(p) = profile::find(arg).filter(|p| !p.deletion_locked()) else {
+                    return;
+                };
                 let code = profile::confirmation_code();
                 if let Some(l) = &self.lock {
                     let _ = l.evaluate_script(&format!("askReset({})", js(&code)));
@@ -1698,9 +1973,15 @@ impl App {
                     name: String,
                     code: String,
                 }
-                let Ok(r) = serde_json::from_str::<Req>(arg) else { return };
-                let asked = self.reset_ask.take().is_some_and(|(id, code, by)| id == r.id && code == r.code && Instant::now() < by);
-                match profile::find(&r.id).filter(|p| asked && !p.deletion_locked() && p.name == r.name) {
+                let Ok(r) = serde_json::from_str::<Req>(arg) else {
+                    return;
+                };
+                let asked = self.reset_ask.take().is_some_and(|(id, code, by)| {
+                    id == r.id && code == r.code && Instant::now() < by
+                });
+                match profile::find(&r.id)
+                    .filter(|p| asked && !p.deletion_locked() && p.name == r.name)
+                {
                     Some(p) => {
                         p.delete();
                         self.show_lock();
@@ -1734,11 +2015,22 @@ impl App {
         self.cfg = data
             .settings
             .take()
-            .or_else(|| if profile.is_legacy() { Settings::take_legacy() } else { None })
+            .or_else(|| {
+                if profile.is_legacy() {
+                    Settings::take_legacy()
+                } else {
+                    None
+                }
+            })
             .unwrap_or_default();
         self.ctx.adblock.set(self.cfg.adblock);
-        *self.ctx.page_js.borrow_mut() =
-            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event, false);
+        *self.ctx.page_js.borrow_mut() = adblock::defuser(
+            self.cfg.gamepad_enabled,
+            &self.cfg.gamepad_sites,
+            &self.cfg.webgl_off,
+            &self.ctx.pad_event,
+            false,
+        );
         // The vault is authoritative; the plain copy only serves the next lock screen.
         settings::store_language(&self.cfg.language);
         self.ctx.lang.borrow_mut().clone_from(&self.cfg.language);
@@ -1798,6 +2090,11 @@ impl App {
             default_browser: None,
             net: ProxyMode::Direct,
             net_phase: None,
+            remote: None,
+            remote_mode: RemoteMode::Direct,
+            remote_status: "off",
+            net_before_tunnel: None,
+            remote_gate: self.ctx.remote_gate.clone(),
         });
     }
 
@@ -1854,29 +2151,45 @@ impl App {
             }
         }
         // Switching away from a fullscreen video ends it (WebKit then restores the window).
-        if let Some(v) = s.video_fullscreen.take().and_then(|id| s.tab_idx(id)).and_then(|i| s.tabs[i].view.as_ref()) {
-            let _ = v.evaluate_script("document.webkitExitFullscreen && document.webkitExitFullscreen()");
+        if let Some(v) = s
+            .video_fullscreen
+            .take()
+            .and_then(|id| s.tab_idx(id))
+            .and_then(|i| s.tabs[i].view.as_ref())
+        {
+            let _ = v.evaluate_script(
+                "document.webkitExitFullscreen && document.webkitExitFullscreen()",
+            );
         }
         if s.active != idx {
             s.site = None; // describes the tab being left
         }
         if s.active != idx
-            && let Some(t) = s.tabs.get_mut(s.active) {
-                t.hidden_since = Instant::now();
-                if let Some(v) = &t.view {
-                    let _ = v.set_visible(false);
-                }
+            && let Some(t) = s.tabs.get_mut(s.active)
+        {
+            t.hidden_since = Instant::now();
+            if let Some(v) = &t.view {
+                let _ = v.set_visible(false);
             }
+        }
         s.active = idx;
         let rect = content_rect(&self.ctx.window, s.top());
         // Built before borrowing the tab: crow:shields renders session data.
-        let page = if s.tabs[idx].view.is_none() { s.internal(&s.tabs[idx].url, &self.cfg) } else { None };
+        let page = if s.tabs[idx].view.is_none() {
+            s.internal(&s.tabs[idx].url, &self.cfg)
+        } else {
+            None
+        };
         let store = s.store_for(s.tabs[idx].container);
         let tab = &mut s.tabs[idx];
         if tab.view.is_none() {
             let on = blocks(&self.cfg, &tab.url);
             let config = wk::config(&store, on);
-            let url = if page.is_some() { None } else { Some(tab.url.as_str()) };
+            let url = if page.is_some() {
+                None
+            } else {
+                Some(tab.url.as_str())
+            };
             tab.view = self.ctx.build(tab.id, url, config, rect, on).ok();
             tab.blocking = Some(on);
             if let (Some((address, html)), Some(v)) = (page, &tab.view) {
@@ -1914,8 +2227,13 @@ impl App {
     /// visible one at once unless a panel is open, then when it closes).
     fn shim_changed(&mut self, now: bool) {
         let proxied = self.s.as_ref().is_some_and(|s| s.net.proxied());
-        *self.ctx.page_js.borrow_mut() =
-            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event, proxied);
+        *self.ctx.page_js.borrow_mut() = adblock::defuser(
+            self.cfg.gamepad_enabled,
+            &self.cfg.gamepad_sites,
+            &self.cfg.webgl_off,
+            &self.ctx.pad_event,
+            proxied,
+        );
         let Some(s) = self.s.as_mut() else { return };
         s.views_stale = true;
         let active = s.active;
@@ -1967,7 +2285,9 @@ impl App {
         let _ = view.zoom(s.zoom);
         let mut tab = Tab::new(id, String::new(), Some(view));
         // The popup already lives in the opener's store (WebKit copies its configuration).
-        tab.container = s.tab_idx(opener).map_or(Container::Default, |i| s.tabs[i].container);
+        tab.container = s
+            .tab_idx(opener)
+            .map_or(Container::Default, |i| s.tabs[i].container);
         apply_rules(&self.cfg, &mut tab, "");
         let at = (s.active + 1).min(s.tabs.len());
         s.tabs.insert(at, tab);
@@ -2033,6 +2353,11 @@ impl App {
                 None => t.url = url,
             }
         }
+        // The view is being rebuilt (route change behind a panel): this load cannot wait for it.
+        if s.view().is_none() {
+            let active = s.active;
+            return self.activate(active);
+        }
         s.sync(&self.cfg);
     }
 
@@ -2042,7 +2367,10 @@ impl App {
         let t = &mut s.tabs[i];
         // The interstitial / built-in / crash page itself (about:blank, built-in pages under
         // `INTERNAL_BASE`) keeps the shown URL and state.
-        let local = url.is_empty() || url == "about:blank" || url.starts_with(INTERNAL_BASE);
+        let local = url.is_empty()
+            || url == "about:blank"
+            || url.starts_with(INTERNAL_BASE)
+            || is_surface_address(&url);
         let interstitial = (t.tls_error || t.internal || t.crashed || t.net_error) && local;
         // Allowlist follows the page being loaded: switched before its subresources are requested.
         if !url.is_empty() && !interstitial {
@@ -2133,6 +2461,10 @@ impl App {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(id) else { return };
         let t = &mut s.tabs[i];
+        // A remote surface's own document does not name the tab: the node's page does.
+        if t.remote {
+            return;
+        }
         t.title = title;
         if let Some(e) = s.data.history.last_mut().filter(|e| e.url == t.url) {
             e.title.clone_from(&t.title);
@@ -2205,7 +2537,8 @@ impl App {
         wk::clear_store(&s.store, move || {
             let _ = p.send_event(UserEvent::StoreWiped);
         });
-        s.tabs.push(Tab::new(self.ctx.next(), "about:blank".into(), None));
+        s.tabs
+            .push(Tab::new(self.ctx.next(), "about:blank".into(), None));
         s.active = 0;
         s.dirty = true;
         self.set_find(false);
@@ -2251,7 +2584,11 @@ impl App {
 
     /// Gamepad popover under the chip, for the active tab: the controllers Crow reads (real names).
     fn gamepad_popover(&mut self) {
-        let pads = self.pads.as_ref().map(gamepad::Bridge::pads).unwrap_or_default();
+        let pads = self
+            .pads
+            .as_ref()
+            .map(gamepad::Bridge::pads)
+            .unwrap_or_default();
         let Some(s) = self.s.as_mut() else { return };
         if s.site.is_some() {
             return;
@@ -2263,17 +2600,22 @@ impl App {
             .collect();
         let report = json!({ "pads": pads });
         let data = json!({ "host": host_of(url), "spoofed": adblock::PAD_ID, "report": report });
-        let html = include_str!("gamepadinfo.html").replace("/*DATA*/", &data.to_string().replace("</", "<\\/"));
+        let html = include_str!("gamepadinfo.html")
+            .replace("/*DATA*/", &data.to_string().replace("</", "<\\/"));
         let h = if s.site_h > 0.0 { s.site_h } else { 280.0 };
         s.shield_open = false;
-        s.site = self.ctx.ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
+        s.site = self
+            .ctx
+            .ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
     }
 
     /// `PAGE_READ` of a tab: gamepad and video chips, refused WebGL contexts (crow:shields).
     fn page_state(&mut self, tab: u32, data: &str) {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(tab) else { return };
-        let Ok([pad, gl, video, fill]) = serde_json::from_str::<[u32; 4]>(data) else { return };
+        let Ok([pad, gl, video, fill]) = serde_json::from_str::<[u32; 4]>(data) else {
+            return;
+        };
         let t = &mut s.tabs[i];
         let mut changed = false;
         if pad == 1 && !t.gamepad {
@@ -2302,13 +2644,17 @@ impl App {
     /// (`site_rect` clamps), under the toolbar's password button.
     fn fill_popover(&mut self) {
         let Some(s) = self.s.as_mut() else { return };
-        let Some(host) = s.login_host() else { return s.note("pw_https_only", &[]) };
+        let Some(host) = s.login_host() else {
+            return s.note("pw_https_only", &[]);
+        };
         let data = s.logins_json(&host).to_string().replace("</", "<\\/");
         let html = include_str!("fill.html").replace("/*DATA*/", &data);
         let h = if s.site_h > 0.0 { s.site_h } else { 240.0 };
         s.shield_open = false;
         s.site_x = f64::MAX;
-        s.site = self.ctx.ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
+        s.site = self
+            .ctx
+            .ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
     }
 
     /// The page could not be reached: Crow's error page with a retry link and the offline game,
@@ -2325,7 +2671,11 @@ impl App {
             t.url = url;
         }
         if let Some(v) = &t.view {
-            wk::load_internal(v, &game_page(&s.lang.borrow(), Some((reason, &t.url))), INTERNAL_BASE);
+            wk::load_internal(
+                v,
+                &game_page(&s.lang.borrow(), Some((reason, &t.url))),
+                INTERNAL_BASE,
+            );
         }
         if i == s.active {
             s.site = None;
@@ -2347,13 +2697,39 @@ impl App {
                 let _ = p.evaluate_script(&js);
             }
         };
-        let mode = match ProxyMode::from_request(&s.net, arg).and_then(|m| wk::set_proxy(&m).map(|()| m)) {
+        if s.remote_mode == RemoteMode::Tunnel {
+            return panel(
+                s,
+                format!(
+                    "window.proxyResult && proxyResult(false, {})",
+                    js("remote_tunnel_active")
+                ),
+            );
+        }
+        let mode = match ProxyMode::from_request(&s.net, arg)
+            .and_then(|m| wk::set_proxy(&m).map(|()| m))
+        {
             Ok(m) => m,
-            Err(key) => return panel(s, format!("window.proxyResult && proxyResult(false, {})", js(key))),
+            Err(key) => {
+                return panel(
+                    s,
+                    format!("window.proxyResult && proxyResult(false, {})", js(key)),
+                );
+            }
         };
         if mode == s.net {
-            return panel(s, format!("window.proxyApplied && proxyApplied({})", s.net.state()));
+            return panel(
+                s,
+                format!("window.proxyApplied && proxyApplied({})", s.net.state()),
+            );
         }
+        self.begin_route(mode);
+    }
+
+    /// Replaces the route: the old store's cookies are exported, then the new store takes over
+    /// (`proxy_switch`, `proxy_ready`). `mode` was accepted by `wk::set_proxy`.
+    fn begin_route(&mut self, mode: ProxyMode) {
+        let Some(s) = self.s.as_mut() else { return };
         s.net = mode;
         s.net_phase = Some(NetPhase::Export);
         self.net_by = Some(Instant::now() + RESTORE_TIMEOUT);
@@ -2366,7 +2742,11 @@ impl App {
     /// Old store's cookies are in: everything of the old route goes, the new store gets them.
     /// Container tabs keep their address but start a new, empty jar.
     fn proxy_switch(&mut self, cookies: &[CookieRec], token: u64) {
-        let Some(s) = self.s.as_mut().filter(|s| s.token == token && s.net_phase == Some(NetPhase::Export)) else {
+        let Some(s) = self
+            .s
+            .as_mut()
+            .filter(|s| s.token == token && s.net_phase == Some(NetPhase::Export))
+        else {
             return;
         };
         for t in &mut s.tabs {
@@ -2398,15 +2778,29 @@ impl App {
 
     /// New route ready (or the import timed out): tabs load again, the panel shows the state.
     fn proxy_ready(&mut self, token: u64) {
-        let Some(s) = self.s.as_mut().filter(|s| s.token == token && s.net_phase == Some(NetPhase::Import)) else {
+        let Some(s) = self
+            .s
+            .as_mut()
+            .filter(|s| s.token == token && s.net_phase == Some(NetPhase::Import))
+        else {
             return;
         };
         self.net_by = None;
         s.net_phase = None;
         if let Some(p) = &s.panel {
-            let _ = p.evaluate_script(&format!("window.proxyApplied && proxyApplied({})", s.net.state()));
+            let _ = p.evaluate_script(&format!(
+                "window.proxyApplied && proxyApplied({})",
+                s.net.state()
+            ));
         }
-        s.note(if s.net.proxied() { "proxy_applied_proxied" } else { "proxy_applied" }, &[]);
+        s.note(
+            if s.net.proxied() {
+                "proxy_applied_proxied"
+            } else {
+                "proxy_applied"
+            },
+            &[],
+        );
         // Behind the open panel the tab is rebuilt when the panel closes.
         if s.panel.is_some() {
             s.views_stale = true;
@@ -2414,6 +2808,464 @@ impl App {
         }
         let active = s.active;
         self.activate(active);
+    }
+
+    /// Connection to the vault's node, made on first use. False: no node, or no runtime.
+    fn ensure_remote(&mut self) -> bool {
+        let proxy = self.ctx.proxy.clone();
+        let Some(s) = self.s.as_mut() else {
+            return false;
+        };
+        if s.remote.is_none() {
+            s.remote = s.data.remote.as_ref().and_then(|r| Remote::new(r, proxy));
+        }
+        s.remote.is_some()
+    }
+
+    /// Switches where tab content runs. Hidden tabs are unloaded so that none keeps running on
+    /// the previous route; the active one reloads through its handler.
+    fn set_remote_mode(&mut self, mode: RemoteMode) {
+        let Some(s) = self.s.as_mut() else { return };
+        if mode == s.remote_mode || s.net_phase.is_some() {
+            return s.sync(&self.cfg);
+        }
+        if mode != RemoteMode::Direct && s.data.remote.is_none() {
+            s.note("remote_not_configured", &[]);
+            return s.sync(&self.cfg);
+        }
+        if mode != RemoteMode::Direct && !self.ensure_remote() {
+            let Some(s) = self.s.as_ref() else { return };
+            s.note("remote_err_start", &[]);
+            return s.sync(&self.cfg);
+        }
+        let Some(s) = self.s.as_mut() else { return };
+
+        // Tunnel off / on goes through the same store replacement as a proxy change.
+        let route = match (
+            s.remote_mode == RemoteMode::Tunnel,
+            mode == RemoteMode::Tunnel,
+        ) {
+            (true, false) => Some(s.net_before_tunnel.take().unwrap_or(ProxyMode::Direct)),
+            (false, true) => {
+                let Some(port) = s.remote.as_mut().and_then(Remote::tunnel_start) else {
+                    s.note("remote_err_start", &[]);
+                    return s.sync(&self.cfg);
+                };
+                Some(ProxyMode::Custom {
+                    protocol: ProxyProtocol::Socks5,
+                    host: "127.0.0.1".into(),
+                    port,
+                    auth: None,
+                })
+            }
+            _ => None,
+        };
+        if let Some(next) = &route
+            && let Err(key) = wk::set_proxy(next)
+        {
+            if let Some(r) = s.remote.as_mut().filter(|_| mode == RemoteMode::Tunnel) {
+                r.tunnel_stop();
+            }
+            s.note(key, &[]);
+            return s.sync(&self.cfg);
+        }
+        if mode == RemoteMode::Tunnel {
+            s.net_before_tunnel = Some(s.net.clone());
+        }
+        if s.remote_mode == RemoteMode::Tunnel
+            && let Some(r) = s.remote.as_mut()
+        {
+            r.tunnel_stop();
+        }
+
+        s.remote_mode = mode;
+        s.remote_gate.set(mode);
+        s.remote_status = match mode {
+            RemoteMode::Direct => "off",
+            _ => "connecting",
+        };
+        let active = s.active;
+        let ids: Vec<u32> = s.tabs.iter().filter(|t| t.rbi_live).map(|t| t.id).collect();
+        if let Some(r) = s.remote.as_mut() {
+            for id in ids {
+                r.rbi_close(id);
+            }
+        }
+        for (i, t) in s.tabs.iter_mut().enumerate() {
+            t.reader_seq += 1;
+            t.reader_back.clear();
+            t.reader_forward.clear();
+            t.reader_walk = false;
+            if t.remote {
+                t.remote = false;
+                t.internal = false;
+                t.tls = "";
+            }
+            t.rbi_live = false;
+            t.loading = false;
+            if i != active {
+                t.drop_view();
+            }
+        }
+        if mode != RemoteMode::Direct
+            && let Some(r) = &s.remote
+        {
+            r.ping();
+        }
+        match route {
+            Some(next) => self.begin_route(next),
+            None => self.reload_active(),
+        }
+        if let Some(s) = &self.s {
+            s.sync(&self.cfg);
+        }
+    }
+
+    /// Loads the active tab's address again on the current route.
+    fn reload_active(&mut self) {
+        let Some(s) = self.s.as_mut() else { return };
+        if let Some(t) = s.tabs.get(s.active).filter(|t| t.url.starts_with("http"))
+            && let Some(v) = &t.view
+        {
+            let _ = v.load_url(&t.url);
+        }
+    }
+
+    fn remote_save(&mut self, arg: &str) {
+        #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+        struct Req {
+            host: String,
+            port: u32,
+            #[serde(default)]
+            token: String,
+            #[serde(default)]
+            keep_token: bool,
+        }
+        let Some(s) = self.s.as_mut() else { return };
+        let fail = |s: &Session| {
+            s.panel_eval(&format!(
+                "window.remoteResult && remoteResult(false, {})",
+                js("remote_err_invalid")
+            ));
+        };
+        let Ok(req) = serde_json::from_str::<Req>(arg) else {
+            return fail(s);
+        };
+        let host = req
+            .host
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase();
+        let Some(port) = u16::try_from(req.port)
+            .ok()
+            .filter(|p| *p > 0 && proxy::valid_host(&host))
+        else {
+            return fail(s);
+        };
+        let token = match s.data.remote.as_ref() {
+            Some(old) if req.keep_token && req.token.is_empty() => old.token.clone(),
+            _ => req.token.clone(),
+        };
+        if token.chars().count() < MIN_TOKEN {
+            return fail(s);
+        }
+        // A session must not outlive the node it was opened on.
+        self.set_remote_mode(RemoteMode::Direct);
+        let Some(s) = self.s.as_mut() else { return };
+        if s.remote_mode != RemoteMode::Direct {
+            return s.panel_eval(&format!(
+                "window.remoteResult && remoteResult(false, {})",
+                js("remote_err_invalid")
+            ));
+        }
+        s.remote = None;
+        s.data.remote = Some(RemoteServer { host, port, token });
+        s.dirty = true;
+        s.panel_eval(&format!(
+            "window.remoteState && remoteState({}); window.remoteResult && remoteResult(true, {})",
+            s.remote_state(),
+            js("remote_saved")
+        ));
+        s.sync(&self.cfg);
+        self.persist(After::Nothing);
+    }
+
+    fn remote_ping(&mut self, result: Result<(), &'static str>) {
+        let Some(s) = self.s.as_mut() else { return };
+        let script = match result {
+            Ok(()) => format!(
+                "window.remoteResult && remoteResult(true, {})",
+                js("remote_ok")
+            ),
+            Err(key) => format!("window.remoteResult && remoteResult(false, {})", js(key)),
+        };
+        s.panel_eval(&script);
+        if s.remote_mode != RemoteMode::Direct {
+            s.remote_status = if result.is_ok() { "on" } else { "error" };
+            if let Err(key) = result {
+                s.note(key, &[]);
+            }
+            s.sync(&self.cfg);
+        }
+    }
+
+    /// A tab asked for `url` in Eco or RBI mode. The address bar does not move until the node
+    /// reports the page as committed.
+    fn remote_nav(&mut self, id: u32, url: String) {
+        if !self.ensure_remote() {
+            return;
+        }
+        let Some(s) = self.s.as_mut() else { return };
+        let Some(i) = s.tab_idx(id) else { return };
+        let mode = s.remote_mode;
+        s.remote_status = "connecting";
+        let Some(remote) = s.remote.as_mut() else {
+            return;
+        };
+        let t = &mut s.tabs[i];
+        t.remote_target.clone_from(&url);
+        match mode {
+            RemoteMode::Eco => {
+                t.loading = true;
+                t.reader_seq += 1;
+                remote.reader(id, t.reader_seq, url);
+            }
+            RemoteMode::Rbi if t.rbi_live => {
+                t.loading = true;
+                remote.rbi_command(id, RbiCommand::Navigate { url });
+            }
+            RemoteMode::Rbi => {
+                t.loading = true;
+                let RbiPage { session, html } = remote.rbi_open(id, url);
+                t.remote = true;
+                t.internal = true;
+                t.rbi_live = true;
+                t.rbi_session = session;
+                t.tls = "";
+                if let Some(v) = &t.view {
+                    wk::load_internal(v, &html, RBI_BASE);
+                    let _ = v.focus();
+                }
+            }
+            RemoteMode::Direct | RemoteMode::Tunnel => return,
+        }
+        s.sync(&self.cfg);
+    }
+
+    fn remote_history(&mut self, name: &str) {
+        let Some(s) = self.s.as_mut() else { return };
+        let mode = s.remote_mode;
+        let i = s.active;
+        let id = s.tabs[i].id;
+        if mode == RemoteMode::Rbi {
+            let cmd = match name {
+                "back" => RbiCommand::Back,
+                "forward" => RbiCommand::Forward,
+                _ => RbiCommand::Stop,
+            };
+            if s.tabs[i].rbi_live
+                && let Some(r) = &s.remote
+            {
+                r.rbi_command(id, cmd);
+            }
+            return;
+        }
+        let t = &mut s.tabs[i];
+        let target = if name == "stop" {
+            t.reader_seq += 1;
+            t.loading = false;
+            t.reader_walk = false;
+            None
+        } else {
+            let (from, to) = if name == "back" {
+                (&mut t.reader_back, &mut t.reader_forward)
+            } else {
+                (&mut t.reader_forward, &mut t.reader_back)
+            };
+            let target = from.pop();
+            if target.is_some() {
+                to.push(t.url.clone());
+                t.reader_walk = true;
+            }
+            target
+        };
+        match target {
+            Some(url) => self.remote_nav(id, url),
+            None => s.sync(&self.cfg),
+        }
+    }
+
+    fn push_remote_history(s: &mut Session, i: usize) {
+        let t = &s.tabs[i];
+        if t.container == Container::Isolated || !t.url.starts_with("http") {
+            return;
+        }
+        let h = &mut s.data.history;
+        if h.last().is_none_or(|e| e.url != t.url) {
+            h.push(HistoryEntry {
+                url: t.url.clone(),
+                title: t.title.clone(),
+                time: vault::now_ms(),
+            });
+            if h.len() > MAX_HISTORY {
+                h.drain(..h.len() - MAX_HISTORY);
+            }
+        }
+        s.dirty = true;
+    }
+
+    fn remote_error(&self, url: &str, key: &str) -> String {
+        let lang = self.ctx.lang.borrow();
+        remote::error_html(
+            &settings::tr(&lang, "remote_page_title", &[]),
+            &settings::tr(&lang, key, &[]),
+            url,
+            &settings::tr(&lang, "remote_retry", &[]),
+        )
+    }
+
+    fn remote_reader(&mut self, id: u32, seq: u32, result: Result<ReaderPage, &'static str>) {
+        let error_page = match &result {
+            Err(key) => {
+                let url = self
+                    .s
+                    .as_ref()
+                    .and_then(|s| s.tab_idx(id).map(|i| s.tabs[i].remote_target.clone()))
+                    .unwrap_or_default();
+                Some(self.remote_error(&url, key))
+            }
+            Ok(_) => None,
+        };
+        let Some(s) = self.s.as_mut() else { return };
+        if s.remote_mode != RemoteMode::Eco {
+            return;
+        }
+        let Some(i) = s.tab_idx(id) else { return };
+        if s.tabs[i].reader_seq != seq {
+            return;
+        }
+        let t = &mut s.tabs[i];
+        t.loading = false;
+        let walked = std::mem::take(&mut t.reader_walk);
+        match result {
+            Ok(page) => {
+                if !walked && t.remote && t.url.starts_with("http") && t.url != page.url {
+                    t.reader_back.push(std::mem::take(&mut t.url));
+                    t.reader_forward.clear();
+                    if t.reader_back.len() > MAX_READER_HISTORY {
+                        t.reader_back.remove(0);
+                    }
+                }
+                // The committed moment of an Eco page: the node validated TLS for an https page.
+                t.tls = if page.url.starts_with("https://") {
+                    "secure"
+                } else {
+                    "http"
+                };
+                t.url.clone_from(&page.url);
+                t.title.clone_from(&page.title);
+                t.icon.clear();
+                t.remote = true;
+                t.internal = true;
+                t.tls_error = false;
+                t.net_error = false;
+                t.crashed = false;
+                if let Some(v) = &t.view {
+                    wk::load_internal(v, &page.html, READER_BASE);
+                }
+                s.remote_status = "on";
+                Self::push_remote_history(s, i);
+            }
+            Err(key) => {
+                t.remote = true;
+                t.internal = true;
+                t.tls = "";
+                if let (Some(v), Some(html)) = (&t.view, &error_page) {
+                    wk::load_internal(v, html, READER_BASE);
+                }
+                s.remote_status = if key == "remote_err_connect" || key == "remote_err_mode" {
+                    "error"
+                } else {
+                    "on"
+                };
+            }
+        }
+        s.sync(&self.cfg);
+    }
+
+    fn remote_rbi(&mut self, id: u32, session: u64, event: RbiEvent) {
+        let Some(s) = self.s.as_mut() else { return };
+        if s.remote_mode != RemoteMode::Rbi {
+            return;
+        }
+        let Some(i) = s
+            .tab_idx(id)
+            .filter(|i| s.tabs[*i].rbi_live && s.tabs[*i].rbi_session == session)
+        else {
+            return;
+        };
+        let t = &mut s.tabs[i];
+        s.remote_status = "on";
+        match event {
+            RbiEvent::Committed { url } => {
+                // Only the node's commit moves the address bar. The remote engine refuses bad
+                // certificates, so a committed https page was validated there.
+                t.tls = if url.starts_with("https://") {
+                    "secure"
+                } else {
+                    "http"
+                };
+                t.url = url;
+                t.title.clear();
+                Self::push_remote_history(s, i);
+            }
+            RbiEvent::Title { title } => {
+                t.title = title;
+                let url = t.url.clone();
+                let title = t.title.clone();
+                if let Some(e) = s.data.history.last_mut().filter(|e| e.url == url) {
+                    e.title = title;
+                }
+            }
+            RbiEvent::Loading { on } => t.loading = on,
+            RbiEvent::Error { code } => {
+                t.loading = false;
+                s.note(remote::known_code(&code), &[]);
+            }
+        }
+        s.sync(&self.cfg);
+    }
+
+    fn remote_closed(&mut self, id: u32, session: u64, error: Option<&'static str>) {
+        let page = error.map(|key| {
+            let url = self
+                .s
+                .as_ref()
+                .and_then(|s| s.tab_idx(id).map(|i| s.tabs[i].remote_target.clone()))
+                .unwrap_or_default();
+            self.remote_error(&url, key)
+        });
+        let Some(s) = self.s.as_mut() else { return };
+        if let Some(r) = s.remote.as_mut() {
+            r.rbi_ended(id, session);
+        }
+        let Some(key) = error else { return };
+        if s.remote_mode != RemoteMode::Rbi {
+            return;
+        }
+        s.remote_status = "error";
+        s.note(key, &[]);
+        if let Some(i) = s.tab_idx(id).filter(|i| s.tabs[*i].rbi_session == session) {
+            let t = &mut s.tabs[i];
+            t.loading = false;
+            t.rbi_live = false;
+            t.tls = "";
+            if let (Some(v), Some(html)) = (&t.view, &page) {
+                wk::load_internal(v, html, READER_BASE);
+            }
+        }
+        s.sync(&self.cfg);
     }
 
     fn icon(&mut self, id: u32, data: String) {
@@ -2650,7 +3502,9 @@ impl App {
         });
         // Oldest finished entries go first; running downloads are still looked up by URL.
         while s.data.downloads.len() > MAX_DOWNLOADS {
-            let Some(i) = s.data.downloads.iter().position(|d| d.state != "active") else { break };
+            let Some(i) = s.data.downloads.iter().position(|d| d.state != "active") else {
+                break;
+            };
             s.data.downloads.remove(i);
         }
         s.dirty = true;
@@ -2676,7 +3530,14 @@ impl App {
         }
         let name = d.path.rsplit('/').next().unwrap_or("").to_string();
         s.dirty = true;
-        s.note(if ok { "download_complete" } else { "download_failed" }, &[&name]);
+        s.note(
+            if ok {
+                "download_complete"
+            } else {
+                "download_failed"
+            },
+            &[&name],
+        );
         s.sync(&self.cfg);
         s.refresh_panel(&self.cfg);
     }
@@ -2890,7 +3751,10 @@ impl App {
             }
             // Reload on the certificate interstitial or the crash page loads the URL itself (a
             // plain reload would only repeat the local page); a built-in page is rendered again.
-            "reload" if s.cur().is_some_and(|t| t.tls_error || t.internal || t.crashed || t.net_error) => {
+            "reload"
+                if s.cur()
+                    .is_some_and(|t| t.tls_error || t.internal || t.crashed || t.net_error) =>
+            {
                 let i = s.active;
                 let page = s.internal(&s.tabs[i].url, &self.cfg);
                 let t = &mut s.tabs[i];
@@ -2905,6 +3769,11 @@ impl App {
                     };
                 }
             }
+            "back" | "forward" | "stop"
+                if s.remote_mode.intercepts() && s.cur().is_some_and(|t| t.remote) =>
+            {
+                self.remote_history(name);
+            }
             "back" | "forward" | "reload" | "stop" => {
                 if let Some(v) = s.view() {
                     let _ = match name {
@@ -2918,7 +3787,11 @@ impl App {
             "home" => self.navigate(self.cfg.homepage.clone()),
             "go" if !arg.trim().is_empty() => {
                 let input = arg.trim();
-                let url = if is_internal(input) { input.to_string() } else { to_url(input, self.cfg.search_prefix()) };
+                let url = if is_internal(input) {
+                    input.to_string()
+                } else {
+                    to_url(input, self.cfg.search_prefix())
+                };
                 self.navigate(url);
             }
             "open" => self.navigate(arg.to_string()),
@@ -3105,7 +3978,14 @@ impl App {
                 self.cfg.adblock = !self.cfg.adblock;
                 self.ctx.adblock.set(self.cfg.adblock);
                 s.apply_rules_all(&self.cfg);
-                s.note(if self.cfg.adblock { "adblock_enabled" } else { "adblock_disabled" }, &[]);
+                s.note(
+                    if self.cfg.adblock {
+                        "adblock_enabled"
+                    } else {
+                        "adblock_disabled"
+                    },
+                    &[],
+                );
                 s.dirty = true;
                 self.adblock_changed();
             }
@@ -3147,7 +4027,14 @@ impl App {
                         let _ = v.reload();
                     }
                 }
-                s.note(if allowed { "adblock_off_for_host" } else { "adblock_on_for_host" }, &[&host]);
+                s.note(
+                    if allowed {
+                        "adblock_off_for_host"
+                    } else {
+                        "adblock_on_for_host"
+                    },
+                    &[&host],
+                );
                 s.dirty = true;
                 self.adblock_changed();
             }
@@ -3244,7 +4131,11 @@ impl App {
             // carries these lists, so the tab is rebuilt (reloaded) at once.
             "site-gamepad" | "site-webgl" => {
                 let Some(host) = site_key(arg) else { return };
-                let list = if name == "site-gamepad" { &mut self.cfg.gamepad_sites } else { &mut self.cfg.webgl_off };
+                let list = if name == "site-gamepad" {
+                    &mut self.cfg.gamepad_sites
+                } else {
+                    &mut self.cfg.webgl_off
+                };
                 if !toggle_site(list, host) {
                     return s.note("allowlist_full", &[]);
                 }
@@ -3255,7 +4146,9 @@ impl App {
             // ✨ in the toolbar: CrowClarity on/off for this tab only, confirmed by a toast.
             "clarity" => {
                 let cfg = &self.cfg;
-                let Some(t) = s.tabs.get_mut(s.active) else { return };
+                let Some(t) = s.tabs.get_mut(s.active) else {
+                    return;
+                };
                 let on = !t.clarity.unwrap_or(cfg.clarity);
                 t.clarity = Some(on);
                 apply_clarity(cfg, t);
@@ -3282,10 +4175,15 @@ impl App {
                 s.site_x = arg.parse().unwrap_or(0.0);
                 let h = if s.site_h > 0.0 { s.site_h } else { 240.0 };
                 s.shield_open = false;
-                s.site = self.ctx.ui_view(include_str!("containers.html"), site_rect(&self.ctx.window, s.site_x, h));
+                s.site = self.ctx.ui_view(
+                    include_str!("containers.html"),
+                    site_rect(&self.ctx.window, s.site_x, h),
+                );
             }
             "new-tab-container" => {
-                let Some(c) = Container::parse(arg) else { return };
+                let Some(c) = Container::parse(arg) else {
+                    return;
+                };
                 s.site = None;
                 self.open_tab_in(self.cfg.homepage.clone(), c);
             }
@@ -3316,9 +4214,21 @@ impl App {
             // `autofill.js` checks the document's host again before touching a field.
             "login-fill" => {
                 let Some(host) = s.login_host() else { return };
-                let Some(l) = arg.parse::<usize>().ok().and_then(|i| s.data.logins.get(i)).filter(|l| l.host == host) else { return };
-                let (h, u, p) = (js(&host), Zeroizing::new(js(&l.username)), Zeroizing::new(js(&l.password)));
-                let mut script = Zeroizing::new(String::with_capacity(h.len() + u.len() + p.len() + 64));
+                let Some(l) = arg
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|i| s.data.logins.get(i))
+                    .filter(|l| l.host == host)
+                else {
+                    return;
+                };
+                let (h, u, p) = (
+                    js(&host),
+                    Zeroizing::new(js(&l.username)),
+                    Zeroizing::new(js(&l.password)),
+                );
+                let mut script =
+                    Zeroizing::new(String::with_capacity(h.len() + u.len() + p.len() + 64));
                 script.push_str("window.__crowFillIn ? window.__crowFillIn(");
                 for (i, part) in [h.as_str(), u.as_str(), p.as_str()].into_iter().enumerate() {
                     if i > 0 {
@@ -3340,12 +4250,18 @@ impl App {
             // message names); same host + username replaces the old entry.
             "login-save" => {
                 let Some(host) = s.login_host() else { return };
-                let Ok(mut login) = serde_json::from_str::<Login>(arg) else { return };
-                if login.password.is_empty() || login.username.len().max(login.password.len()) > MAX_LOGIN_FIELD {
+                let Ok(mut login) = serde_json::from_str::<Login>(arg) else {
+                    return;
+                };
+                if login.password.is_empty()
+                    || login.username.len().max(login.password.len()) > MAX_LOGIN_FIELD
+                {
                     return;
                 }
                 login.host.clone_from(&host);
-                s.data.logins.retain(|l| l.host != login.host || l.username != login.username);
+                s.data
+                    .logins
+                    .retain(|l| l.host != login.host || l.username != login.username);
                 if s.data.logins.len() >= MAX_LOGINS {
                     return s.note("pw_full", &[]);
                 }
@@ -3356,7 +4272,13 @@ impl App {
             }
             "login-delete" => {
                 let Some(host) = s.login_host() else { return };
-                let Some(i) = arg.parse::<usize>().ok().filter(|&i| s.data.logins.get(i).is_some_and(|l| l.host == host)) else { return };
+                let Some(i) = arg
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|&i| s.data.logins.get(i).is_some_and(|l| l.host == host))
+                else {
+                    return;
+                };
                 s.data.logins.remove(i);
                 s.logins_changed(&host, &self.cfg);
                 s.dirty = true;
@@ -3381,6 +4303,33 @@ impl App {
             "get-vault-sessions" => self.request_sessions(None),
             "get-default-browser-status" => default_browser::query(self.ctx.proxy.clone(), false),
             "set-proxy-mode" => self.set_proxy_mode(arg),
+            "remote-mode" => {
+                if let Some(mode) = RemoteMode::parse(arg) {
+                    self.set_remote_mode(mode);
+                }
+            }
+            "remote-save" => self.remote_save(arg),
+            "remote-remove" => {
+                self.set_remote_mode(RemoteMode::Direct);
+                let Some(s) = self.s.as_mut() else { return };
+                s.remote = None;
+                s.data.remote = None;
+                s.dirty = true;
+                s.panel_eval(&format!(
+                    "window.remoteState && remoteState({})",
+                    s.remote_state()
+                ));
+                s.note("remote_removed", &[]);
+                s.sync(&self.cfg);
+                self.persist(After::Nothing);
+            }
+            "remote-test" => {
+                if self.ensure_remote()
+                    && let Some(r) = self.s.as_ref().and_then(|s| s.remote.as_ref())
+                {
+                    r.ping();
+                }
+            }
             // Probe outside the browser (`proxy::probe`): no cookie, cache or header of the session.
             "test-proxy-connection" => {
                 let (p, mode) = (self.ctx.proxy.clone(), s.net.clone());
@@ -3399,12 +4348,17 @@ impl App {
                 settings::store_language(&self.cfg.language);
                 self.ctx.lang.borrow_mut().clone_from(&self.cfg.language);
                 let script = format!("setLanguage({})", js(&self.cfg.language));
-                for v in std::iter::once(&s.toolbar).chain(s.panel.as_ref()).chain(s.site.as_ref()) {
+                for v in std::iter::once(&s.toolbar)
+                    .chain(s.panel.as_ref())
+                    .chain(s.site.as_ref())
+                {
                     let _ = v.evaluate_script(&script);
                 }
                 // Built-in pages have no script: render them again in the new language.
                 for t in s.tabs.iter().filter(|t| t.internal) {
-                    if let (Some(v), Some((address, html))) = (&t.view, s.internal(&t.url, &self.cfg)) {
+                    if let (Some(v), Some((address, html))) =
+                        (&t.view, s.internal(&t.url, &self.cfg))
+                    {
                         wk::load_internal(v, &html, internal_base(address));
                     }
                 }
@@ -3534,10 +4488,18 @@ fn interstitial(lang: &str, host: &str, reasons: &[&str]) -> String {
         let _ = write!(s, "<li>{}</li>", tr(r));
         s
     });
-    let host = if host.is_empty() { tr("this_site") } else { html_escape(host) };
+    let host = if host.is_empty() {
+        tr("this_site")
+    } else {
+        html_escape(host)
+    };
     // Template escaped first, then the escaped host inserted in bold.
     let desc = tr("interstitial_desc").replace("{0}", &format!("<b>{host}</b>"));
-    let (title, hint, back) = (tr("not_private_title"), tr("interstitial_hint"), tr("back_to_safety"));
+    let (title, hint, back) = (
+        tr("not_private_title"),
+        tr("interstitial_hint"),
+        tr("back_to_safety"),
+    );
     let lang = html_escape(lang);
     format!(
         r#"<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><title>{title}</title>
@@ -3574,11 +4536,18 @@ fn crash_page(lang: &str, url: &str) -> String {
     let lower = url.to_ascii_lowercase();
     let reload = if lower.starts_with("https://") || lower.starts_with("http://") {
         let target = html_escape(&format!("window.location.replace({})", js(url)));
-        format!(r#"<button class="primary" onclick="{target}">{}</button>"#, tr("crash_reload"))
+        format!(
+            r#"<button class="primary" onclick="{target}">{}</button>"#,
+            tr("crash_reload")
+        )
     } else {
         String::new()
     };
-    let shown = if url.is_empty() { String::new() } else { format!(r#"<p class="url">{}</p>"#, html_escape(url)) };
+    let shown = if url.is_empty() {
+        String::new()
+    } else {
+        format!(r#"<p class="url">{}</p>"#, html_escape(url))
+    };
     let lang = html_escape(lang);
     format!(
         r#"<!doctype html><html lang="{lang}"><head><meta charset="utf-8"><title>{title}</title>
@@ -3631,10 +4600,16 @@ pub fn theme_of(name: &str) -> Option<Theme> {
 /// Pushes the tab's CrowClarity state into its page (main frame, isolated world). Sharpening
 /// shader only where the site may use WebGL; everything stays on the local GPU.
 fn apply_clarity(cfg: &Settings, t: &Tab) {
-    let Some(v) = t.view.as_ref().filter(|_| t.url.starts_with("http")) else { return };
+    let Some(v) = t.view.as_ref().filter(|_| t.url.starts_with("http")) else {
+        return;
+    };
     let on = t.clarity.unwrap_or(cfg.clarity);
     let sharp = cfg.clarity_sharpen && !cfg.webgl_off_for(&host_of(&t.url));
-    wk::eval_isolated(v, &format!("window.__crowClarity && window.__crowClarity({on}, {sharp})"), |_| {});
+    wk::eval_isolated(
+        v,
+        &format!("window.__crowClarity && window.__crowClarity({on}, {sharp})"),
+        |_| {},
+    );
 }
 
 fn bg_of(window: &Window) -> RGBA {
@@ -3744,10 +4719,22 @@ const MAX_EXTERNAL_URL: usize = 8192;
 const MAX_INCOMING: usize = 16;
 
 /// Panel sections the UI may request over IPC; anything else opens the settings.
-const VALID_SECTIONS: &[&str] = &["settings", "history", "bookmarks", "downloads", "logins", "about", "update"];
+const VALID_SECTIONS: &[&str] = &[
+    "settings",
+    "history",
+    "bookmarks",
+    "downloads",
+    "logins",
+    "about",
+    "update",
+];
 
 fn panel_section(arg: &str) -> &'static str {
-    VALID_SECTIONS.iter().find(|s| **s == arg).copied().unwrap_or("settings")
+    VALID_SECTIONS
+        .iter()
+        .find(|s| **s == arg)
+        .copied()
+        .unwrap_or("settings")
 }
 
 /// Address of the built-in changelog (also reachable as `about:changelog`).
@@ -3768,9 +4755,31 @@ const PASSWORDS_BASE: &str = "https://crow.invalid/passwords";
 /// Document address of the lock screen (`crow:lock`), the only built-in page with `window.ipc`.
 const LOCK_BASE: &str = "https://crow.invalid/lock";
 
+/// Document address of an Eco Reader page (the `crow:reader` view; the address bar shows the
+/// page's real address).
+const READER_BASE: &str = "https://crow.invalid/reader";
+/// Document address of an RBI surface. WebView2 treats loopback as trustworthy from a secure
+/// origin; WebKit's mixed-content check would refuse its `ws://127.0.0.1` there.
+#[cfg(target_os = "windows")]
+const RBI_BASE: &str = "https://crow.invalid/rbi";
+#[cfg(not(target_os = "windows"))]
+const RBI_BASE: &str = "http://crow.invalid/rbi";
+/// Most pages an Eco tab can go back to.
+const MAX_READER_HISTORY: usize = 50;
+
+/// Address of a document Crow itself put in a tab. `.invalid` never resolves, so no page can
+/// be served from it.
+fn is_surface_address(url: &str) -> bool {
+    url.starts_with(INTERNAL_BASE) || url.starts_with(RBI_BASE)
+}
+
 /// Document address of the built-in page `address`.
 fn internal_base(address: &str) -> &'static str {
-    if address == PASSWORDS_URL { PASSWORDS_BASE } else { INTERNAL_BASE }
+    if address == PASSWORDS_URL {
+        PASSWORDS_BASE
+    } else {
+        INTERNAL_BASE
+    }
 }
 
 /// Built-in offline pages: static HTML with its own strict CSP and no script, loaded into the
@@ -3786,7 +4795,10 @@ fn internal_page(url: &str, lang: &str, stats: &str) -> Option<(&'static str, St
         GAME_URL => return Some((address, game_page(lang, None))),
         _ => include_str!("changelog.html"),
     };
-    Some((address, localize_page(src, lang).replace("<!--STATS-->", stats)))
+    Some((
+        address,
+        localize_page(src, lang).replace("<!--STATS-->", stats),
+    ))
 }
 
 fn internal_address(url: &str) -> Option<&'static str> {
@@ -3808,11 +4820,17 @@ fn is_internal(url: &str) -> bool {
 /// on top offers a retry (http(s) only) and starts the game in place. Values are escaped.
 fn game_page(lang: &str, error: Option<(&str, &str)>) -> String {
     let page = localize_page(include_str!("game.html"), lang);
-    let Some((reason, url)) = error else { return page.replace("<!--ERROR-->", "") };
+    let Some((reason, url)) = error else {
+        return page.replace("<!--ERROR-->", "");
+    };
     let tr = |key: &str| html_escape(&settings::tr(lang, key, &[]));
     let lower = url.to_ascii_lowercase();
     let retry = if lower.starts_with("https://") || lower.starts_with("http://") {
-        format!(r#"<a class="btn" href="{}">{}</a>"#, html_escape(url), tr("net_retry"))
+        format!(
+            r#"<a class="btn" href="{}">{}</a>"#,
+            html_escape(url),
+            tr("net_retry")
+        )
     } else {
         String::new()
     };
@@ -3827,7 +4845,8 @@ fn game_page(lang: &str, error: Option<(&str, &str)>) -> String {
         html_escape(url),
         tr("net_play"),
     );
-    page.replacen("<body>", r#"<body class="err">"#, 1).replace("<!--ERROR-->", &card)
+    page.replacen("<body>", r#"<body class="err">"#, 1)
+        .replace("<!--ERROR-->", &card)
 }
 
 /// Isolated-world driver of `crow:gamepad`; `enabled` = the setting (off: shows that instead).
@@ -3906,7 +4925,8 @@ fn to_url(input: &str, search_prefix: &str) -> String {
     }
     .to_ascii_lowercase();
     // Local dev servers and mDNS hosts usually have no TLS.
-    #[allow(clippy::case_sensitive_file_extension_comparisons)] // host is already lowercased, not a file
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
+    // host is already lowercased, not a file
     let local =
         matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]") || host.ends_with(".local");
     if !input.contains(' ') && local {

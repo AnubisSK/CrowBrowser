@@ -19,6 +19,7 @@ mod download;
 mod gamepad;
 mod profile;
 mod proxy;
+mod remote;
 mod settings;
 mod update;
 mod vault;
