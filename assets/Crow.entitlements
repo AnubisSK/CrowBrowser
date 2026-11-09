@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Used by scripts/bundle.sh only with a real identity and provisioning profile: the
+     com.apple.developer.* keys are restricted, must all be granted to the App ID by Apple, and
+     keep an app that lacks them in its profile from launching. Ad-hoc builds never use this file. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.developer.web-browser</key><true/>
+  <key>com.apple.developer.web-browser.public-key-credential</key><true/>
+  <key>com.apple.security.smartcard</key><true/>
+  <key>com.apple.security.device.usb</key><true/>
+</dict>
+</plist>

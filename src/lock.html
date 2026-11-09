@@ -28,6 +28,13 @@
     background: var(--accent); color: #fff; font: inherit; font-weight: 600;
   }
   button.primary:disabled { opacity: .6; }
+  #profiles { display: grid; gap: 6px; margin-bottom: 12px; max-height: 176px; overflow-y: auto; }
+  .prof { display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 10px; border-radius: 9px; border: 1px solid transparent; background: var(--input); color: var(--fg); font: inherit; text-align: left; }
+  .prof.on { border-color: var(--accent); }
+  .prof .av { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; }
+  .prof .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chk { display: flex; align-items: flex-start; gap: 8px; margin: 2px 0 10px; color: var(--mute); font-size: 12px; text-align: left; line-height: 1.4; }
+  .chk input { width: auto; height: auto; margin: 2px 0 0; flex: none; }
   .err { color: var(--danger); min-height: 18px; margin-top: 10px; }
   .warn { font-size: 12px; margin: 14px 0 0; }
   .link { background: none; border: 0; color: var(--mute); font: inherit; font-size: 12px; margin-top: 14px; text-decoration: underline; }
@@ -40,6 +47,20 @@
   body.blurred #lights:not(:hover) span { background: var(--lights-off, #4a4a50); }
   #lights svg { width: 8px; height: 8px; fill: none; stroke: rgba(0,0,0,.55); stroke-width: 3; stroke-linecap: round; opacity: 0; }
   #lights:hover svg { opacity: 1; }
+  /* Windows (borderless, client-side decorations): caption buttons top right, the page moves
+     the window, the 4 px strip on top resizes it. */
+  #caps, #rsz { display: none; }
+  body.windows #caps { display: flex; position: fixed; top: 0; right: 0; height: 32px; z-index: 10; }
+  #caps button { width: 46px; height: 100%; border: 0; border-radius: 0; background: transparent; color: var(--fg);
+    display: grid; place-items: center; }
+  #caps button:hover { background: rgba(128, 128, 128, .18); }
+  #caps .close:hover { background: #e81123; color: #fff; }
+  #caps .close:active { background: #f1707a; color: #fff; }
+  body.blurred #caps button:not(:hover) { color: var(--mute); }
+  #caps svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1; }
+  #caps .restore, body.maximized #caps .max { display: none; }
+  body.maximized #caps .restore { display: block; }
+  body.windows:not(.maximized) #rsz { display: block; position: fixed; left: 0; right: 0; top: 0; height: 4px; z-index: 20; cursor: ns-resize; }
   .shake { animation: shake .35s; }
   @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
 </style>
@@ -50,19 +71,31 @@
     <span class="m" data-c="win-min"><svg viewBox="0 0 10 10"><path d="M1.5 5h7"/></svg></span>
     <span class="x" data-c="win-max"><svg viewBox="0 0 10 10"><path d="M5 1.5v7M1.5 5h7"/></svg></span>
   </div>
+  <div id="caps">
+    <button type="button" data-c="window-minimize"><svg viewBox="0 0 10 10"><path d="M0 5.5h10"/></svg></button>
+    <button type="button" data-c="window-maximize"><svg class="max" viewBox="0 0 10 10"><rect x=".5" y=".5" width="9" height="9"/></svg><svg class="restore" viewBox="0 0 10 10"><path d="M2.5 2.5V.5h7v7h-2"/><rect x=".5" y="2.5" width="7" height="7"/></svg></button>
+    <button type="button" class="close" data-c="window-close"><svg viewBox="0 0 10 10"><path d="M.5.5l9 9M9.5.5l-9 9"/></svg></button>
+  </div>
+  <div id="rsz"></div>
   <form class="card" id="card" autocomplete="off">
     <div class="logo">/*LOGO*/</div>
     <h1 id="h"></h1>
     <p id="d"></p>
+    <div id="profiles"></div>
+    <input type="text" id="name" maxlength="40" spellcheck="false" data-i18n-ph="profile_name">
     <input type="password" id="pw" autofocus>
     <input type="password" id="pw2" data-i18n-ph="repeat_password">
+    <input type="text" id="code" maxlength="10" spellcheck="false" data-i18n-ph="reset_code">
+    <label class="chk" id="hideopt"><input type="checkbox" id="hide"><span data-i18n="profile_hidden_opt"></span></label>
     <button class="primary" id="go" type="submit"></button>
     <div class="err" id="err"></div>
     <p class="warn" id="warn" data-i18n="pw_not_saved_warning"></p>
+    <button class="link" id="other" type="button"></button>
+    <button class="link" id="openhidden" type="button" data-i18n="profile_hidden_open"></button>
     <button class="link" id="reset" type="button" data-i18n="forgot_password"></button>
   </form>
 <script>
-  const MODE = /*MODE*/;
+  const PROFILES = /*PROFILES*/;
   const $ = (id) => document.getElementById(id);
   const send = (m) => window.ipc.postMessage(m);
   // Window drag: plain left press on the empty strip itself, never on controls; the default
@@ -73,55 +106,123 @@
     e.preventDefault();
     send('drag');
   });
-  const create = MODE === 'create';
+  // 'pick' a listed profile, 'new', 'hidden' (typed label), 'reset' (delete the selected one).
+  let mode = PROFILES.length ? 'pick' : 'new', selected = PROFILES[0] || null, resetCode = '';
+  const home = () => (PROFILES.length ? 'pick' : 'new');
+  const setMode = (m) => { mode = m; render(); };
+  const goLabel = () => t(mode === 'new' ? 'create_vault' : mode === 'reset' ? 'reset_confirm' : 'unlock');
+  const shown = (id, on) => { $(id).style.display = on ? '' : 'none'; };
 
-  $('h').textContent = t(create ? 'welcome' : 'locked');
-  $('d').textContent = t(create ? 'create_desc' : 'unlock_desc');
-  $('pw').placeholder = t(create ? 'new_password_hint' : 'master_password');
-  $('go').textContent = t(create ? 'create_vault' : 'unlock');
-  $('pw2').style.display = create ? '' : 'none';
-  $('warn').style.display = create ? '' : 'none';
-  $('reset').style.display = create ? 'none' : '';
+  function pick(p) {
+    selected = p;
+    render();
+  }
+
+  function row(p) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'prof' + (p === selected ? ' on' : '');
+    b.onclick = () => pick(p);
+    const av = document.createElement('span');
+    av.className = 'av';
+    av.textContent = [...p.name].slice(0, 1).join('').toUpperCase();
+    const nm = document.createElement('span');
+    nm.className = 'nm';
+    nm.textContent = p.name;
+    b.append(av, nm);
+    return b;
+  }
+
+  function render() {
+    const create = mode === 'new', picking = mode === 'pick', deleting = mode === 'reset';
+    $('h').textContent = t(deleting ? 'reset_title' : mode === 'hidden' ? 'profile_hidden_open' : picking ? 'locked' : PROFILES.length ? 'profile_new' : 'welcome');
+    $('d').textContent = deleting ? t('reset_prompt', selected.name, resetCode) : t(create ? 'create_desc' : 'unlock_desc');
+    $('pw').placeholder = t(create ? 'new_password_hint' : 'master_password');
+    $('go').textContent = goLabel();
+    $('go').disabled = false;
+    $('profiles').replaceChildren(...(picking ? PROFILES.map(row) : []));
+    $('name').value = create && !PROFILES.length ? t('profile_personal') : '';
+    $('code').value = '';
+    $('hide').checked = false;
+    shown('profiles', picking);
+    shown('name', !picking);
+    shown('pw', !deleting);
+    shown('pw2', create);
+    shown('code', deleting);
+    shown('hideopt', create);
+    shown('warn', create);
+    shown('reset', picking && selected && !selected.locked);
+    shown('other', !create || PROFILES.length > 0);
+    shown('openhidden', mode === home());
+    $('other').textContent = t(picking ? 'profile_new' : 'back');
+    $('err').textContent = '';
+    $('pw').value = ''; $('pw2').value = '';
+    $(picking ? 'pw' : 'name').focus();
+  }
+
+  $('other').onclick = () => setMode(mode === 'pick' ? 'new' : home());
+  $('openhidden').onclick = () => setMode('hidden');
+  render();
 
   dragOn(document.body, (e) => e.target === document.body);
 
   document.querySelectorAll('#lights span').forEach(l => l.onclick = () => send(l.dataset.c));
   dragOn($('lights'), (e) => e.target.id === 'lights');
   function setFocus(on) { document.body.classList.toggle('blurred', !on); }
+  document.querySelectorAll('#caps button').forEach(b => b.onclick = () => send(b.dataset.c));
+  function setMax(on) { document.body.classList.toggle('maximized', on); }
+  $('rsz').addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    send('resize:' + (e.clientX < 8 ? 'nw' : e.clientX >= innerWidth - 8 ? 'ne' : 'n'));
+  });
 
   $('card').onsubmit = (e) => {
     e.preventDefault();
-    const pw = $('pw').value;
+    const name = $('name').value;
+    if (mode === 'reset') {
+      const message = 'reset:' + JSON.stringify({ id: selected.id, name, code: $('code').value });
+      setMode('pick'); // the code is spent: an error is shown on the list
+      return send(message);
+    }
+    const create = mode === 'new', hide = $('hide').checked;
+    let pw = $('pw').value, again = $('pw2').value;
+    scrub();
     if (create) {
+      if (!name.trim()) return fail(t('profile_name_invalid'));
       if ([...pw].length < 8) return fail(t('pw_too_short'));
-      if (pw !== $('pw2').value) return fail(t('pw_mismatch'));
+      if (pw !== again) return fail(t('pw_mismatch'));
     }
     if (!pw) return;
     $('err').textContent = '';
     $('go').disabled = true;
     $('go').textContent = t(create ? 'creating' : 'unlocking');
-    // let the label repaint before key derivation blocks the UI thread
-    setTimeout(() => send((create ? 'create:' : 'unlock:') + pw), 60);
+    // The host delays key derivation itself, so the label repaints without holding the value here.
+    send(create ? 'create:' + JSON.stringify({ name, password: pw, hidden: hide })
+      : mode === 'hidden' ? 'unlock-hidden:' + JSON.stringify({ name, password: pw })
+      : 'unlock:' + selected.id + ':' + pw);
+    pw = again = '';
   };
+
+  // The fields are emptied and replaced at once: the old elements and their values have no owner.
+  function scrub() {
+    for (const id of ['pw', 'pw2']) {
+      const old = $(id);
+      old.value = '';
+      old.replaceWith(old.cloneNode(false));
+    }
+  }
 
   function fail(msg) {
     $('err').textContent = msg;
     $('go').disabled = false;
-    $('go').textContent = t(create ? 'create_vault' : 'unlock');
+    $('go').textContent = goLabel();
     $('pw').value = ''; $('pw2').value = ''; $('pw').focus();
     const c = $('card'); c.classList.remove('shake'); void c.offsetWidth; c.classList.add('shake');
   }
 
-  const reset = $('reset');
-  reset.onclick = () => {
-    if (!reset.classList.contains('armed')) {
-      reset.classList.add('armed');
-      reset.textContent = t('forgot_confirm');
-      setTimeout(() => { reset.classList.remove('armed'); reset.textContent = t('forgot_password'); }, 4000);
-      return;
-    }
-    send('reset');
-  };
+  $('reset').onclick = () => { if (selected) send('reset-ask:' + selected.id); };
+  function askReset(code) { resetCode = code; setMode('reset'); }
 </script>
 </body>
 </html>

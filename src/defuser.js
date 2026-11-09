@@ -22,6 +22,15 @@
   const dispatch = EventTarget.prototype.dispatchEvent, doc = document, Ev = Event;
   const signal = (name) => { try { dispatch.call(doc, new Ev(name)); } catch (e) {} };
 
+  // A proxy or Tor is in use: no WebRTC at all. ICE would query STUN servers over UDP, outside
+  // the proxy, and hand the page the real address (the engines' own switches back this up).
+  if (/*NO_WEBRTC*/false) {
+    for (const k of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel', 'RTCIceCandidate',
+      'RTCSessionDescription', 'RTCRtpSender', 'RTCRtpReceiver', 'RTCRtpTransceiver']) {
+      try { delete window[k]; } catch (e) {}
+    }
+  }
+
   // WebGL off for this site (shield popover): no context is ever created, so neither rendering
   // nor GPU details (renderer, extensions) can be read. Each refusal is counted by Crow.
   if (listed(/*WEBGL_OFF*/[])) {

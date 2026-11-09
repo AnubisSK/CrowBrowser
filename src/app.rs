@@ -1,8 +1,10 @@
 use crate::{
     adblock, cert, default_browser, download, gamepad,
+    proxy::{self, ProxyMode},
+    profile::{self, Denied, Profile},
     settings::{self, ENGINES, Settings},
     update,
-    vault::{self, Bookmark, CookieRec, Download, HistoryEntry, MAX_HISTORY, Vault, VaultData},
+    vault::{self, Bookmark, CookieRec, Download, HistoryEntry, Login, MAX_HISTORY, Vault, VaultData},
     wk,
 };
 use serde::Deserialize;
@@ -20,7 +22,7 @@ use tao::{
     window::{Fullscreen, Theme, Window},
 };
 use wry::{NewWindowFeatures, NewWindowResponse, PageLoadEvent, RGBA, Rect, WebView, dpi};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const TABS_H: f64 = 36.0;
 const NAV_H: f64 = 40.0;
@@ -35,6 +37,12 @@ const ZOOM_STEPS: &[f64] = &[
 ];
 const TICK: Duration = Duration::from_secs(30);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
+/// A lock never waits longer than this for the cookie export (`App::lock_session`).
+const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
+/// Key derivation blocks this thread: the lock page gets to repaint its "unlocking" label first.
+const AUTH_REPAINT: Duration = Duration::from_millis(60);
+/// How long the code shown for deleting a profile stays valid.
+const RESET_CODE_LIFE: Duration = Duration::from_secs(120);
 /// Max wait for WebKit to confirm the cookie import before the session starts anyway.
 const RESTORE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Favicon: polled after load (tab views have no IPC), a 32x32 PNG data URL of bounded size.
@@ -52,11 +60,20 @@ const PAGE_LISTEN_JS: &str = "(() => { if (window.__crowOn) return; window.__cro
 window.__crowGl = 0; const e = /*EVENT*/''; document.addEventListener(e, () => { window.__crowPad = 1; }, true); \
 document.addEventListener(e + 'g', () => { window.__crowGl++; }, true); })();";
 /// Active page: gamepads read, WebGL contexts refused, a video ready for picture-in-picture
-/// (metadata loaded: before that WebKit refuses the mode).
+/// (metadata loaded: before that WebKit refuses the mode), login badge clicked (`autofill.js`).
 const PAGE_READ: &str = "JSON.stringify([window.__crowPad | 0, window.__crowGl | 0, \
-Array.from(document.querySelectorAll('video')).some(v => v.readyState > 0) ? 1 : 0])";
+Array.from(document.querySelectorAll('video')).some(v => v.readyState > 0) ? 1 : 0, \
+window.__crowFillAsk ? (window.__crowFillAsk = 0, 1) : 0])";
+/// Login badge and fill target, isolated world of the top document (`/*LABEL*/`: badge title).
+const AUTOFILL_JS: &str = include_str!("autofill.js");
+/// Bounds of what the login popover may store.
+const MAX_LOGINS: usize = 5000;
+const MAX_LOGIN_FIELD: usize = 4096;
+/// CrowClarity video enhancement, isolated world of every frame; inert until `apply_clarity`.
+const CLARITY_JS: &str = include_str!("clarity.js");
 /// Picture-in-picture toggle (macOS): the largest playing video, else the largest one. Run by
-/// the app, so WebKit counts it as a user gesture.
+/// the app, so WebKit counts it as a user gesture. Windows: `wk::toggle_pip`.
+#[cfg(not(target_os = "windows"))]
 const PIP_JS: &str = "(() => { const vs = Array.from(document.querySelectorAll('video')).filter(v => v.readyState > 0); \
 const on = vs.find(v => v.webkitPresentationMode === 'picture-in-picture'); \
 if (on) { on.webkitSetPresentationMode('inline'); return 'inline'; } \
@@ -112,7 +129,7 @@ const FAV_JS: &str = r#"(function () {
 
 pub enum UserEvent {
     Menu(String),
-    Ipc(String),
+    Ipc(Zeroizing<String>),
     PageLoad {
         tab: u32,
         started: bool,
@@ -190,6 +207,8 @@ pub enum UserEvent {
     },
     /// Picture-in-picture toggle result (`PIP_JS`).
     Pip(String),
+    /// A picked login reached a field of the page (`autofill.js`).
+    Filled(bool),
     /// Controller state from `gamepad::Bridge` (JSON list of `GamepadSnapshot`) for the active tab.
     Gamepads(String),
     /// The tab's page could not be loaded (offline, DNS, refused, timeout): reason key.
@@ -214,6 +233,12 @@ pub enum UserEvent {
         manual: bool,
     },
     UpdateSaved(Option<PathBuf>),
+    /// Cookies of the store a proxy change replaces (session token).
+    ProxySwitch { cookies: Vec<CookieRec>, token: u64 },
+    /// The new store of a proxy change has its cookies (session token).
+    ProxyReady(u64),
+    /// `test-proxy-connection`: exit address and whether it is Tor, or a `locales.json` key.
+    ProxyTest(Result<(String, bool), &'static str>),
     /// Links handed over by the system (Crow as default browser / command line).
     OpenUrls(Vec<String>),
     /// Default-browser status; `note` = `locales.json` key after a registration attempt.
@@ -274,7 +299,7 @@ impl TabCtx {
     ) -> wry::Result<WebView> {
         let (p1, p2) = (self.proxy.clone(), self.proxy.clone());
         let ctx = self.clone();
-        let mut b = wk::builder(config, self.page_js.borrow().clone())
+        let b = wk::builder(config, self.page_js.borrow().clone())
             .with_background_color(bg_of(&self.window))
             .with_on_page_load_handler(move |ev, url| {
                 let started = matches!(ev, PageLoadEvent::Started);
@@ -289,10 +314,10 @@ impl TabCtx {
             })
             .with_new_window_req_handler(move |url, features| ctx.popup(id, url, features));
         // Linux: downloads are watched once on the shared context (wk::watch_downloads).
-        #[cfg(target_os = "macos")]
-        {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let b = {
             let (p3, p4) = (self.proxy.clone(), self.proxy.clone());
-            b = b
+            b
                 .with_download_started_handler(move |url, path| {
                     // WebKit's suggested name goes through the same sanitizing as on Linux.
                     let name = path
@@ -321,12 +346,15 @@ impl TabCtx {
                 })
                 .with_download_completed_handler(move |url, _, ok| {
                     let _ = p4.send_event(UserEvent::DownloadDone { url, ok });
-                });
-        }
+                })
+        };
         let view = wk::attach(b, rect, &self.window)?;
         wk::set_rules(&view, blocking);
         wk::watch(&view, id);
         wk::add_isolated_script(&view, &PAGE_LISTEN_JS.replace("/*EVENT*/''", &js(&self.pad_event)));
+        wk::add_isolated_script(&view, CLARITY_JS);
+        let label = settings::tr(&self.lang.borrow(), "pw_badge", &[]);
+        wk::add_isolated_script(&view, &AUTOFILL_JS.replace("/*LABEL*/''", &js(&label)));
         if let Some(url) = url {
             view.load_url(url)?;
         }
@@ -359,9 +387,16 @@ impl TabCtx {
     /// Internal UI with `window.ipc`. Strict CSP: no network, no external scripts/styles/frames;
     /// only its own inline code. Tab views never get an IPC handler, so wry never injects
     /// `window.ipc` there (popups inherit the opener tab's configuration, also without IPC).
-    /// The view never leaves its own document (`with_html` loads as `about:blank`): any other
-    /// navigation is refused, so `window.ipc` can never reach web content.
+    /// The view never leaves its own document (`with_html` loads as `about:blank`; WebView2's
+    /// `NavigateToString` as a `data:text/html` URL): any other navigation is refused, so
+    /// `window.ipc` can never reach web content.
     fn ui_view(&self, html: &str, rect: Rect) -> Option<WebView> {
+        self.ui_view_at(html, rect, None)
+    }
+
+    /// `base`: the document is served from memory under this address, the only other one the
+    /// view may open (`crow:lock`).
+    fn ui_view_at(&self, html: &str, rect: Rect, base: Option<&'static str>) -> Option<WebView> {
         const CSP: &str = "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'\">";
         // Dictionaries + `t()` go in first, so the page's own script can use them right away.
         let i18n = include_str!("i18n.js")
@@ -370,15 +405,27 @@ impl TabCtx {
             .replace("</", "<\\/");
         let html = html.replacen("<head>", &format!("<head>{CSP}<script>{i18n}</script>"), 1);
         let p = self.proxy.clone();
-        let b = wk::ui_builder()
-            .with_html(wk::ui_html(html))
+        let html = wk::ui_html(html);
+        // Caption buttons start in the window's current state (later: `setMax` on resize).
+        #[cfg(target_os = "windows")]
+        let html = if self.window.is_maximized() { html.replacen("class=\"windows\"", "class=\"windows maximized\"", 1) } else { html };
+        let b = if base.is_none() { wk::ui_builder().with_html(html.clone()) } else { wk::ui_builder() };
+        let b = b
             .with_background_color(bg_of(&self.window))
             .with_focused(true)
-            .with_navigation_handler(|url| url == "about:blank")
+            .with_navigation_handler(move |url| {
+                url == "about:blank"
+                    || (cfg!(target_os = "windows") && url.starts_with("data:text/html"))
+                    || base.is_some_and(|b| url == b)
+            })
             .with_ipc_handler(move |req| {
-                let _ = p.send_event(UserEvent::Ipc(req.into_body()));
+                let _ = p.send_event(UserEvent::Ipc(Zeroizing::new(req.into_body())));
             });
-        wk::attach(b, rect, &self.window).ok()
+        let v = wk::attach(b, rect, &self.window).ok()?;
+        if let Some(base) = base {
+            wk::load_ui_internal(&v, &html, base);
+        }
+        Some(v)
     }
 }
 
@@ -494,8 +541,10 @@ struct Tab {
     gamepad: bool,
     /// WebGL contexts refused on the current page (site has WebGL off).
     webgl_blocks: u32,
-    /// The current page has a video (picture-in-picture chip, macOS).
+    /// The current page has a video (picture-in-picture and CrowClarity chips).
     video: bool,
+    /// CrowClarity forced on/off on this tab (toolbar ✨); None = the global setting.
+    clarity: Option<bool>,
     /// Cookie/storage jar of the tab (`Container::Default` = the vault-backed one).
     container: Container,
 }
@@ -528,6 +577,7 @@ impl Tab {
             gamepad: false,
             webgl_blocks: 0,
             video: false,
+            clarity: None,
             container: Container::Default,
         }
     }
@@ -555,6 +605,8 @@ impl Tab {
 
 struct Session {
     vault: Vault,
+    /// The profile this session authenticated into.
+    profile: Profile,
     data: VaultData,
     store: wk::Store,
     toolbar: WebView,
@@ -600,6 +652,25 @@ struct Session {
     lang: Rc<RefCell<String>>,
     /// Last known default-browser status (None = not checked yet).
     default_browser: Option<default_browser::Status>,
+    /// Network route of web content (`proxy`): RAM only, every session starts direct.
+    net: ProxyMode,
+    /// A route change in progress (`App::set_proxy_mode`).
+    net_phase: Option<NetPhase>,
+}
+
+/// Proxy change: the old store's cookies are being exported, then imported into the new one.
+#[derive(Clone, Copy, PartialEq)]
+enum NetPhase {
+    Export,
+    Import,
+}
+
+/// The engines' route goes back to direct with the session (lock, quit): no proxy and no proxy
+/// login outlives it.
+impl Drop for Session {
+    fn drop(&mut self) {
+        let _ = wk::set_proxy(&ProxyMode::Direct);
+    }
 }
 
 impl Session {
@@ -712,6 +783,29 @@ impl Session {
         self.tabs.iter().filter_map(|t| t.view.as_ref())
     }
 
+    /// Exit: every view goes, tab and closed-tab addresses, titles and pending downloads are
+    /// overwritten in memory; vault contents and key zeroize when the session drops.
+    fn wipe(&mut self) {
+        self.site = None;
+        self.panel = None;
+        for mut a in self.asks.drain(..) {
+            a.url.zeroize();
+            a.name.zeroize();
+        }
+        for t in &mut self.tabs {
+            t.drop_view();
+            t.url.zeroize();
+            t.title.zeroize();
+            t.icon.zeroize();
+        }
+        self.tabs.clear();
+        self.containers.clear();
+        self.data.label.zeroize();
+        self.profile.name.zeroize();
+        self.closed.iter_mut().for_each(Zeroize::zeroize);
+        self.closed.clear();
+    }
+
     fn close_panel(&mut self) -> bool {
         self.site = None;
         if self.panel.take().is_none() {
@@ -755,6 +849,7 @@ impl Session {
             .collect();
         let state = json!({
             "tabs": tabs,
+            "profile": self.profile.name,
             "active": self.active,
             "url": url,
             "loading": cur.is_some_and(|t| t.loading),
@@ -763,6 +858,8 @@ impl Session {
             "blocked": cur.map_or(0, |t| t.blocked),
             "gamepad": cur.is_some_and(|t| t.gamepad),
             "video": wk::PIP && cur.is_some_and(|t| t.video),
+            "hasVideo": cur.is_some_and(|t| t.video),
+            "clarity": cur.is_some_and(|t| t.clarity.unwrap_or(cfg.clarity)),
             "bookmarked": self.data.bookmarks.iter().any(|b| b.url == url),
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
             "panel": if self.panel.is_some() { self.panel_section.as_str() } else { "" },
@@ -811,8 +908,74 @@ impl Session {
     /// Built-in page for `url`; crow:shields gets this session's numbers rendered in.
     fn internal(&self, url: &str, cfg: &Settings) -> Option<(&'static str, String)> {
         let address = internal_address(url)?;
-        let stats = if address == SHIELDS_URL { self.shields_html(cfg) } else { String::new() };
+        let stats = match address {
+            SHIELDS_URL => self.shields_html(cfg),
+            PASSWORDS_URL => self.passwords_html(cfg),
+            _ => String::new(),
+        };
         internal_page(address, &cfg.language, &stats)
+    }
+
+    /// crow:passwords body: hosts and usernames only, every value escaped; no password is ever
+    /// rendered. Passkeys belong to the OS, which offers no list that works on every platform.
+    fn passwords_html(&self, cfg: &Settings) -> String {
+        let lang = cfg.language.as_str();
+        let tr = |k: &str| html_escape(&settings::tr(lang, k, &[]));
+        let mut o = String::new();
+        let _ = write!(o, "<section><h2>{} ({})</h2>", tr("pw_saved"), self.data.logins.len());
+        if self.data.logins.is_empty() {
+            let _ = write!(o, r#"<p class="note">{}</p>"#, tr("pw_none"));
+        } else {
+            let mut logins: Vec<_> = self.data.logins.iter().collect();
+            logins.sort_unstable_by(|a, b| (&a.host, &a.username).cmp(&(&b.host, &b.username)));
+            o.push_str("<table>");
+            for l in logins {
+                let _ = write!(o, r#"<tr><td>{}</td><td>{}</td><td class="n">••••••••</td></tr>"#, html_escape(&l.host), html_escape(&l.username));
+            }
+            o.push_str("</table>");
+        }
+        let _ = write!(o, r#"</section><section><h2>{}</h2><p class="note">{}</p></section>"#, tr("pw_passkeys"), tr("pw_passkeys_note"));
+        let _ = write!(
+            o,
+            "<section><h2>{}</h2><table><tr><td>{}</td><td>{}</td></tr><tr><td>Proton Pass</td><td>{}</td></tr></table></section>",
+            tr("pw_vaults"),
+            tr("pw_vault_crow"),
+            tr("pw_vault_crow_state"),
+            tr("pw_vault_proton_state"),
+        );
+        o
+    }
+
+    /// Host logins may be filled on: the active tab's committed page, HTTPS only.
+    fn login_host(&self) -> Option<String> {
+        let t = self.cur()?;
+        let host = host_of(&t.url);
+        (!t.internal && !t.tls_error && t.url.starts_with("https://") && !host.is_empty()).then_some(host)
+    }
+
+    /// What the login popover may know about `host`: usernames, never passwords.
+    fn logins_json(&self, host: &str) -> serde_json::Value {
+        let logins: Vec<_> = self
+            .data
+            .logins
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.host == host)
+            .map(|(i, l)| json!({ "i": i, "username": l.username }))
+            .collect();
+        json!({ "host": host, "logins": logins })
+    }
+
+    /// Logins changed: open popover and crow:passwords tabs show the new list.
+    fn logins_changed(&self, host: &str, cfg: &Settings) {
+        if let Some(v) = &self.site {
+            let _ = v.evaluate_script(&format!("update({})", self.logins_json(host)));
+        }
+        for t in self.tabs.iter().filter(|t| t.internal && t.url == PASSWORDS_URL) {
+            if let (Some(v), Some((address, html))) = (&t.view, self.internal(&t.url, cfg)) {
+                wk::load_internal(v, &html, internal_base(address));
+            }
+        }
     }
 
     /// crow:shields body: only what Crow really does (blocked loads and domains, masked gamepad
@@ -881,6 +1044,7 @@ impl Session {
         let engines: Vec<[&str; 2]> = ENGINES.iter().map(|e| [e.0, e.1]).collect();
         json!({
             "section": section,
+            "deleteLocked": if self.profile.is_hidden() { None } else { Some(self.profile.deletion_locked()) },
             "settings": cfg,
             "engines": engines,
             "history": history,
@@ -892,6 +1056,9 @@ impl Session {
             "version": update::CURRENT,
             "update": self.update,
             "updateBusy": self.update_busy,
+            "proxy": self.net.state(),
+            "proxyBusy": self.net_phase.is_some(),
+            "proxyDirectIsSystem": wk::DIRECT_IS_SYSTEM,
         })
         .to_string()
     }
@@ -911,7 +1078,15 @@ pub struct App {
     pub exit: bool,
     next_tick: Instant,
     quit_at: Option<Instant>,
+    /// Lock requested: the session ends by then even if the cookie export never answers.
+    lock_at: Option<Instant>,
+    /// Unlock / create message waiting for `AUTH_REPAINT`.
+    auth_due: Option<(Zeroizing<String>, Instant)>,
+    /// Deleting a profile: which one, its one-time code and until when.
+    reset_ask: Option<(String, String, Instant)>,
     restore_by: Option<Instant>,
+    /// Deadline of the current proxy-change phase (cookie export / import may never answer).
+    net_by: Option<Instant>,
     update_checked: bool,
     /// Source of `Session::token`: unique per unlock, never reused.
     sessions: u64,
@@ -985,7 +1160,11 @@ impl App {
             exit: false,
             next_tick: Instant::now() + TICK,
             quit_at: None,
+            lock_at: None,
+            auth_due: None,
+            reset_ask: None,
             restore_by: None,
+            net_by: None,
             update_checked: false,
             sessions: 0,
             incoming: Vec::new(),
@@ -993,16 +1172,28 @@ impl App {
             pad_target: None,
             focused: true,
         };
+        profile::migrate_legacy(&settings::tr(&settings::stored_language(), "profile_personal", &[]));
         app.show_lock();
         app
     }
 
+    /// The gatekeeper: nothing but this view exists until a profile is authenticated. Only names
+    /// and ids reach it.
     fn show_lock(&mut self) {
-        let mode = if Vault::exists() { "unlock" } else { "create" };
+        self.close_lock();
+        let profiles: Vec<_> =
+            profile::list().iter().map(|p| json!({ "id": p.id, "name": p.name, "locked": p.deletion_locked() })).collect();
         let html = include_str!("lock.html")
-            .replace("/*MODE*/", &js(mode))
+            .replace("/*PROFILES*/", &json!(profiles).to_string().replace("</", "<\\/"))
             .replace("/*LOGO*/", include_str!("../assets/logo.svg"));
-        self.lock = self.ctx.ui_view(&html, full_rect(&self.ctx.window));
+        self.lock = self.ctx.ui_view_at(&html, full_rect(&self.ctx.window), Some(LOCK_BASE));
+    }
+
+    fn close_lock(&mut self) {
+        let Some(v) = self.lock.take() else { return };
+        #[cfg(target_os = "windows")]
+        wk::forget(&v);
+        drop(v);
     }
 
     /// Lock-screen error (`key` in `locales.json`), shown in the UI language.
@@ -1015,7 +1206,8 @@ impl App {
     pub fn wake(&self) -> Instant {
         let fav = self.s.as_ref().and_then(|s| s.fav_due);
         let page = self.s.as_ref().map(|s| s.page_due.unwrap_or_else(|| Instant::now() + PAGE_POLL));
-        [self.quit_at, self.restore_by, fav, page]
+        let auth = self.auth_due.as_ref().map(|(_, d)| *d);
+        [self.quit_at, self.lock_at, auth, self.restore_by, self.net_by, fav, page]
             .into_iter()
             .flatten()
             .fold(self.next_tick, Instant::min)
@@ -1041,6 +1233,14 @@ impl App {
                 wk::set_bounds(v, site_rect(w, s.site_x, s.site_h));
             }
         }
+        // Maximize / restore glyph of the drawn caption buttons, top resize strip (Windows).
+        #[cfg(target_os = "windows")]
+        {
+            let js = format!("setMax({})", w.is_maximized());
+            for v in self.lock.iter().chain(self.s.as_ref().map(|s| &s.toolbar)) {
+                let _ = v.evaluate_script(&js);
+            }
+        }
     }
 
     /// Greys out the drawn window controls (Linux) like macOS does for inactive windows.
@@ -1059,9 +1259,13 @@ impl App {
     pub fn handle(&mut self, ev: UserEvent) {
         match ev {
             UserEvent::Menu(cmd) => self.command(&cmd),
-            UserEvent::Ipc(mut msg) => {
-                self.command(&msg);
-                msg.zeroize(); // may contain a password
+            // May carry a password: wiped when dropped here (or when the deferred one has run).
+            UserEvent::Ipc(msg) => {
+                if self.s.is_none() && (msg.starts_with("unlock") || msg.starts_with("create")) {
+                    self.auth_due = Some((msg, Instant::now() + AUTH_REPAINT));
+                } else {
+                    self.command(&msg);
+                }
             }
             UserEvent::PageLoad { tab, started, url } => self.page_load(tab, started, url),
             UserEvent::Title { tab, title } => self.title(tab, title),
@@ -1180,7 +1384,15 @@ impl App {
                 s.video_fullscreen = if on { Some(tab) } else { s.video_fullscreen.filter(|t| *t != tab) };
                 if on {
                     s.site = None;
+                    // Fullscreen hides all Crow chrome: name the site so it cannot pose as the UI.
+                    if let Some(i) = s.tab_idx(tab) {
+                        let host = host_of(&s.tabs[i].url);
+                        s.toast(&format!("{host} prešiel do režimu celej obrazovky (ESC pre návrat)"));
+                    }
                 }
+                // WebView2 only reports it: the window goes fullscreen here.
+                #[cfg(target_os = "windows")]
+                self.ctx.window.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
                 // WebKit fullscreens the window itself; this makes the view fill it.
                 self.resize();
             }
@@ -1207,8 +1419,23 @@ impl App {
                     s.note("pip_none", &[]);
                 }
             }
+            UserEvent::Filled(ok) => {
+                if let (Some(s), false) = (&self.s, ok) {
+                    s.note("pw_fill_failed", &[]);
+                }
+            }
             UserEvent::Gamepads(state) => self.push_pads(&state),
             UserEvent::Update { result, manual } => self.update_result(result, manual),
+            UserEvent::ProxySwitch { cookies, token } => self.proxy_switch(&cookies, token),
+            UserEvent::ProxyReady(token) => self.proxy_ready(token),
+            UserEvent::ProxyTest(r) => {
+                let Some(p) = self.s.as_ref().and_then(|s| s.panel.as_ref()) else { return };
+                let r = match r {
+                    Ok((ip, tor)) => json!({ "ok": true, "ip": ip, "tor": tor }),
+                    Err(key) => json!({ "ok": false, "err": key }),
+                };
+                let _ = p.evaluate_script(&format!("window.proxyTest && proxyTest({r})"));
+            }
             UserEvent::UpdateSaved(path) => {
                 let Some(s) = self.s.as_mut() else { return };
                 s.update_busy = false;
@@ -1231,6 +1458,11 @@ impl App {
 
     pub fn timer(&mut self) {
         let now = Instant::now();
+        if self.auth_due.as_ref().is_some_and(|(_, d)| now >= *d)
+            && let Some((msg, _)) = self.auth_due.take()
+        {
+            self.command(&msg);
+        }
         if self.quit_at.is_some_and(|q| now >= q) {
             // Cookie export never answered; save what we have.
             if let Some(s) = &mut self.s {
@@ -1239,9 +1471,24 @@ impl App {
             self.exit = true;
             return;
         }
+        if self.lock_at.is_some_and(|l| now >= l) {
+            // Cookie export never answered: the keys must not stay in RAM because of it.
+            if let Some(s) = &mut self.s {
+                s.save_now(&self.cfg);
+            }
+            return self.after_save(After::Lock);
+        }
         if self.restore_by.is_some_and(|r| now >= r) {
             eprintln!("cookie restore timed out; starting session without waiting");
             self.restored(false);
+        }
+        if self.net_by.is_some_and(|d| now >= d) {
+            let (phase, token) = self.s.as_ref().map_or((None, 0), |s| (s.net_phase, s.token));
+            eprintln!("proxy change: cookie transfer timed out; continuing without waiting");
+            match phase {
+                Some(NetPhase::Export) => self.proxy_switch(&[], token),
+                _ => self.proxy_ready(token),
+            }
         }
         if let Some(s) = self.s.as_mut()
             && s.fav_due.is_some_and(|d| now >= d)
@@ -1281,12 +1528,21 @@ impl App {
     }
 
     /// NSApp terminated from outside (Dock, logout): synchronous save with last known cookies.
-    /// The gamepad worker is stopped and joined.
+    /// The gamepad worker is stopped and joined. The event loop then ends the process without
+    /// running destructors, so the session is wiped here (`Session::wipe`, then the vault key and
+    /// contents zeroize on drop) and the engine's in-memory stores are torn down.
     pub fn shutdown(&mut self) {
         if let Some(s) = &mut self.s {
             s.save_now(&self.cfg);
         }
         self.pads = None;
+        if let Some(mut s) = self.s.take() {
+            s.wipe();
+        }
+        self.close_lock();
+        self.incoming.iter_mut().for_each(Zeroize::zeroize);
+        self.incoming.clear();
+        wk::shutdown();
     }
 
     /// Controller input goes to the active tab only: focused window, unlocked session, a site
@@ -1340,6 +1596,24 @@ impl App {
                     let _ = w.drag_window();
                 }
             }
+            // Caption buttons of the borderless window (Windows).
+            #[cfg(target_os = "windows")]
+            "window-minimize" | "window-maximize" | "window-close" => wk::caption(name),
+            // Top edge of the borderless window (Windows): the toolbar view covers it, so a
+            // press on its resize strip starts the system resize loop.
+            #[cfg(target_os = "windows")]
+            "resize" => {
+                use tao::window::ResizeDirection;
+                let w = &self.ctx.window;
+                let dir = match arg {
+                    "nw" => ResizeDirection::NorthWest,
+                    "ne" => ResizeDirection::NorthEast,
+                    _ => ResizeDirection::North,
+                };
+                if w.fullscreen().is_none() && !w.is_maximized() && wk::left_button_down() {
+                    let _ = w.drag_resize_window(dir);
+                }
+            }
             "quit" | "win-close" => self.quit(),
             "win-min" => self.ctx.window.set_minimized(true),
             "win-max" => {
@@ -1354,7 +1628,7 @@ impl App {
                     Some(Fullscreen::Borderless(None))
                 });
             }
-            "unlock" | "create" | "reset" if self.s.is_none() => self.lock_cmd(name, arg),
+            "unlock" | "unlock-hidden" | "create" | "reset-ask" | "reset" if self.s.is_none() => self.lock_cmd(name, arg),
             _ if self.s.as_ref().is_some_and(|s| s.ready) => self.session_cmd(name, arg),
             _ => {}
         }
@@ -1362,49 +1636,121 @@ impl App {
 
     fn lock_cmd(&mut self, name: &str, arg: &str) {
         match name {
-            "unlock" => match Vault::unlock(arg) {
-                Ok((vault, data)) => self.start(vault, data),
-                Err(e) => self.lock_fail(e),
-            },
-            "create" if !Vault::exists() => {
-                if arg.chars().count() < 8 {
-                    return self.lock_fail("pw_too_short");
-                }
-                let vault = Vault::create(arg);
-                let data = VaultData::default();
-                match vault.save(&data) {
-                    Ok(()) => self.start(vault, data),
-                    Err(_) => self.lock_fail("vault_save_failed"),
+            "unlock" => {
+                let Some((id, password)) = arg.split_once(':') else { return };
+                let Some(p) = profile::find(id) else { return self.lock_fail("profile_missing") };
+                match p.unlock(password) {
+                    Ok((vault, data)) => self.start(p, vault, data),
+                    Err(d) => self.lock_denied(&d),
                 }
             }
+            "unlock-hidden" => {
+                #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+                struct Req {
+                    name: String,
+                    password: String,
+                }
+                let Ok(r) = serde_json::from_str::<Req>(arg) else { return };
+                match profile::unlock_hidden(&r.name, &r.password) {
+                    Ok((p, vault, data)) => self.start(p, vault, data),
+                    Err(d) => self.lock_denied(&d),
+                }
+            }
+            "create" => {
+                #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+                struct Req {
+                    name: String,
+                    password: String,
+                    #[serde(default)]
+                    hidden: bool,
+                }
+                let Ok(r) = serde_json::from_str::<Req>(arg) else { return };
+                if r.password.chars().count() < 8 {
+                    return self.lock_fail("pw_too_short");
+                }
+                let p = match profile::create(&r.name, r.hidden) {
+                    Ok(p) => p,
+                    Err(key) => return self.lock_fail(key),
+                };
+                let vault = Vault::create(&p.dir, &r.password);
+                let data = VaultData { label: p.name.clone(), ..VaultData::default() };
+                if vault.save(&data).is_ok() {
+                    self.start(p, vault, data);
+                } else {
+                    p.delete();
+                    self.lock_fail("vault_save_failed");
+                }
+            }
+            // "Forgot the password": this profile only, unless deletion is switched off for it.
+            "reset-ask" => {
+                let Some(p) = profile::find(arg).filter(|p| !p.deletion_locked()) else { return };
+                let code = profile::confirmation_code();
+                if let Some(l) = &self.lock {
+                    let _ = l.evaluate_script(&format!("askReset({})", js(&code)));
+                }
+                self.reset_ask = Some((p.id, code, Instant::now() + RESET_CODE_LIFE));
+            }
+            // The exact profile name and the code shown for it; one try per code.
             "reset" => {
-                Vault::destroy();
-                self.show_lock();
+                #[derive(Deserialize)]
+                struct Req {
+                    id: String,
+                    name: String,
+                    code: String,
+                }
+                let Ok(r) = serde_json::from_str::<Req>(arg) else { return };
+                let asked = self.reset_ask.take().is_some_and(|(id, code, by)| id == r.id && code == r.code && Instant::now() < by);
+                match profile::find(&r.id).filter(|p| asked && !p.deletion_locked() && p.name == r.name) {
+                    Some(p) => {
+                        p.delete();
+                        self.show_lock();
+                    }
+                    None => self.lock_fail("reset_bad"),
+                }
             }
             _ => {}
         }
     }
 
-    fn start(&mut self, vault: Vault, mut data: VaultData) {
-        let legacy = data.settings.is_none();
+    fn lock_denied(&self, denied: &Denied) {
+        match denied {
+            Denied::Wait(secs) => {
+                if let Some(l) = &self.lock {
+                    let _ = l.evaluate_script(&format!("fail(t('login_wait', {secs}))"));
+                }
+            }
+            Denied::Failed(key) => self.lock_fail(key),
+        }
+    }
+
+    fn start(&mut self, mut profile: Profile, vault: Vault, mut data: VaultData) {
+        let legacy = data.settings.is_none() || data.label.is_empty();
+        // The name authenticated by the vault wins over the plain copy the lock screen listed.
+        if data.label.is_empty() {
+            data.label.clone_from(&profile.name);
+        } else {
+            profile.name.clone_from(&data.label);
+        }
         self.cfg = data
             .settings
             .take()
-            .or_else(Settings::take_legacy)
+            .or_else(|| if profile.is_legacy() { Settings::take_legacy() } else { None })
             .unwrap_or_default();
         self.ctx.adblock.set(self.cfg.adblock);
         *self.ctx.page_js.borrow_mut() =
-            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event);
+            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event, false);
         // The vault is authoritative; the plain copy only serves the next lock screen.
         settings::store_language(&self.cfg.language);
         self.ctx.lang.borrow_mut().clone_from(&self.cfg.language);
+        wk::begin_profile(&profile.id);
         let w = &self.ctx.window;
         wk::set_theme(w, theme_of(&self.cfg.theme));
         let html = include_str!("toolbar.html").to_string();
         let Some(toolbar) = self.ctx.ui_view(&html, toolbar_rect(w, TABS_H + NAV_H)) else {
             return self.lock_fail("window_failed");
         };
-        self.lock = None;
+        self.close_lock();
+        wk::wipe_retired();
         let store = wk::new_store();
         let p = self.ctx.proxy.clone();
         wk::import_cookies(&store, &data.cookies, move || {
@@ -1417,6 +1763,7 @@ impl App {
             lang: self.ctx.lang.clone(),
             token: self.sessions,
             vault,
+            profile,
             data,
             store,
             toolbar,
@@ -1449,6 +1796,8 @@ impl App {
             update_bar: false,
             update_busy: false,
             default_browser: None,
+            net: ProxyMode::Direct,
+            net_phase: None,
         });
     }
 
@@ -1508,6 +1857,9 @@ impl App {
         if let Some(v) = s.video_fullscreen.take().and_then(|id| s.tab_idx(id)).and_then(|i| s.tabs[i].view.as_ref()) {
             let _ = v.evaluate_script("document.webkitExitFullscreen && document.webkitExitFullscreen()");
         }
+        if s.active != idx {
+            s.site = None; // describes the tab being left
+        }
         if s.active != idx
             && let Some(t) = s.tabs.get_mut(s.active) {
                 t.hidden_since = Instant::now();
@@ -1530,7 +1882,7 @@ impl App {
             if let (Some((address, html)), Some(v)) = (page, &tab.view) {
                 tab.internal = true;
                 tab.url = address.into();
-                wk::load_internal(v, &html, INTERNAL_BASE);
+                wk::load_internal(v, &html, internal_base(address));
             }
             if let Some(v) = &tab.view {
                 let _ = v.zoom(s.zoom);
@@ -1561,8 +1913,9 @@ impl App {
     /// Page shim for views built from now on; existing views are rebuilt when shown next (the
     /// visible one at once unless a panel is open, then when it closes).
     fn shim_changed(&mut self, now: bool) {
+        let proxied = self.s.as_ref().is_some_and(|s| s.net.proxied());
         *self.ctx.page_js.borrow_mut() =
-            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event);
+            adblock::defuser(self.cfg.gamepad_enabled, &self.cfg.gamepad_sites, &self.cfg.webgl_off, &self.ctx.pad_event, proxied);
         let Some(s) = self.s.as_mut() else { return };
         s.views_stale = true;
         let active = s.active;
@@ -1665,7 +2018,7 @@ impl App {
             // Focus leaves the address bar as for any other page: WebKit hands keyboard and
             // gamepad input only to the focused view (crow:gamepad stayed "not connected").
             if let Some(v) = &t.view {
-                wk::load_internal(v, &html, INTERNAL_BASE);
+                wk::load_internal(v, &html, internal_base(address));
                 let _ = v.focus();
             }
             return s.sync(&self.cfg);
@@ -1746,6 +2099,9 @@ impl App {
             (Some("http"), _) => "http",
             _ => "",
         };
+        if t.clarity.unwrap_or(self.cfg.clarity) {
+            apply_clarity(&self.cfg, t);
+        }
         match &t.view {
             Some(v) if url.starts_with("http") => {
                 wk::eval_isolated(v, FAV_JS, |_| {});
@@ -1917,7 +2273,7 @@ impl App {
     fn page_state(&mut self, tab: u32, data: &str) {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(tab) else { return };
-        let Ok([pad, gl, video]) = serde_json::from_str::<[u32; 3]>(data) else { return };
+        let Ok([pad, gl, video, fill]) = serde_json::from_str::<[u32; 4]>(data) else { return };
         let t = &mut s.tabs[i];
         let mut changed = false;
         if pad == 1 && !t.gamepad {
@@ -1936,6 +2292,23 @@ impl App {
         if changed {
             s.sync(&self.cfg);
         }
+        if fill == 1 && i == s.active {
+            self.fill_popover();
+        }
+    }
+
+    /// Crow's own popover for the login badge and ⌘/Ctrl+Shift+K: the page can ask for it but
+    /// never sees it, and nothing is filled until the user picks a login here. Right-aligned
+    /// (`site_rect` clamps), under the toolbar's password button.
+    fn fill_popover(&mut self) {
+        let Some(s) = self.s.as_mut() else { return };
+        let Some(host) = s.login_host() else { return s.note("pw_https_only", &[]) };
+        let data = s.logins_json(&host).to_string().replace("</", "<\\/");
+        let html = include_str!("fill.html").replace("/*DATA*/", &data);
+        let h = if s.site_h > 0.0 { s.site_h } else { 240.0 };
+        s.shield_open = false;
+        s.site_x = f64::MAX;
+        s.site = self.ctx.ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
     }
 
     /// The page could not be reached: Crow's error page with a retry link and the offline game,
@@ -1958,6 +2331,89 @@ impl App {
             s.site = None;
         }
         s.sync(&self.cfg);
+    }
+
+    /// `set-proxy-mode` (settings panel). The engine takes the route for stores made from now on;
+    /// the session then moves to a new store: cookies exported, every tab view and container
+    /// dropped (no page, socket or pooled connection lives on in the old route), cookies imported,
+    /// the active tab reloaded. Errors and the new state go back to the panel.
+    fn set_proxy_mode(&mut self, arg: &str) {
+        let Some(s) = self.s.as_mut() else { return };
+        if s.net_phase.is_some() {
+            return;
+        }
+        let panel = |s: &Session, js: String| {
+            if let Some(p) = &s.panel {
+                let _ = p.evaluate_script(&js);
+            }
+        };
+        let mode = match ProxyMode::from_request(&s.net, arg).and_then(|m| wk::set_proxy(&m).map(|()| m)) {
+            Ok(m) => m,
+            Err(key) => return panel(s, format!("window.proxyResult && proxyResult(false, {})", js(key))),
+        };
+        if mode == s.net {
+            return panel(s, format!("window.proxyApplied && proxyApplied({})", s.net.state()));
+        }
+        s.net = mode;
+        s.net_phase = Some(NetPhase::Export);
+        self.net_by = Some(Instant::now() + RESTORE_TIMEOUT);
+        let (p, token) = (self.ctx.proxy.clone(), s.token);
+        wk::export_cookies(&s.store, move |cookies| {
+            let _ = p.send_event(UserEvent::ProxySwitch { cookies, token });
+        });
+    }
+
+    /// Old store's cookies are in: everything of the old route goes, the new store gets them.
+    /// Container tabs keep their address but start a new, empty jar.
+    fn proxy_switch(&mut self, cookies: &[CookieRec], token: u64) {
+        let Some(s) = self.s.as_mut().filter(|s| s.token == token && s.net_phase == Some(NetPhase::Export)) else {
+            return;
+        };
+        for t in &mut s.tabs {
+            t.drop_view();
+            t.loading = false;
+            t.tls = "";
+        }
+        s.site = None;
+        s.video_fullscreen = None;
+        for store in s.containers.values() {
+            wk::drop_container_store(store);
+        }
+        s.containers.clear();
+        *self.ctx.page_js.borrow_mut() = adblock::defuser(
+            self.cfg.gamepad_enabled,
+            &self.cfg.gamepad_sites,
+            &self.cfg.webgl_off,
+            &self.ctx.pad_event,
+            s.net.proxied(),
+        );
+        s.store = wk::new_store();
+        s.net_phase = Some(NetPhase::Import);
+        self.net_by = Some(Instant::now() + RESTORE_TIMEOUT);
+        let p = self.ctx.proxy.clone();
+        wk::import_cookies(&s.store, cookies, move || {
+            let _ = p.send_event(UserEvent::ProxyReady(token));
+        });
+    }
+
+    /// New route ready (or the import timed out): tabs load again, the panel shows the state.
+    fn proxy_ready(&mut self, token: u64) {
+        let Some(s) = self.s.as_mut().filter(|s| s.token == token && s.net_phase == Some(NetPhase::Import)) else {
+            return;
+        };
+        self.net_by = None;
+        s.net_phase = None;
+        if let Some(p) = &s.panel {
+            let _ = p.evaluate_script(&format!("window.proxyApplied && proxyApplied({})", s.net.state()));
+        }
+        s.note(if s.net.proxied() { "proxy_applied_proxied" } else { "proxy_applied" }, &[]);
+        // Behind the open panel the tab is rebuilt when the panel closes.
+        if s.panel.is_some() {
+            s.views_stale = true;
+            return s.sync(&self.cfg);
+        }
+        let active = s.active;
+        self.activate(active);
     }
 
     fn icon(&mut self, id: u32, data: String) {
@@ -2225,6 +2681,15 @@ impl App {
         s.refresh_panel(&self.cfg);
     }
 
+    /// Hotkey and toolbar button: one last save (bounded by `LOCK_TIMEOUT`), then everything of
+    /// the session goes (`after_save`).
+    fn lock_session(&mut self) {
+        if self.s.is_some() && self.lock_at.is_none() {
+            self.lock_at = Some(Instant::now() + LOCK_TIMEOUT);
+            self.persist(After::Lock);
+        }
+    }
+
     fn quit(&mut self) {
         if self.s.is_some() {
             self.quit_at = Some(Instant::now() + QUIT_TIMEOUT);
@@ -2299,7 +2764,8 @@ impl App {
             After::Quit => self.exit = true,
             After::Lock => {
                 self.restore_by = None;
-                if let Some(s) = self.s.take() {
+                self.lock_at = None;
+                if let Some(mut s) = self.s.take() {
                     for a in &s.asks {
                         wk::decide_download(a.key, false, &a.url, None);
                     }
@@ -2308,9 +2774,13 @@ impl App {
                         wk::clear_store(store, || {});
                         wk::drop_container_store(store);
                     }
+                    s.wipe();
+                    // Dropped here: vault key and decrypted contents zeroize themselves.
                 }
+                wk::end_profile();
                 // Don't reveal the chosen theme (or anything else) while locked.
-                self.cfg = Settings::default();
+                self.cfg.wipe();
+                self.ctx.page_js.borrow_mut().zeroize();
                 wk::set_theme(&self.ctx.window, None);
                 self.show_lock();
             }
@@ -2427,8 +2897,8 @@ impl App {
                 t.crashed = false;
                 if let Some(v) = &t.view {
                     let _ = match page {
-                        Some((_, html)) => {
-                            wk::load_internal(v, &html, INTERNAL_BASE);
+                        Some((address, html)) => {
+                            wk::load_internal(v, &html, internal_base(address));
                             Ok(())
                         }
                         None => v.load_url(&t.url),
@@ -2589,6 +3059,11 @@ impl App {
                     "adblock" => {
                         self.ctx.adblock.set(self.cfg.adblock);
                         s.apply_rules_all(&self.cfg);
+                    }
+                    "clarity" | "clarity_sharpen" => {
+                        for t in &s.tabs {
+                            apply_clarity(&self.cfg, t);
+                        }
                     }
                     // Hidden tabs are unloaded now; the visible one is rebuilt when the panel closes.
                     "gamepad_enabled" => {
@@ -2777,10 +3252,25 @@ impl App {
                 self.persist(After::Nothing);
                 self.shim_changed(true);
             }
+            // ✨ in the toolbar: CrowClarity on/off for this tab only, confirmed by a toast.
+            "clarity" => {
+                let cfg = &self.cfg;
+                let Some(t) = s.tabs.get_mut(s.active) else { return };
+                let on = !t.clarity.unwrap_or(cfg.clarity);
+                t.clarity = Some(on);
+                apply_clarity(cfg, t);
+                s.note(if on { "clarity_on" } else { "clarity_off" }, &[]);
+                s.sync(cfg);
+            }
             "pip" => {
                 let Some(v) = s.view() else { return };
                 let p = self.ctx.proxy.clone();
+                #[cfg(not(target_os = "windows"))]
                 wk::eval_isolated(v, PIP_JS, move |r| {
+                    let _ = p.send_event(UserEvent::Pip(r));
+                });
+                #[cfg(target_os = "windows")]
+                wk::toggle_pip(v, move |r| {
                     let _ = p.send_event(UserEvent::Pip(r));
                 });
             }
@@ -2811,6 +3301,67 @@ impl App {
                 s.site = None;
                 self.open_tab(GAMEPAD_URL.into());
             }
+            "open-passwords" => {
+                s.site = None;
+                self.open_tab(PASSWORDS_URL.into());
+            }
+            // Same toggle rule as site-info.
+            "fill-login" => {
+                if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
+                    return;
+                }
+                self.fill_popover();
+            }
+            // Picked in Crow's popover. The login must belong to the page shown right now, and
+            // `autofill.js` checks the document's host again before touching a field.
+            "login-fill" => {
+                let Some(host) = s.login_host() else { return };
+                let Some(l) = arg.parse::<usize>().ok().and_then(|i| s.data.logins.get(i)).filter(|l| l.host == host) else { return };
+                let (h, u, p) = (js(&host), Zeroizing::new(js(&l.username)), Zeroizing::new(js(&l.password)));
+                let mut script = Zeroizing::new(String::with_capacity(h.len() + u.len() + p.len() + 64));
+                script.push_str("window.__crowFillIn ? window.__crowFillIn(");
+                for (i, part) in [h.as_str(), u.as_str(), p.as_str()].into_iter().enumerate() {
+                    if i > 0 {
+                        script.push(',');
+                    }
+                    script.push_str(part);
+                }
+                script.push_str(") : ''");
+                s.site = None;
+                s.site_closed = Instant::now();
+                let Some(v) = s.view() else { return };
+                let _ = v.focus();
+                let proxy = self.ctx.proxy.clone();
+                wk::eval_isolated(v, &script, move |r| {
+                    let _ = proxy.send_event(UserEvent::Filled(r == "ok"));
+                });
+            }
+            // Added in Crow's popover, always for the page shown right now (never a host the
+            // message names); same host + username replaces the old entry.
+            "login-save" => {
+                let Some(host) = s.login_host() else { return };
+                let Ok(mut login) = serde_json::from_str::<Login>(arg) else { return };
+                if login.password.is_empty() || login.username.len().max(login.password.len()) > MAX_LOGIN_FIELD {
+                    return;
+                }
+                login.host.clone_from(&host);
+                s.data.logins.retain(|l| l.host != login.host || l.username != login.username);
+                if s.data.logins.len() >= MAX_LOGINS {
+                    return s.note("pw_full", &[]);
+                }
+                s.data.logins.push(login);
+                s.logins_changed(&host, &self.cfg);
+                s.dirty = true;
+                self.persist(After::Nothing);
+            }
+            "login-delete" => {
+                let Some(host) = s.login_host() else { return };
+                let Some(i) = arg.parse::<usize>().ok().filter(|&i| s.data.logins.get(i).is_some_and(|l| l.host == host)) else { return };
+                s.data.logins.remove(i);
+                s.logins_changed(&host, &self.cfg);
+                s.dirty = true;
+                self.persist(After::Nothing);
+            }
             // Shield popover: blocked counts and the per-site switch (same toggle rule as site-info).
             "shield-open" => {
                 if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
@@ -2829,6 +3380,15 @@ impl App {
             "site-clear" => self.request_site_cookies(true),
             "get-vault-sessions" => self.request_sessions(None),
             "get-default-browser-status" => default_browser::query(self.ctx.proxy.clone(), false),
+            "set-proxy-mode" => self.set_proxy_mode(arg),
+            // Probe outside the browser (`proxy::probe`): no cookie, cache or header of the session.
+            "test-proxy-connection" => {
+                let (p, mode) = (self.ctx.proxy.clone(), s.net.clone());
+                std::thread::spawn(move || {
+                    let r = proxy::probe(&mode).map(|x| (x.ip, x.tor));
+                    let _ = p.send_event(UserEvent::ProxyTest(r));
+                });
+            }
             "set-as-default-browser" => default_browser::query(self.ctx.proxy.clone(), true),
             // UI language: vault setting + plain copy for the lock screen, then every open UI
             // view re-renders its text without reloading.
@@ -2844,8 +3404,8 @@ impl App {
                 }
                 // Built-in pages have no script: render them again in the new language.
                 for t in s.tabs.iter().filter(|t| t.internal) {
-                    if let (Some(v), Some((_, html))) = (&t.view, s.internal(&t.url, &self.cfg)) {
-                        wk::load_internal(v, &html, INTERNAL_BASE);
+                    if let (Some(v), Some((address, html))) = (&t.view, s.internal(&t.url, &self.cfg)) {
+                        wk::load_internal(v, &html, internal_base(address));
                     }
                 }
                 s.dirty = true;
@@ -2876,7 +3436,11 @@ impl App {
                 s.site = None;
                 self.session_cmd("panel", "settings");
             }
-            "lock" => self.persist(After::Lock),
+            "lock" => self.lock_session(),
+            "profile-delete-lock" => {
+                s.profile.set_deletion_locked(arg == "on");
+                s.refresh_panel(&self.cfg);
+            }
             "panic" => self.panic(),
             _ => {}
         }
@@ -3064,6 +3628,15 @@ pub fn theme_of(name: &str) -> Option<Theme> {
     }
 }
 
+/// Pushes the tab's CrowClarity state into its page (main frame, isolated world). Sharpening
+/// shader only where the site may use WebGL; everything stays on the local GPU.
+fn apply_clarity(cfg: &Settings, t: &Tab) {
+    let Some(v) = t.view.as_ref().filter(|_| t.url.starts_with("http")) else { return };
+    let on = t.clarity.unwrap_or(cfg.clarity);
+    let sharp = cfg.clarity_sharpen && !cfg.webgl_off_for(&host_of(&t.url));
+    wk::eval_isolated(v, &format!("window.__crowClarity && window.__crowClarity({on}, {sharp})"), |_| {});
+}
+
 fn bg_of(window: &Window) -> RGBA {
     if wk::is_light(window) {
         BG_LIGHT
@@ -3183,12 +3756,22 @@ const CHANGELOG_URL: &str = "crow:changelog";
 const GAMEPAD_URL: &str = "crow:gamepad";
 /// Session shield dashboard (`shields.html` + `Session::shields_html`).
 const SHIELDS_URL: &str = "crow:shields";
+/// Saved logins, passkey note and vault state (`passwords.html` + `Session::passwords_html`).
+const PASSWORDS_URL: &str = "crow:passwords";
 /// Offline game Crow Flight (`game.html`), also part of the network error page.
 const GAME_URL: &str = "crow:game";
 /// Document address of built-in pages. A secure origin, so APIs restricted to secure contexts
 /// work there (WebKit hands gamepads only to them; `about:blank` from `load_html` is not one).
 /// `.invalid` never resolves and the pages load nothing (CSP `default-src 'none'`).
 const INTERNAL_BASE: &str = "https://crow.invalid/";
+const PASSWORDS_BASE: &str = "https://crow.invalid/passwords";
+/// Document address of the lock screen (`crow:lock`), the only built-in page with `window.ipc`.
+const LOCK_BASE: &str = "https://crow.invalid/lock";
+
+/// Document address of the built-in page `address`.
+fn internal_base(address: &str) -> &'static str {
+    if address == PASSWORDS_URL { PASSWORDS_BASE } else { INTERNAL_BASE }
+}
 
 /// Built-in offline pages: static HTML with its own strict CSP and no script, loaded into the
 /// tab view (which has no IPC) instead of being fetched. Text is filled in `lang` here, so the
@@ -3199,6 +3782,7 @@ fn internal_page(url: &str, lang: &str, stats: &str) -> Option<(&'static str, St
     let src = match address {
         GAMEPAD_URL => include_str!("gamepad.html"),
         SHIELDS_URL => include_str!("shields.html"),
+        PASSWORDS_URL => include_str!("passwords.html"),
         GAME_URL => return Some((address, game_page(lang, None))),
         _ => include_str!("changelog.html"),
     };
@@ -3210,6 +3794,7 @@ fn internal_address(url: &str) -> Option<&'static str> {
         "crow:changelog" | "about:changelog" => Some(CHANGELOG_URL),
         "crow:gamepad" | "about:gamepad" => Some(GAMEPAD_URL),
         "crow:shields" | "about:shields" => Some(SHIELDS_URL),
+        "crow:passwords" | "crow:vault" | "about:passwords" => Some(PASSWORDS_URL),
         "crow:game" | "about:game" => Some(GAME_URL),
         _ => None,
     }

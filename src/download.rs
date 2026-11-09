@@ -97,6 +97,17 @@ pub fn quarantine(path: &Path) {
 #[cfg(target_os = "linux")]
 pub fn quarantine(_path: &Path) {}
 
+/// Mark of the Web (`Zone.Identifier` stream, zone 3 = Internet): SmartScreen and Office check it
+/// on open. WebView2 writes it for its own downloads; set explicitly for Crow's (update installer).
+#[cfg(target_os = "windows")]
+pub fn quarantine(path: &Path) {
+    let mut ads = path.as_os_str().to_os_string();
+    ads.push(":Zone.Identifier");
+    if std::fs::write(&ads, "[ZoneTransfer]\r\nZoneId=3\r\n").is_err() {
+        eprintln!("quarantine failed: {}", path.display());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
