@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/crow-proto", "crates/crow-server"]
+default-members = [".", "crates/crow-server"]
+
 [package]
 name = "crow-browser"
 version = "0.1.4"
@@ -20,6 +24,11 @@ adblock = { version = "0.13", default-features = false, features = ["content-blo
 # refuses to build without its Windows backend feature, which is inert elsewhere.
 # Linux: needs libudev (libudev-dev / systemd-devel).
 gilrs = "0.11"
+# Remote execution (`src/remote.rs`): shared protocol, one runtime thread for its connections.
+crow-proto = { path = "crates/crow-proto" }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.21"
