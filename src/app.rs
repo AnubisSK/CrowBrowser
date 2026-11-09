@@ -2348,7 +2348,7 @@ impl App {
             match &t.view {
                 // Address bar (and TLS badge) follow the finished load, not the request.
                 Some(v) => {
-                    let _ = v.load_url(&url);
+                    let _ = crow_load(v, &url);
                     let _ = v.focus();
                 }
                 None => t.url = url,
@@ -3529,7 +3529,7 @@ impl App {
         if ok {
             download::quarantine(Path::new(&d.path)); // Gatekeeper inspects it on first open
         }
-        let name = d.path.rsplit('/').next().unwrap_or("").to_string();
+        let name = d.path.rsplit(['/', '\\']).next().unwrap_or("").to_string();
         s.dirty = true;
         s.note(
             if ok {
@@ -3766,7 +3766,7 @@ impl App {
                             wk::load_internal(v, &html, internal_base(address));
                             Ok(())
                         }
-                        None => v.load_url(&t.url),
+                        None => crow_load(v, &t.url),
                     };
                 }
             }
@@ -4754,7 +4754,8 @@ const GAME_URL: &str = "crow:game";
 const INTERNAL_BASE: &str = "https://crow.invalid/";
 const PASSWORDS_BASE: &str = "https://crow.invalid/passwords";
 /// Document address of the lock screen (`crow:lock`), the only built-in page with `window.ipc`.
-const LOCK_BASE: &str = "https://crow.invalid/lock";
+/// An origin of its own: nothing served under `INTERNAL_BASE` shares it.
+const LOCK_BASE: &str = "https://lock.crow.invalid/";
 
 /// Document address of an Eco Reader page (the `crow:reader` view; the address bar shows the
 /// page's real address).
@@ -4772,6 +4773,16 @@ const MAX_READER_HISTORY: usize = 50;
 /// be served from it.
 fn is_surface_address(url: &str) -> bool {
     url.starts_with(INTERNAL_BASE) || url.starts_with(RBI_BASE)
+}
+
+/// Load of an address the user or Crow chose (never a page). WebView2 otherwise refuses `file:`
+/// once the tab has shown a web page.
+fn crow_load(v: &WebView, url: &str) -> wry::Result<()> {
+    #[cfg(target_os = "windows")]
+    if url.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:")) {
+        wk::allow_file_once(v);
+    }
+    v.load_url(url)
 }
 
 /// Document address of the built-in page `address`.

@@ -105,7 +105,11 @@ pub struct Config {
 /// phoning home or writing caches into the (ephemeral) user data folder.
 const BROWSER_ARGS: &str = "--in-memory --incognito \
 --disable-features=msSmartScreenProtection,AutofillServerCommunication,msWebOOUI,msPdfOOUI \
---disable-sync --disable-gpu-shader-disk-cache --no-first-run";
+--disable-sync --disable-gpu-shader-disk-cache --no-first-run \
+--disable-breakpad --disable-crash-reporter";
+/// Everything else a tab may open besides `file:` and built-in pages; any other scheme would be
+/// handed to the OS (`ms-msdt:`, `cmd:`, `powershell:`).
+const SAFE_SCHEMES: &[&str] = &["http://", "https://", "about:", "data:", "crow:"];
 /// Proxy part of the arguments for a direct connection (Chromium's default is the system proxy).
 /// The browser UI's environment always has it: the UI never uses the network.
 const DIRECT_ARGS: &str = "--no-proxy-server";
@@ -139,6 +143,8 @@ struct ViewState {
     internal_base: String,
     /// The next navigation to `internal_base` was started by Crow (any other one is refused).
     internal_pending: bool,
+    /// The next navigation was started by Crow for a `file:` address (`allow_file_once`).
+    file_pending: bool,
     /// Main-frame navigation in progress / last committed, and its host (third-party checks).
     nav_uri: String,
     top_host: String,
@@ -675,7 +681,19 @@ pub fn set_bounds(v: &WebView, rect: Rect) {
 }
 
 pub fn popup_response(v: &WebView) -> NewWindowResponse {
+    // A page opened it: its first navigation is not Crow's, unlike a new tab's.
+    with_view(key(v), |s| "about:blank".clone_into(&mut s.nav_uri));
     NewWindowResponse::Create { webview: v.webview() }
+}
+
+/// The next navigation of `v` is Crow's own load of a `file:` address (address bar, bookmark).
+/// Pages cannot set this: their navigations to `file:` are refused in `watch`.
+pub fn allow_file_once(v: &WebView) {
+    with_view(key(v), |s| s.file_pending = true);
+}
+
+fn has_prefix(uri: &str, prefix: &str) -> bool {
+    uri.get(..prefix.len()).is_some_and(|p| p.eq_ignore_ascii_case(prefix))
 }
 
 /// Content blocker of `v` on/off. Requests of every frame and worker are routed through
@@ -1086,25 +1104,27 @@ fn watch_inner(v: &WebView, tab: u32) -> windows::core::Result<()> {
             &NavigationStartingEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
                 let uri = pwstr(|p| args.Uri(p));
-                // `file:` only from Crow itself (address bar, session): a redirect, or a link
-                // clicked in a non-`file:` document, must not enumerate the disk.
-                let local = uri.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:"));
-                let (mut redirected, mut gesture) = (windows::core::BOOL::default(), windows::core::BOOL::default());
+                // `file:` only from Crow itself (address bar, session): a redirect, or a link or
+                // script in a non-`file:` document, must not enumerate the disk.
+                let local = has_prefix(&uri, "file:");
+                let mut redirected = windows::core::BOOL::default();
                 if local {
                     args.IsRedirected(&mut redirected)?;
-                    args.IsUserInitiated(&mut gesture)?;
                 }
                 let refuse = with_view(k, |s| {
+                    let by_crow = std::mem::take(&mut s.file_pending);
                     if local {
-                        let from_web = !s.nav_uri.is_empty()
-                            && !s.nav_uri.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("file:"));
-                        if redirected.as_bool() || (gesture.as_bool() && from_web) {
+                        let from_web = !by_crow && !s.nav_uri.is_empty() && !has_prefix(&s.nav_uri, "file:");
+                        if redirected.as_bool() || from_web {
                             return true;
                         }
                     }
                     let internal = !s.internal_base.is_empty() && uri.starts_with(&s.internal_base);
                     if internal && !std::mem::take(&mut s.internal_pending) {
                         return true; // only Crow opens built-in pages
+                    }
+                    if !local && !internal && !SAFE_SCHEMES.iter().any(|p| has_prefix(&uri, p)) {
+                        return true; // no OS protocol activation
                     }
                     if !internal {
                         s.internal = None;

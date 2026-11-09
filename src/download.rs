@@ -12,6 +12,23 @@ const EXECUTABLE: &[&str] = &[
     "rpm", "apk", "flatpakref", "snap", "py", "pl", "rb", "php",
 ];
 
+/// Names Windows maps to devices whatever the extension ("CON.txt" opens the console).
+const DOS_DEVICES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Characters no Windows file name may contain.
+fn is_illegal(c: char) -> bool {
+    matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+}
+
+/// Windows ignores spaces before the extension, so "CON .txt" is the device as well.
+fn is_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    DOS_DEVICES.contains(&stem.as_str())
+}
+
 /// Invisible / direction-changing characters (U+202E can make "gpj.exe" look like "exe.jpg").
 fn is_hidden(c: char) -> bool {
     matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{061C}' | '\u{FEFF}')
@@ -26,12 +43,14 @@ fn executable(ext: &str) -> bool {
     EXECUTABLE.contains(&ext)
 }
 
-/// Safe file name: no path parts, control or hidden characters, leading dots or padding, and
-/// before an executable extension every dot becomes "_" ("invoice.pdf.tar.exe" ->
-/// "invoice_pdf_tar.exe", "a.pdf..exe" -> "a_pdf_.exe"), so the only visible type is the real one.
+/// Safe file name: no path parts, drive prefixes or NTFS streams (anything before the last `/`,
+/// `\` or `:`), no illegal, control or hidden characters, leading dots or padding, no bare device
+/// name ("CON.txt" -> "_CON.txt"), and before an executable extension every dot becomes "_"
+/// ("invoice.pdf.tar.exe" -> "invoice_pdf_tar.exe", "a.pdf..exe" -> "a_pdf_.exe"), so the only
+/// visible type is the real one.
 pub fn sanitize(name: &str) -> String {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
-    let clean: String = base.chars().filter(|c| !c.is_control() && !is_hidden(*c)).collect();
+    let base = name.rsplit(['/', '\\', ':']).next().unwrap_or("");
+    let clean: String = base.chars().filter(|c| !c.is_control() && !is_hidden(*c) && !is_illegal(*c)).collect();
     let clean = clean.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut s = clean.trim_start_matches(['.', ' ']).trim_end_matches(['.', ' ']).to_string();
     if let Some((stem, ext)) = ext_of(&s)
@@ -40,8 +59,13 @@ pub fn sanitize(name: &str) -> String {
         let safe_stem = stem.replace('.', "_");
         s = format!("{safe_stem}.{}", &s[stem.len() + 1..]);
     }
+    if is_device(&s) {
+        s.insert(0, '_');
+    }
     let s: String = s.chars().take(200).collect();
-    if s.is_empty() { "download".into() } else { s }
+    // The cut may have left a trailing dot or space, which Windows silently drops.
+    let s = s.trim_end_matches(['.', ' ']);
+    if s.is_empty() { "download".into() } else { s.to_string() }
 }
 
 /// Extension of an executable/script type (lowercase), for the warning in the download prompt
@@ -137,6 +161,30 @@ mod tests {
         assert_eq!(sanitize("../../etc/passwd"), "passwd");
         assert_eq!(sanitize("..\\..\\Windows\\evil.bat"), "evil.bat");
         assert_eq!(sanitize("...hidden"), "hidden");
+    }
+
+    #[test]
+    fn device_names_are_prefixed() {
+        assert_eq!(sanitize("CON.txt"), "_CON.txt");
+        assert_eq!(sanitize("con.tar.gz"), "_con.tar.gz");
+        assert_eq!(sanitize("LPT9"), "_LPT9");
+        assert_eq!(sanitize("AUX .txt"), "_AUX .txt");
+        assert_eq!(sanitize("CONSOLE.txt"), "CONSOLE.txt");
+        assert_eq!(sanitize("COM10.txt"), "COM10.txt");
+    }
+
+    #[test]
+    fn drive_prefixes_and_streams_are_stripped() {
+        assert_eq!(sanitize("C:invoice.pdf"), "invoice.pdf");
+        assert_eq!(sanitize("payload.pdf:stream.exe"), "stream.exe");
+        assert_eq!(sanitize("C:\\Users\\x\\a.txt"), "a.txt");
+    }
+
+    #[test]
+    fn illegal_characters_are_removed() {
+        assert_eq!(sanitize("a<b>c\"d|e?f*.txt"), "abcdef.txt");
+        assert_eq!(sanitize("CON?.txt"), "_CON.txt");
+        assert_eq!(sanitize("???"), "download");
     }
 
     #[test]
