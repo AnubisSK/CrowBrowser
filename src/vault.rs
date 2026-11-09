@@ -304,7 +304,7 @@ mod tests {
         fs::write(Vault::file(&dir), file).unwrap();
         let (v, data) = Vault::unlock(&dir, "old password").unwrap();
         assert_sample(&data);
-        assert!(data.label.is_empty());
+        assert_eq!(data.label, "");
         v.save(&data).unwrap();
         assert!(Vault::unlock(&dir, "old password").is_ok());
         let _ = fs::remove_dir_all(dir);

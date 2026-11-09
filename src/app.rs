@@ -129,7 +129,7 @@ const FAV_JS: &str = r#"(function () {
 
 pub enum UserEvent {
     Menu(String),
-    Ipc(String),
+    Ipc(Zeroizing<String>),
     PageLoad {
         tab: u32,
         started: bool,
