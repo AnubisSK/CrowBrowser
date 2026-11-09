@@ -8,6 +8,7 @@ use crate::{
 };
 use chacha20poly1305::aead::{OsRng, rand_core::RngCore};
 use std::{
+    fmt::Write,
     fs,
     path::{Path, PathBuf},
 };
@@ -97,7 +98,10 @@ fn create_in(root: &Path, name: &str) -> Result<Profile, &'static str> {
     }
     let mut raw = [0u8; 8];
     OsRng.fill_bytes(&mut raw);
-    let id: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let id = raw.iter().fold(String::with_capacity(16), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    });
     let dir = root.join(&id);
     make_dir(&dir).and_then(|()| fs::write(dir.join(NAME_FILE), &name)).map_err(|_| "vault_save_failed")?;
     Ok(Profile { id, name, dir })
