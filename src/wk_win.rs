@@ -382,6 +382,8 @@ pub fn builder<'a>(config: Config, page_js: String) -> WebViewBuilder<'a> {
         .with_incognito(true)
         .with_profile_name(config.profile)
         .with_browser_accelerator_keys(false)
+        // Copy / paste from an external password manager works on every page.
+        .with_default_context_menus(true)
         .with_initialization_script_for_main_only(page_js, false)
 }
 
@@ -405,7 +407,9 @@ fn track_profile(name: &str, p: ICoreWebView2Profile) {
 }
 
 /// Every view: no native script dialogs (`alert` & co. are dismissed), no host objects, no
-/// devtools, no password / form autofill. Shortcuts are read from the controller.
+/// devtools, no password / form autofill. Shortcuts are read from the controller. WebAuthn has no
+/// setting here and must stay out of `BROWSER_ARGS`' disabled features: Chromium takes it to
+/// `webauthn.dll` (Windows Hello, security keys), whose keys never enter the user data folder.
 fn harden(v: &WebView) -> windows::core::Result<()> {
     let w = v.webview();
     unsafe {
@@ -471,7 +475,9 @@ pub fn load_internal(v: &WebView, html: &str, base: &str) {
         first
     });
     if first {
-        let filter = HSTRING::from(format!("{base}*"));
+        // The whole origin: built-in pages have different paths, one filter serves them all.
+        let origin: String = base.split_inclusive('/').take(3).collect();
+        let filter = HSTRING::from(format!("{origin}*"));
         let _ = unsafe { v.webview().AddWebResourceRequestedFilter(&filter, COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL) };
     }
     let _ = v.load_url(base);
@@ -1628,6 +1634,7 @@ fn shortcut(vk: u32) -> Option<&'static str> {
             Some('Y') => "panel:downloads",
             Some('L') => "lock",
             Some('X') => "panic",
+            Some('K') => "fill-login",
             None if is(VK_OEM_PLUS) => "zoom-in",
             None if is(VK_TAB) || is(VK_OEM_4) => "prev-tab",
             None if is(VK_OEM_6) => "next-tab",

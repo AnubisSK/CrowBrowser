@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #222226; --line: #33333a; --fg: #e6e6e9; --mute: #9a9aa3; --input: #2a2a2f; --accent: #5b8def;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; --bg: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76; --input: #f0f0f3; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font: 13px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; color: var(--fg);
+    user-select: none; -webkit-user-select: none; cursor: default;
+  }
+  #card { background: var(--bg); border: 1px solid var(--line); overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .host { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .list { display: grid; gap: 6px; padding: 10px 16px; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .user { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .add { display: grid; gap: 6px; padding: 10px 16px; border-top: 1px solid var(--line); }
+  .lbl { color: var(--mute); font-size: 12px; }
+  input { font: inherit; color: var(--fg); background: var(--input); border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; width: 100%; }
+  .btn { font: inherit; color: var(--fg); border: 1px solid var(--line); background: var(--input); padding: 4px 10px; border-radius: 7px; white-space: nowrap; }
+  .btn:hover { border-color: var(--mute); }
+  .btn.primary { color: #fff; background: var(--accent); border-color: transparent; }
+</style>
+</head>
+<body>
+<div id="card"></div>
+<script>
+  // Browser UI, out of the page's reach: picking a login here is what releases it to the tab.
+  // Only usernames reach this view; a password passes through it only while being added.
+  let D = /*DATA*/;
+  const send = (m) => window.ipc.postMessage(m);
+  const card = document.getElementById('card');
+  let user = null, pass = null;
+
+  function h(tag, props = {}, ...kids) {
+    const el = document.createElement(tag);
+    for (const [k, v] of Object.entries(props)) {
+      if (k.startsWith('on')) el[k] = v; else if (k === 'class') el.className = v; else el.setAttribute(k, v);
+    }
+    for (const k of kids.flat()) if (k != null) el.append(k);
+    return el;
+  }
+
+  function render() {
+    user = h('input', { type: 'text', spellcheck: 'false', autocomplete: 'off', placeholder: t('pw_username') });
+    pass = h('input', { type: 'password', autocomplete: 'new-password', placeholder: t('pw_password') });
+    const save = () => {
+      if (pass.value) send('login-save:' + JSON.stringify({ username: user.value, password: pass.value }));
+    };
+    const out = [h('header', {}, h('div', { class: 'host' }, D.host),
+      h('button', { class: 'btn', onclick: () => send('site-close') }, t('close')))];
+    if (D.logins.length) {
+      out.push(h('div', { class: 'list' }, D.logins.map((l) => h('div', { class: 'row' },
+        h('div', { class: 'user' }, l.username),
+        h('button', { class: 'btn primary', onclick: () => send('login-fill:' + l.i) }, t('pw_fill')),
+        h('button', { class: 'btn', onclick: () => send('login-delete:' + l.i) }, t('pw_delete'))))));
+    }
+    out.push(h('div', { class: 'add' }, h('div', { class: 'lbl' }, t('pw_add')), user, pass,
+      h('div', { class: 'row' }, h('button', { class: 'btn', onclick: save }, t('pw_save')))));
+    card.replaceChildren(...out);
+    requestAnimationFrame(() => send('site-size:' + Math.ceil(document.body.scrollHeight)));
+  }
+  function update(d) { D = d; render(); }
+  window.onLanguage = () => render();
+
+  document.onkeydown = (e) => { if (e.key === 'Escape') send('site-close'); };
+  // Half-filled form stays open: switching to the password manager to copy a value is a blur too.
+  window.onblur = () => { if (!user.value && !pass.value) send('site-close'); };
+  render();
+</script>
+</body>
+</html>

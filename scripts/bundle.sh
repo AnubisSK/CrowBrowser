@@ -61,7 +61,19 @@ cat > "$APP/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# Ad-hoc signature: required for a stable identity (Keychain, WebKit) on the local machine.
-codesign --force --deep --sign - "$APP"
+if [ -n "$CROW_SIGN_IDENTITY" ] && [ -n "$CROW_TEAM_ID" ] && [ -n "$CROW_PROVISION_PROFILE" ]; then
+  # Passkeys: Apple's restricted browser entitlements need a real identity and a profile granting them.
+  cp "$CROW_PROVISION_PROFILE" "$APP/Contents/embedded.provisionprofile"
+  ENT=target/Crow.signed.entitlements
+  cp assets/Crow.entitlements "$ENT"
+  /usr/libexec/PlistBuddy \
+    -c "Add :com.apple.application-identifier string $CROW_TEAM_ID.com.crow.browser" \
+    -c "Add :com.apple.developer.team-identifier string $CROW_TEAM_ID" "$ENT"
+  codesign --force --options runtime --timestamp --entitlements "$ENT" --sign "$CROW_SIGN_IDENTITY" "$APP"
+else
+  # Ad-hoc signature: required for a stable identity (Keychain, WebKit) on the local machine.
+  # Carries no entitlements (restricted ones would stop the app from launching): no passkeys.
+  codesign --force --deep --sign - "$APP"
+fi
 
 echo "Hotovo: $APP  (presuň do /Applications alebo spusti: open $APP)"

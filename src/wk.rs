@@ -287,12 +287,27 @@ fn file_prefs(c: &WKWebViewConfiguration) {
 }
 
 /// WebKit's Gamepad API off: pages get controllers from Crow's own bridge (`gamepad.rs`, page
-/// shim in `defuser.js`), so WebKit never opens them. WKWebView enables it by default; the only
-/// switch is the private feature list (`_features` / `_setEnabled:forFeature:`, guarded). There
-/// is no `gamepadEnabled` preference key: KVC on it would throw. Without the SPI the page-side
-/// shim still drops WebKit's gamepad events.
+/// shim in `defuser.js`), so WebKit never opens them. WKWebView enables it by default. There is
+/// no `gamepadEnabled` preference key: KVC on it would throw. Without the SPI the page-side shim
+/// still drops WebKit's gamepad events.
 #[cfg(target_os = "macos")]
 fn gamepad_prefs(c: &WKWebViewConfiguration) {
+    set_feature(c, "GamepadsEnabled", false);
+}
+
+/// `navigator.credentials` on, so WebKit hands passkey requests to its own
+/// `ASAuthorizationController` flow (Touch ID / security key prompts). WebKit's default; set
+/// explicitly so a changed default cannot disable it. WebKit serves these requests in a
+/// WKWebView only if the signature carries the entitlements in `assets/Crow.entitlements`.
+#[cfg(target_os = "macos")]
+fn webauthn_prefs(c: &WKWebViewConfiguration) {
+    set_feature(c, "WebAuthenticationEnabled", true);
+}
+
+/// Sets a WebKit feature by key; the only switch for these is the private feature list
+/// (`_features` / `_setEnabled:forFeature:`, guarded).
+#[cfg(target_os = "macos")]
+fn set_feature(c: &WKWebViewConfiguration, name: &str, on: bool) {
     unsafe {
         let Some(cls) = AnyClass::get(c"WKPreferences") else {
             return;
@@ -312,9 +327,9 @@ fn gamepad_prefs(c: &WKWebViewConfiguration) {
             let key: *mut NSString = msg_send![&*f, key];
             if key
                 .as_ref()
-                .is_some_and(|k| k.to_string() == "GamepadsEnabled")
+                .is_some_and(|k| k.to_string() == name)
             {
-                let _: () = msg_send![prefs, _setEnabled: false, forFeature: &*f];
+                let _: () = msg_send![prefs, _setEnabled: on, forFeature: &*f];
             }
         }
     }
@@ -361,6 +376,7 @@ pub fn config(store: &Store, adblock: bool) -> Config {
         storage_prefs(&c);
         file_prefs(&c);
         gamepad_prefs(&c);
+        webauthn_prefs(&c);
         pip_prefs(&c);
         Config(c)
     }
@@ -373,6 +389,7 @@ pub fn popup_config(features: NewWindowFeatures) -> Config {
     storage_prefs(&c);
     file_prefs(&c);
     gamepad_prefs(&c);
+    webauthn_prefs(&c);
     Config(c)
 }
 

@@ -968,6 +968,7 @@ fn shortcut(ev: &gdk::EventKey) -> Option<String> {
             ("y", _) => "panel:downloads",
             ("l", _) => "lock",
             ("x", _) => "panic",
+            ("k", _) => "fill-login",
             _ => return None,
         },
         (false, false, true) => match key.as_str() {

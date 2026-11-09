@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -114,6 +114,17 @@ impl Drop for CookieRec {
     }
 }
 
+/// Saved login of one exact host (no subdomain matching). Encrypted with the vault on disk; the
+/// plaintext stays in RAM, is never sent to a page's view unless the user picks it, and is wiped
+/// on drop (lock, replacement, removal).
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct Login {
+    #[serde(default)] // absent in what the popover sends: set by Crow from the active tab
+    pub host: String,
+    pub username: String,
+    pub password: String,
+}
+
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct VaultData {
@@ -121,6 +132,7 @@ pub struct VaultData {
     pub bookmarks: Vec<Bookmark>,
     pub downloads: Vec<Download>,
     pub cookies: Vec<CookieRec>,
+    pub logins: Vec<Login>,
     pub session: Urls,
     pub active: usize,
     pub settings: Option<Settings>,

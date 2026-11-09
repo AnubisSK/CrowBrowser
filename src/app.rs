@@ -3,7 +3,7 @@ use crate::{
     proxy::{self, ProxyMode},
     settings::{self, ENGINES, Settings},
     update,
-    vault::{self, Bookmark, CookieRec, Download, HistoryEntry, MAX_HISTORY, Vault, VaultData},
+    vault::{self, Bookmark, CookieRec, Download, HistoryEntry, Login, MAX_HISTORY, Vault, VaultData},
     wk,
 };
 use serde::Deserialize;
@@ -21,7 +21,7 @@ use tao::{
     window::{Fullscreen, Theme, Window},
 };
 use wry::{NewWindowFeatures, NewWindowResponse, PageLoadEvent, RGBA, Rect, WebView, dpi};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const TABS_H: f64 = 36.0;
 const NAV_H: f64 = 40.0;
@@ -53,9 +53,15 @@ const PAGE_LISTEN_JS: &str = "(() => { if (window.__crowOn) return; window.__cro
 window.__crowGl = 0; const e = /*EVENT*/''; document.addEventListener(e, () => { window.__crowPad = 1; }, true); \
 document.addEventListener(e + 'g', () => { window.__crowGl++; }, true); })();";
 /// Active page: gamepads read, WebGL contexts refused, a video ready for picture-in-picture
-/// (metadata loaded: before that WebKit refuses the mode).
+/// (metadata loaded: before that WebKit refuses the mode), login badge clicked (`autofill.js`).
 const PAGE_READ: &str = "JSON.stringify([window.__crowPad | 0, window.__crowGl | 0, \
-Array.from(document.querySelectorAll('video')).some(v => v.readyState > 0) ? 1 : 0])";
+Array.from(document.querySelectorAll('video')).some(v => v.readyState > 0) ? 1 : 0, \
+window.__crowFillAsk ? (window.__crowFillAsk = 0, 1) : 0])";
+/// Login badge and fill target, isolated world of the top document (`/*LABEL*/`: badge title).
+const AUTOFILL_JS: &str = include_str!("autofill.js");
+/// Bounds of what the login popover may store.
+const MAX_LOGINS: usize = 5000;
+const MAX_LOGIN_FIELD: usize = 4096;
 /// CrowClarity video enhancement, isolated world of every frame; inert until `apply_clarity`.
 const CLARITY_JS: &str = include_str!("clarity.js");
 /// Picture-in-picture toggle (macOS): the largest playing video, else the largest one. Run by
@@ -194,6 +200,8 @@ pub enum UserEvent {
     },
     /// Picture-in-picture toggle result (`PIP_JS`).
     Pip(String),
+    /// A picked login reached a field of the page (`autofill.js`).
+    Filled(bool),
     /// Controller state from `gamepad::Bridge` (JSON list of `GamepadSnapshot`) for the active tab.
     Gamepads(String),
     /// The tab's page could not be loaded (offline, DNS, refused, timeout): reason key.
@@ -338,6 +346,8 @@ impl TabCtx {
         wk::watch(&view, id);
         wk::add_isolated_script(&view, &PAGE_LISTEN_JS.replace("/*EVENT*/''", &js(&self.pad_event)));
         wk::add_isolated_script(&view, CLARITY_JS);
+        let label = settings::tr(&self.lang.borrow(), "pw_badge", &[]);
+        wk::add_isolated_script(&view, &AUTOFILL_JS.replace("/*LABEL*/''", &js(&label)));
         if let Some(url) = url {
             view.load_url(url)?;
         }
@@ -874,8 +884,74 @@ impl Session {
     /// Built-in page for `url`; crow:shields gets this session's numbers rendered in.
     fn internal(&self, url: &str, cfg: &Settings) -> Option<(&'static str, String)> {
         let address = internal_address(url)?;
-        let stats = if address == SHIELDS_URL { self.shields_html(cfg) } else { String::new() };
+        let stats = match address {
+            SHIELDS_URL => self.shields_html(cfg),
+            PASSWORDS_URL => self.passwords_html(cfg),
+            _ => String::new(),
+        };
         internal_page(address, &cfg.language, &stats)
+    }
+
+    /// crow:passwords body: hosts and usernames only, every value escaped; no password is ever
+    /// rendered. Passkeys belong to the OS, which offers no list that works on every platform.
+    fn passwords_html(&self, cfg: &Settings) -> String {
+        let lang = cfg.language.as_str();
+        let tr = |k: &str| html_escape(&settings::tr(lang, k, &[]));
+        let mut o = String::new();
+        let _ = write!(o, "<section><h2>{} ({})</h2>", tr("pw_saved"), self.data.logins.len());
+        if self.data.logins.is_empty() {
+            let _ = write!(o, r#"<p class="note">{}</p>"#, tr("pw_none"));
+        } else {
+            let mut logins: Vec<_> = self.data.logins.iter().collect();
+            logins.sort_unstable_by(|a, b| (&a.host, &a.username).cmp(&(&b.host, &b.username)));
+            o.push_str("<table>");
+            for l in logins {
+                let _ = write!(o, r#"<tr><td>{}</td><td>{}</td><td class="n">••••••••</td></tr>"#, html_escape(&l.host), html_escape(&l.username));
+            }
+            o.push_str("</table>");
+        }
+        let _ = write!(o, r#"</section><section><h2>{}</h2><p class="note">{}</p></section>"#, tr("pw_passkeys"), tr("pw_passkeys_note"));
+        let _ = write!(
+            o,
+            "<section><h2>{}</h2><table><tr><td>{}</td><td>{}</td></tr><tr><td>Proton Pass</td><td>{}</td></tr></table></section>",
+            tr("pw_vaults"),
+            tr("pw_vault_crow"),
+            tr("pw_vault_crow_state"),
+            tr("pw_vault_proton_state"),
+        );
+        o
+    }
+
+    /// Host logins may be filled on: the active tab's committed page, HTTPS only.
+    fn login_host(&self) -> Option<String> {
+        let t = self.cur()?;
+        let host = host_of(&t.url);
+        (!t.internal && !t.tls_error && t.url.starts_with("https://") && !host.is_empty()).then_some(host)
+    }
+
+    /// What the login popover may know about `host`: usernames, never passwords.
+    fn logins_json(&self, host: &str) -> serde_json::Value {
+        let logins: Vec<_> = self
+            .data
+            .logins
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.host == host)
+            .map(|(i, l)| json!({ "i": i, "username": l.username }))
+            .collect();
+        json!({ "host": host, "logins": logins })
+    }
+
+    /// Logins changed: open popover and crow:passwords tabs show the new list.
+    fn logins_changed(&self, host: &str, cfg: &Settings) {
+        if let Some(v) = &self.site {
+            let _ = v.evaluate_script(&format!("update({})", self.logins_json(host)));
+        }
+        for t in self.tabs.iter().filter(|t| t.internal && t.url == PASSWORDS_URL) {
+            if let (Some(v), Some((address, html))) = (&t.view, self.internal(&t.url, cfg)) {
+                wk::load_internal(v, &html, internal_base(address));
+            }
+        }
     }
 
     /// crow:shields body: only what Crow really does (blocked loads and domains, masked gamepad
@@ -1292,6 +1368,11 @@ impl App {
                     s.note("pip_none", &[]);
                 }
             }
+            UserEvent::Filled(ok) => {
+                if let (Some(s), false) = (&self.s, ok) {
+                    s.note("pw_fill_failed", &[]);
+                }
+            }
             UserEvent::Gamepads(state) => self.push_pads(&state),
             UserEvent::Update { result, manual } => self.update_result(result, manual),
             UserEvent::ProxySwitch { cookies, token } => self.proxy_switch(&cookies, token),
@@ -1640,6 +1721,9 @@ impl App {
         if let Some(v) = s.video_fullscreen.take().and_then(|id| s.tab_idx(id)).and_then(|i| s.tabs[i].view.as_ref()) {
             let _ = v.evaluate_script("document.webkitExitFullscreen && document.webkitExitFullscreen()");
         }
+        if s.active != idx {
+            s.site = None; // describes the tab being left
+        }
         if s.active != idx
             && let Some(t) = s.tabs.get_mut(s.active) {
                 t.hidden_since = Instant::now();
@@ -1662,7 +1746,7 @@ impl App {
             if let (Some((address, html)), Some(v)) = (page, &tab.view) {
                 tab.internal = true;
                 tab.url = address.into();
-                wk::load_internal(v, &html, INTERNAL_BASE);
+                wk::load_internal(v, &html, internal_base(address));
             }
             if let Some(v) = &tab.view {
                 let _ = v.zoom(s.zoom);
@@ -1798,7 +1882,7 @@ impl App {
             // Focus leaves the address bar as for any other page: WebKit hands keyboard and
             // gamepad input only to the focused view (crow:gamepad stayed "not connected").
             if let Some(v) = &t.view {
-                wk::load_internal(v, &html, INTERNAL_BASE);
+                wk::load_internal(v, &html, internal_base(address));
                 let _ = v.focus();
             }
             return s.sync(&self.cfg);
@@ -2053,7 +2137,7 @@ impl App {
     fn page_state(&mut self, tab: u32, data: &str) {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(tab) else { return };
-        let Ok([pad, gl, video]) = serde_json::from_str::<[u32; 3]>(data) else { return };
+        let Ok([pad, gl, video, fill]) = serde_json::from_str::<[u32; 4]>(data) else { return };
         let t = &mut s.tabs[i];
         let mut changed = false;
         if pad == 1 && !t.gamepad {
@@ -2072,6 +2156,23 @@ impl App {
         if changed {
             s.sync(&self.cfg);
         }
+        if fill == 1 && i == s.active {
+            self.fill_popover();
+        }
+    }
+
+    /// Crow's own popover for the login badge and ⌘/Ctrl+Shift+K: the page can ask for it but
+    /// never sees it, and nothing is filled until the user picks a login here. Right-aligned
+    /// (`site_rect` clamps), under the toolbar's password button.
+    fn fill_popover(&mut self) {
+        let Some(s) = self.s.as_mut() else { return };
+        let Some(host) = s.login_host() else { return s.note("pw_https_only", &[]) };
+        let data = s.logins_json(&host).to_string().replace("</", "<\\/");
+        let html = include_str!("fill.html").replace("/*DATA*/", &data);
+        let h = if s.site_h > 0.0 { s.site_h } else { 240.0 };
+        s.shield_open = false;
+        s.site_x = f64::MAX;
+        s.site = self.ctx.ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
     }
 
     /// The page could not be reached: Crow's error page with a retry link and the offline game,
@@ -2646,8 +2747,8 @@ impl App {
                 t.crashed = false;
                 if let Some(v) = &t.view {
                     let _ = match page {
-                        Some((_, html)) => {
-                            wk::load_internal(v, &html, INTERNAL_BASE);
+                        Some((address, html)) => {
+                            wk::load_internal(v, &html, internal_base(address));
                             Ok(())
                         }
                         None => v.load_url(&t.url),
@@ -3050,6 +3151,67 @@ impl App {
                 s.site = None;
                 self.open_tab(GAMEPAD_URL.into());
             }
+            "open-passwords" => {
+                s.site = None;
+                self.open_tab(PASSWORDS_URL.into());
+            }
+            // Same toggle rule as site-info.
+            "fill-login" => {
+                if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
+                    return;
+                }
+                self.fill_popover();
+            }
+            // Picked in Crow's popover. The login must belong to the page shown right now, and
+            // `autofill.js` checks the document's host again before touching a field.
+            "login-fill" => {
+                let Some(host) = s.login_host() else { return };
+                let Some(l) = arg.parse::<usize>().ok().and_then(|i| s.data.logins.get(i)).filter(|l| l.host == host) else { return };
+                let (h, u, p) = (js(&host), Zeroizing::new(js(&l.username)), Zeroizing::new(js(&l.password)));
+                let mut script = Zeroizing::new(String::with_capacity(h.len() + u.len() + p.len() + 64));
+                script.push_str("window.__crowFillIn ? window.__crowFillIn(");
+                for (i, part) in [h.as_str(), u.as_str(), p.as_str()].into_iter().enumerate() {
+                    if i > 0 {
+                        script.push(',');
+                    }
+                    script.push_str(part);
+                }
+                script.push_str(") : ''");
+                s.site = None;
+                s.site_closed = Instant::now();
+                let Some(v) = s.view() else { return };
+                let _ = v.focus();
+                let proxy = self.ctx.proxy.clone();
+                wk::eval_isolated(v, &script, move |r| {
+                    let _ = proxy.send_event(UserEvent::Filled(r == "ok"));
+                });
+            }
+            // Added in Crow's popover, always for the page shown right now (never a host the
+            // message names); same host + username replaces the old entry.
+            "login-save" => {
+                let Some(host) = s.login_host() else { return };
+                let Ok(mut login) = serde_json::from_str::<Login>(arg) else { return };
+                if login.password.is_empty() || login.username.len().max(login.password.len()) > MAX_LOGIN_FIELD {
+                    return;
+                }
+                login.host.clone_from(&host);
+                s.data.logins.retain(|l| l.host != login.host || l.username != login.username);
+                if s.data.logins.len() >= MAX_LOGINS {
+                    return s.note("pw_full", &[]);
+                }
+                s.data.logins.push(login);
+                s.logins_changed(&host, &self.cfg);
+                s.dirty = true;
+                self.persist(After::Nothing);
+            }
+            "login-delete" => {
+                let Some(host) = s.login_host() else { return };
+                let Some(i) = arg.parse::<usize>().ok().filter(|&i| s.data.logins.get(i).is_some_and(|l| l.host == host)) else { return };
+                s.data.logins.remove(i);
+                s.logins_changed(&host, &self.cfg);
+                s.dirty = true;
+                self.persist(After::Nothing);
+            }
             // Shield popover: blocked counts and the per-site switch (same toggle rule as site-info).
             "shield-open" => {
                 if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
@@ -3092,8 +3254,8 @@ impl App {
                 }
                 // Built-in pages have no script: render them again in the new language.
                 for t in s.tabs.iter().filter(|t| t.internal) {
-                    if let (Some(v), Some((_, html))) = (&t.view, s.internal(&t.url, &self.cfg)) {
-                        wk::load_internal(v, &html, INTERNAL_BASE);
+                    if let (Some(v), Some((address, html))) = (&t.view, s.internal(&t.url, &self.cfg)) {
+                        wk::load_internal(v, &html, internal_base(address));
                     }
                 }
                 s.dirty = true;
@@ -3440,12 +3602,20 @@ const CHANGELOG_URL: &str = "crow:changelog";
 const GAMEPAD_URL: &str = "crow:gamepad";
 /// Session shield dashboard (`shields.html` + `Session::shields_html`).
 const SHIELDS_URL: &str = "crow:shields";
+/// Saved logins, passkey note and vault state (`passwords.html` + `Session::passwords_html`).
+const PASSWORDS_URL: &str = "crow:passwords";
 /// Offline game Crow Flight (`game.html`), also part of the network error page.
 const GAME_URL: &str = "crow:game";
 /// Document address of built-in pages. A secure origin, so APIs restricted to secure contexts
 /// work there (WebKit hands gamepads only to them; `about:blank` from `load_html` is not one).
 /// `.invalid` never resolves and the pages load nothing (CSP `default-src 'none'`).
 const INTERNAL_BASE: &str = "https://crow.invalid/";
+const PASSWORDS_BASE: &str = "https://crow.invalid/passwords";
+
+/// Document address of the built-in page `address`.
+fn internal_base(address: &str) -> &'static str {
+    if address == PASSWORDS_URL { PASSWORDS_BASE } else { INTERNAL_BASE }
+}
 
 /// Built-in offline pages: static HTML with its own strict CSP and no script, loaded into the
 /// tab view (which has no IPC) instead of being fetched. Text is filled in `lang` here, so the
@@ -3456,6 +3626,7 @@ fn internal_page(url: &str, lang: &str, stats: &str) -> Option<(&'static str, St
     let src = match address {
         GAMEPAD_URL => include_str!("gamepad.html"),
         SHIELDS_URL => include_str!("shields.html"),
+        PASSWORDS_URL => include_str!("passwords.html"),
         GAME_URL => return Some((address, game_page(lang, None))),
         _ => include_str!("changelog.html"),
     };
@@ -3467,6 +3638,7 @@ fn internal_address(url: &str) -> Option<&'static str> {
         "crow:changelog" | "about:changelog" => Some(CHANGELOG_URL),
         "crow:gamepad" | "about:gamepad" => Some(GAMEPAD_URL),
         "crow:shields" | "about:shields" => Some(SHIELDS_URL),
+        "crow:passwords" | "crow:vault" | "about:passwords" => Some(PASSWORDS_URL),
         "crow:game" | "about:game" => Some(GAME_URL),
         _ => None,
     }

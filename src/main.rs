@@ -258,6 +258,8 @@ fn build_menu() -> Result<Menu, muda::Error> {
                 &PredefinedMenuItem::paste(None),
                 &PredefinedMenuItem::select_all(None),
                 &sep(),
+                &item("fill-login", "Fill Login…", shift, Code::KeyK),
+                &sep(),
                 &item("find", "Find…", cmd, Code::KeyF),
                 &item("find-next", "Find Next", cmd, Code::KeyG),
                 &item("find-prev", "Find Previous", shift, Code::KeyG),
