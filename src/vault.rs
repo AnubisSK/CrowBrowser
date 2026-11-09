@@ -22,6 +22,7 @@ const MAGIC: &[u8; 6] = b"CROWV1";
 const HEADER: usize = 6 + 16;
 const NONCE: usize = 24;
 pub const MAX_HISTORY: usize = 20_000;
+pub const MAX_VAULT_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct HistoryEntry {
@@ -196,7 +197,12 @@ impl Vault {
     }
 
     pub fn unlock(dir: &Path, password: &str) -> Result<(Self, VaultData), &'static str> {
-        let bytes = fs::read(Self::file(dir)).map_err(|_| "vault_unreadable")?;
+        let path = Self::file(dir);
+        let meta = fs::metadata(&path).map_err(|_| "vault_unreadable")?;
+        if meta.len() > MAX_VAULT_SIZE_BYTES {
+            return Err("vault_exceeds_max_size");
+        }
+        let bytes = fs::read(&path).map_err(|_| "vault_unreadable")?;
         if bytes.len() < HEADER + NONCE + 16 || &bytes[..6] != MAGIC {
             return Err("vault_corrupt");
         }
@@ -360,6 +366,16 @@ mod tests {
         assert_eq!(Vault::unlock(&dir, "old").err(), Some("wrong_password"));
         let (_, data) = Vault::unlock(&dir, "new").unwrap();
         assert_sample(&data);
+        let _ = fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn oversized_vault_is_rejected() {
+        let dir = dir_for("oversized");
+        fs::create_dir_all(&dir).unwrap();
+        let path = Vault::file(&dir);
+        let f = fs::File::create(&path).unwrap();
+        f.set_len(MAX_VAULT_SIZE_BYTES + 1).unwrap();
+        assert_eq!(Vault::unlock(&dir, "any").err(), Some("vault_exceeds_max_size"));
         let _ = fs::remove_dir_all(dir);
     }
 }

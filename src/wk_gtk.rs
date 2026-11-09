@@ -308,6 +308,11 @@ pub fn attach(b: WebViewBuilder, rect: Rect, _window: &Window) -> wry::Result<We
     if let Some(ctx) = w.context() {
         ctx.set_cache_model(CacheModel::DocumentViewer);
     }
+    if let Some(s) = WebViewExt::settings(&w) {
+        s.set_allow_file_access_from_file_urls(false);
+        s.set_allow_universal_access_from_file_urls(false);
+        s.set_enable_plugins(false);
+    }
     w.connect_decide_policy(start_downloads);
     set_bounds(&v, rect);
     Ok(v)
@@ -678,7 +683,8 @@ fn watch_fullscreen(v: &WebView, tab: u32) {
     if let Some(s) = WebViewExt::settings(&wv) {
         s.set_enable_fullscreen(true);
         s.set_enable_html5_local_storage(true);
-        s.set_enable_html5_database(true);
+        s.set_enable_html5_database(false);
+        s.set_enable_plugins(false);
         s.set_allow_file_access_from_file_urls(false);
         s.set_allow_universal_access_from_file_urls(false);
         s.set_enable_write_console_messages_to_stdout(false);

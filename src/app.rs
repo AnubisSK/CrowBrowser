@@ -95,6 +95,7 @@ const MAX_DOWNLOADS: usize = 500;
 /// Shield estimates per blocked load (typical ad/tracker response size and request latency).
 const BLOCK_BYTES: u64 = 50 * 1024;
 const BLOCK_MS: u64 = 50;
+pub const MIN_PASSWORD_LEN: usize = 12;
 
 const FIND_JS: &str = r"(function (q, dir) {
   const sel = getSelection();
@@ -1935,7 +1936,7 @@ impl App {
                 let Ok(r) = serde_json::from_str::<Req>(arg) else {
                     return;
                 };
-                if r.password.chars().count() < 8 {
+                if r.password.chars().count() < MIN_PASSWORD_LEN {
                     return self.lock_fail("pw_too_short");
                 }
                 let p = match profile::create(&r.name, r.hidden) {
@@ -4094,7 +4095,7 @@ impl App {
                 };
                 let (ok, msg) = if !s.vault.verify(&r.old) {
                     (false, "pw_wrong_current")
-                } else if r.new.chars().count() < 8 {
+                } else if r.new.chars().count() < MIN_PASSWORD_LEN {
                     (false, "new_pw_too_short")
                 } else {
                     // Transactional (`rotate_key`): the new vault must be on disk (tmp + fsync +
