@@ -61,6 +61,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use windows::Win32::System::LibraryLoader::{LOAD_LIBRARY_SEARCH_SYSTEM32, SetDefaultDllDirectories};
         let _ = SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     }
+    // Before any WebView2 environment: what an earlier run could not delete goes first.
+    #[cfg(target_os = "windows")]
+    wk::remove_stale_data();
     #[allow(unused_mut)]
     let mut builder = EventLoopBuilder::<UserEvent>::with_user_event();
     #[cfg(target_os = "linux")]

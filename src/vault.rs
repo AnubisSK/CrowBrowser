@@ -133,6 +133,8 @@ pub struct VaultData {
     pub downloads: Vec<Download>,
     pub cookies: Vec<CookieRec>,
     pub logins: Vec<Login>,
+    /// Display name of the profile, authenticated by the vault (absent in older vaults).
+    pub label: String,
     pub session: Urls,
     pub active: usize,
     pub settings: Option<Settings>,
@@ -169,6 +171,11 @@ impl Vault {
 
     pub fn exists(dir: &Path) -> bool {
         Self::file(dir).is_file()
+    }
+
+    /// The work of an unlock attempt on no vault at all (see `profile::unlock_hidden`).
+    pub fn spend(password: &str) {
+        drop(derive(password, &[0u8; 16]));
     }
 
     pub fn create(dir: &Path, password: &str) -> Self {
@@ -276,6 +283,31 @@ mod tests {
         assert_eq!(data.bookmarks[0].title, "Example");
         assert_eq!(data.session.as_slice(), ["https://example.org"]);
         assert_eq!(data.blocked_total, 42);
+    }
+
+    /// Same layout and cipher as ever, JSON from before newer fields existed.
+    #[test]
+    fn older_vault_still_opens() {
+        let dir = dir_for("older");
+        fs::create_dir_all(&dir).unwrap();
+        let salt = [7u8; 16];
+        let key = derive("old password", &salt);
+        let mut file = MAGIC.to_vec();
+        file.extend_from_slice(&salt);
+        let nonce = [9u8; 24];
+        let plain: &[u8] = br#"{"bookmarks":[{"url":"https://example.com","title":"Example"}],"session":["https://example.org"],"blocked_total":42}"#;
+        let ct = XChaCha20Poly1305::new(Key::from_slice(&*key))
+            .encrypt(XNonce::from_slice(&nonce), Payload { msg: plain, aad: &file[..HEADER] })
+            .unwrap();
+        file.extend_from_slice(&nonce);
+        file.extend_from_slice(&ct);
+        fs::write(Vault::file(&dir), file).unwrap();
+        let (v, data) = Vault::unlock(&dir, "old password").unwrap();
+        assert_sample(&data);
+        assert!(data.label.is_empty());
+        v.save(&data).unwrap();
+        assert!(Vault::unlock(&dir, "old password").is_ok());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

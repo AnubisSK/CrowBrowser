@@ -39,6 +39,10 @@ const TICK: Duration = Duration::from_secs(30);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 /// A lock never waits longer than this for the cookie export (`App::lock_session`).
 const LOCK_TIMEOUT: Duration = Duration::from_secs(3);
+/// Key derivation blocks this thread: the lock page gets to repaint its "unlocking" label first.
+const AUTH_REPAINT: Duration = Duration::from_millis(60);
+/// How long the code shown for deleting a profile stays valid.
+const RESET_CODE_LIFE: Duration = Duration::from_secs(120);
 /// Max wait for WebKit to confirm the cookie import before the session starts anyway.
 const RESTORE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Favicon: polled after load (tab views have no IPC), a 32x32 PNG data URL of bounded size.
@@ -415,7 +419,7 @@ impl TabCtx {
                     || base.is_some_and(|b| url == b)
             })
             .with_ipc_handler(move |req| {
-                let _ = p.send_event(UserEvent::Ipc(req.into_body()));
+                let _ = p.send_event(UserEvent::Ipc(Zeroizing::new(req.into_body())));
             });
         let v = wk::attach(b, rect, &self.window).ok()?;
         if let Some(base) = base {
@@ -796,6 +800,8 @@ impl Session {
         }
         self.tabs.clear();
         self.containers.clear();
+        self.data.label.zeroize();
+        self.profile.name.zeroize();
         self.closed.iter_mut().for_each(Zeroize::zeroize);
         self.closed.clear();
     }
@@ -1038,6 +1044,7 @@ impl Session {
         let engines: Vec<[&str; 2]> = ENGINES.iter().map(|e| [e.0, e.1]).collect();
         json!({
             "section": section,
+            "deleteLocked": if self.profile.is_hidden() { None } else { Some(self.profile.deletion_locked()) },
             "settings": cfg,
             "engines": engines,
             "history": history,
@@ -1073,6 +1080,10 @@ pub struct App {
     quit_at: Option<Instant>,
     /// Lock requested: the session ends by then even if the cookie export never answers.
     lock_at: Option<Instant>,
+    /// Unlock / create message waiting for `AUTH_REPAINT`.
+    auth_due: Option<(Zeroizing<String>, Instant)>,
+    /// Deleting a profile: which one, its one-time code and until when.
+    reset_ask: Option<(String, String, Instant)>,
     restore_by: Option<Instant>,
     /// Deadline of the current proxy-change phase (cookie export / import may never answer).
     net_by: Option<Instant>,
@@ -1150,6 +1161,8 @@ impl App {
             next_tick: Instant::now() + TICK,
             quit_at: None,
             lock_at: None,
+            auth_due: None,
+            reset_ask: None,
             restore_by: None,
             net_by: None,
             update_checked: false,
@@ -1168,7 +1181,8 @@ impl App {
     /// and ids reach it.
     fn show_lock(&mut self) {
         self.close_lock();
-        let profiles: Vec<_> = profile::list().iter().map(|p| json!({ "id": p.id, "name": p.name })).collect();
+        let profiles: Vec<_> =
+            profile::list().iter().map(|p| json!({ "id": p.id, "name": p.name, "locked": p.deletion_locked() })).collect();
         let html = include_str!("lock.html")
             .replace("/*PROFILES*/", &json!(profiles).to_string().replace("</", "<\\/"))
             .replace("/*LOGO*/", include_str!("../assets/logo.svg"));
@@ -1192,7 +1206,8 @@ impl App {
     pub fn wake(&self) -> Instant {
         let fav = self.s.as_ref().and_then(|s| s.fav_due);
         let page = self.s.as_ref().map(|s| s.page_due.unwrap_or_else(|| Instant::now() + PAGE_POLL));
-        [self.quit_at, self.lock_at, self.restore_by, self.net_by, fav, page]
+        let auth = self.auth_due.as_ref().map(|(_, d)| *d);
+        [self.quit_at, self.lock_at, auth, self.restore_by, self.net_by, fav, page]
             .into_iter()
             .flatten()
             .fold(self.next_tick, Instant::min)
@@ -1244,9 +1259,13 @@ impl App {
     pub fn handle(&mut self, ev: UserEvent) {
         match ev {
             UserEvent::Menu(cmd) => self.command(&cmd),
-            UserEvent::Ipc(mut msg) => {
-                self.command(&msg);
-                msg.zeroize(); // may contain a password
+            // May carry a password: wiped when dropped here (or when the deferred one has run).
+            UserEvent::Ipc(msg) => {
+                if self.s.is_none() && (msg.starts_with("unlock") || msg.starts_with("create")) {
+                    self.auth_due = Some((msg, Instant::now() + AUTH_REPAINT));
+                } else {
+                    self.command(&msg);
+                }
             }
             UserEvent::PageLoad { tab, started, url } => self.page_load(tab, started, url),
             UserEvent::Title { tab, title } => self.title(tab, title),
@@ -1439,6 +1458,11 @@ impl App {
 
     pub fn timer(&mut self) {
         let now = Instant::now();
+        if self.auth_due.as_ref().is_some_and(|(_, d)| now >= *d)
+            && let Some((msg, _)) = self.auth_due.take()
+        {
+            self.command(&msg);
+        }
         if self.quit_at.is_some_and(|q| now >= q) {
             // Cookie export never answered; save what we have.
             if let Some(s) = &mut self.s {
@@ -1604,7 +1628,7 @@ impl App {
                     Some(Fullscreen::Borderless(None))
                 });
             }
-            "unlock" | "create" | "reset" if self.s.is_none() => self.lock_cmd(name, arg),
+            "unlock" | "unlock-hidden" | "create" | "reset-ask" | "reset" if self.s.is_none() => self.lock_cmd(name, arg),
             _ if self.s.as_ref().is_some_and(|s| s.ready) => self.session_cmd(name, arg),
             _ => {}
         }
@@ -1617,12 +1641,19 @@ impl App {
                 let Some(p) = profile::find(id) else { return self.lock_fail("profile_missing") };
                 match p.unlock(password) {
                     Ok((vault, data)) => self.start(p, vault, data),
-                    Err(Denied::Wait(secs)) => {
-                        if let Some(l) = &self.lock {
-                            let _ = l.evaluate_script(&format!("fail(t('login_wait', {secs}))"));
-                        }
-                    }
-                    Err(Denied::Failed(key)) => self.lock_fail(key),
+                    Err(d) => self.lock_denied(&d),
+                }
+            }
+            "unlock-hidden" => {
+                #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+                struct Req {
+                    name: String,
+                    password: String,
+                }
+                let Ok(r) = serde_json::from_str::<Req>(arg) else { return };
+                match profile::unlock_hidden(&r.name, &r.password) {
+                    Ok((p, vault, data)) => self.start(p, vault, data),
+                    Err(d) => self.lock_denied(&d),
                 }
             }
             "create" => {
@@ -1630,17 +1661,19 @@ impl App {
                 struct Req {
                     name: String,
                     password: String,
+                    #[serde(default)]
+                    hidden: bool,
                 }
                 let Ok(r) = serde_json::from_str::<Req>(arg) else { return };
                 if r.password.chars().count() < 8 {
                     return self.lock_fail("pw_too_short");
                 }
-                let p = match profile::create(&r.name) {
+                let p = match profile::create(&r.name, r.hidden) {
                     Ok(p) => p,
                     Err(key) => return self.lock_fail(key),
                 };
                 let vault = Vault::create(&p.dir, &r.password);
-                let data = VaultData::default();
+                let data = VaultData { label: p.name.clone(), ..VaultData::default() };
                 if vault.save(&data).is_ok() {
                     self.start(p, vault, data);
                 } else {
@@ -1648,19 +1681,56 @@ impl App {
                     self.lock_fail("vault_save_failed");
                 }
             }
-            // "Forgot the password": this profile only.
-            "reset" => {
-                if let Some(p) = profile::find(arg) {
-                    p.delete();
+            // "Forgot the password": this profile only, unless deletion is switched off for it.
+            "reset-ask" => {
+                let Some(p) = profile::find(arg).filter(|p| !p.deletion_locked()) else { return };
+                let code = profile::confirmation_code();
+                if let Some(l) = &self.lock {
+                    let _ = l.evaluate_script(&format!("askReset({})", js(&code)));
                 }
-                self.show_lock();
+                self.reset_ask = Some((p.id, code, Instant::now() + RESET_CODE_LIFE));
+            }
+            // The exact profile name and the code shown for it; one try per code.
+            "reset" => {
+                #[derive(Deserialize)]
+                struct Req {
+                    id: String,
+                    name: String,
+                    code: String,
+                }
+                let Ok(r) = serde_json::from_str::<Req>(arg) else { return };
+                let asked = self.reset_ask.take().is_some_and(|(id, code, by)| id == r.id && code == r.code && Instant::now() < by);
+                match profile::find(&r.id).filter(|p| asked && !p.deletion_locked() && p.name == r.name) {
+                    Some(p) => {
+                        p.delete();
+                        self.show_lock();
+                    }
+                    None => self.lock_fail("reset_bad"),
+                }
             }
             _ => {}
         }
     }
 
-    fn start(&mut self, profile: Profile, vault: Vault, mut data: VaultData) {
-        let legacy = data.settings.is_none();
+    fn lock_denied(&self, denied: &Denied) {
+        match denied {
+            Denied::Wait(secs) => {
+                if let Some(l) = &self.lock {
+                    let _ = l.evaluate_script(&format!("fail(t('login_wait', {secs}))"));
+                }
+            }
+            Denied::Failed(key) => self.lock_fail(key),
+        }
+    }
+
+    fn start(&mut self, mut profile: Profile, vault: Vault, mut data: VaultData) {
+        let legacy = data.settings.is_none() || data.label.is_empty();
+        // The name authenticated by the vault wins over the plain copy the lock screen listed.
+        if data.label.is_empty() {
+            data.label.clone_from(&profile.name);
+        } else {
+            profile.name.clone_from(&data.label);
+        }
         self.cfg = data
             .settings
             .take()
@@ -3367,6 +3437,10 @@ impl App {
                 self.session_cmd("panel", "settings");
             }
             "lock" => self.lock_session(),
+            "profile-delete-lock" => {
+                s.profile.set_deletion_locked(arg == "on");
+                s.refresh_panel(&self.cfg);
+            }
             "panic" => self.panic(),
             _ => {}
         }

@@ -362,6 +362,8 @@
         h('section', {},
           row(t('vault_title'), t('vault_desc'),
             h('button', { class: 'btn', onclick: () => send('lock') }, t('lock') + ' (⌃⌘L)')),
+          D.deleteLocked == null ? null : row(t('delete_lock_title'), t('delete_lock_desc'),
+            h('button', { class: 'btn', onclick: () => send('profile-delete-lock:' + (D.deleteLocked ? 'off' : 'on')) }, t(D.deleteLocked ? 'switch_on' : 'switch_off'))),
           h('div', { class: 'pw' }, ...pw, pwBtn)),
         h('h2', {}, t('updates')),
         h('section', {},

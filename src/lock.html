@@ -33,6 +33,8 @@
   .prof.on { border-color: var(--accent); }
   .prof .av { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; }
   .prof .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chk { display: flex; align-items: flex-start; gap: 8px; margin: 2px 0 10px; color: var(--mute); font-size: 12px; text-align: left; line-height: 1.4; }
+  .chk input { width: auto; height: auto; margin: 2px 0 0; flex: none; }
   .err { color: var(--danger); min-height: 18px; margin-top: 10px; }
   .warn { font-size: 12px; margin: 14px 0 0; }
   .link { background: none; border: 0; color: var(--mute); font: inherit; font-size: 12px; margin-top: 14px; text-decoration: underline; }
@@ -83,10 +85,13 @@
     <input type="text" id="name" maxlength="40" spellcheck="false" data-i18n-ph="profile_name">
     <input type="password" id="pw" autofocus>
     <input type="password" id="pw2" data-i18n-ph="repeat_password">
+    <input type="text" id="code" maxlength="10" spellcheck="false" data-i18n-ph="reset_code">
+    <label class="chk" id="hideopt"><input type="checkbox" id="hide"><span data-i18n="profile_hidden_opt"></span></label>
     <button class="primary" id="go" type="submit"></button>
     <div class="err" id="err"></div>
     <p class="warn" id="warn" data-i18n="pw_not_saved_warning"></p>
     <button class="link" id="other" type="button"></button>
+    <button class="link" id="openhidden" type="button" data-i18n="profile_hidden_open"></button>
     <button class="link" id="reset" type="button" data-i18n="forgot_password"></button>
   </form>
 <script>
@@ -101,7 +106,11 @@
     e.preventDefault();
     send('drag');
   });
-  let create = !PROFILES.length, selected = PROFILES[0] || null;
+  // 'pick' a listed profile, 'new', 'hidden' (typed label), 'reset' (delete the selected one).
+  let mode = PROFILES.length ? 'pick' : 'new', selected = PROFILES[0] || null, resetCode = '';
+  const home = () => (PROFILES.length ? 'pick' : 'new');
+  const setMode = (m) => { mode = m; render(); };
+  const goLabel = () => t(mode === 'new' ? 'create_vault' : mode === 'reset' ? 'reset_confirm' : 'unlock');
   const shown = (id, on) => { $(id).style.display = on ? '' : 'none'; };
 
   function pick(p) {
@@ -125,25 +134,34 @@
   }
 
   function render() {
-    $('h').textContent = t(!create ? 'locked' : PROFILES.length ? 'profile_new' : 'welcome');
-    $('d').textContent = t(create ? 'create_desc' : 'unlock_desc');
+    const create = mode === 'new', picking = mode === 'pick', deleting = mode === 'reset';
+    $('h').textContent = t(deleting ? 'reset_title' : mode === 'hidden' ? 'profile_hidden_open' : picking ? 'locked' : PROFILES.length ? 'profile_new' : 'welcome');
+    $('d').textContent = deleting ? t('reset_prompt', selected.name, resetCode) : t(create ? 'create_desc' : 'unlock_desc');
     $('pw').placeholder = t(create ? 'new_password_hint' : 'master_password');
-    $('go').textContent = t(create ? 'create_vault' : 'unlock');
-    $('profiles').replaceChildren(...(create ? [] : PROFILES.map(row)));
-    if (create && !PROFILES.length && !$('name').value) $('name').value = t('profile_personal');
-    shown('profiles', !create);
-    shown('name', create);
+    $('go').textContent = goLabel();
+    $('go').disabled = false;
+    $('profiles').replaceChildren(...(picking ? PROFILES.map(row) : []));
+    $('name').value = create && !PROFILES.length ? t('profile_personal') : '';
+    $('code').value = '';
+    $('hide').checked = false;
+    shown('profiles', picking);
+    shown('name', !picking);
+    shown('pw', !deleting);
     shown('pw2', create);
+    shown('code', deleting);
+    shown('hideopt', create);
     shown('warn', create);
-    shown('reset', !create);
-    shown('other', PROFILES.length > 0);
-    $('other').textContent = t(create ? 'back' : 'profile_new');
+    shown('reset', picking && selected && !selected.locked);
+    shown('other', !create || PROFILES.length > 0);
+    shown('openhidden', mode === home());
+    $('other').textContent = t(picking ? 'profile_new' : 'back');
     $('err').textContent = '';
     $('pw').value = ''; $('pw2').value = '';
-    $(create ? 'name' : 'pw').focus();
+    $(picking ? 'pw' : 'name').focus();
   }
 
-  $('other').onclick = () => { create = !create; render(); };
+  $('other').onclick = () => setMode(mode === 'pick' ? 'new' : home());
+  $('openhidden').onclick = () => setMode('hidden');
   render();
 
   dragOn(document.body, (e) => e.target === document.body);
@@ -161,38 +179,50 @@
 
   $('card').onsubmit = (e) => {
     e.preventDefault();
-    const pw = $('pw').value;
+    const name = $('name').value;
+    if (mode === 'reset') {
+      const message = 'reset:' + JSON.stringify({ id: selected.id, name, code: $('code').value });
+      setMode('pick'); // the code is spent: an error is shown on the list
+      return send(message);
+    }
+    const create = mode === 'new', hide = $('hide').checked;
+    let pw = $('pw').value, again = $('pw2').value;
+    scrub();
     if (create) {
-      if (!$('name').value.trim()) return fail(t('profile_name_invalid'));
+      if (!name.trim()) return fail(t('profile_name_invalid'));
       if ([...pw].length < 8) return fail(t('pw_too_short'));
-      if (pw !== $('pw2').value) return fail(t('pw_mismatch'));
+      if (pw !== again) return fail(t('pw_mismatch'));
     }
     if (!pw) return;
     $('err').textContent = '';
     $('go').disabled = true;
     $('go').textContent = t(create ? 'creating' : 'unlocking');
-    // let the label repaint before key derivation blocks the UI thread
-    setTimeout(() => send(create ? 'create:' + JSON.stringify({ name: $('name').value, password: pw }) : 'unlock:' + selected.id + ':' + pw), 60);
+    // The host delays key derivation itself, so the label repaints without holding the value here.
+    send(create ? 'create:' + JSON.stringify({ name, password: pw, hidden: hide })
+      : mode === 'hidden' ? 'unlock-hidden:' + JSON.stringify({ name, password: pw })
+      : 'unlock:' + selected.id + ':' + pw);
+    pw = again = '';
   };
+
+  // The fields are emptied and replaced at once: the old elements and their values have no owner.
+  function scrub() {
+    for (const id of ['pw', 'pw2']) {
+      const old = $(id);
+      old.value = '';
+      old.replaceWith(old.cloneNode(false));
+    }
+  }
 
   function fail(msg) {
     $('err').textContent = msg;
     $('go').disabled = false;
-    $('go').textContent = t(create ? 'create_vault' : 'unlock');
+    $('go').textContent = goLabel();
     $('pw').value = ''; $('pw2').value = ''; $('pw').focus();
     const c = $('card'); c.classList.remove('shake'); void c.offsetWidth; c.classList.add('shake');
   }
 
-  const reset = $('reset');
-  reset.onclick = () => {
-    if (!reset.classList.contains('armed')) {
-      reset.classList.add('armed');
-      reset.textContent = t('forgot_confirm');
-      setTimeout(() => { reset.classList.remove('armed'); reset.textContent = t('forgot_password'); }, 4000);
-      return;
-    }
-    if (selected) send('reset:' + selected.id);
-  };
+  $('reset').onclick = () => { if (selected) send('reset-ask:' + selected.id); };
+  function askReset(code) { resetCode = code; setMode('reset'); }
 </script>
 </body>
 </html>

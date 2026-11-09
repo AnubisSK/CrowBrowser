@@ -1,12 +1,15 @@
 //! Profiles: each one is `data_dir()/profiles/<id>/` with its own encrypted `vault.bin` (own salt,
-//! own Argon2id key). Only the display name (the lock screen lists it before any password is
-//! known) and the failed-attempt counter are plain.
+//! own Argon2id key). Folder names are opaque. A listed profile keeps its display name in a plain
+//! `name` file, because the lock screen shows it before any password is known. A hidden profile
+//! has none: its label exists only inside the vault and is typed at the lock screen, where it
+//! selects the folder (`hidden_id`). Failed-attempt counters are plain too.
 
 use crate::{
     settings::data_dir,
     vault::{Vault, VaultData, now_ms},
 };
 use chacha20poly1305::aead::{OsRng, rand_core::RngCore};
+use sha2::{Digest, Sha256};
 use std::{
     fmt::Write,
     fs,
@@ -15,6 +18,10 @@ use std::{
 
 const NAME_FILE: &str = "name";
 const ATTEMPTS_FILE: &str = "attempts";
+/// Present: this profile cannot be deleted from the lock screen, only on disk.
+const DELETE_LOCK_FILE: &str = "no_delete";
+/// One counter for every hidden-profile attempt, so it says nothing about which labels exist.
+const HIDDEN_ATTEMPTS_FILE: &str = ".hidden_attempts";
 /// Fixed id of the vault of an older single-profile install: a retried migration stays one profile.
 const LEGACY_ID: &str = "0000000000000000";
 const MAX_NAME: usize = 40;
@@ -49,8 +56,48 @@ fn now_secs() -> u64 {
     now_ms() / 1000
 }
 
+fn attempts(file: &Path) -> (u32, u64) {
+    let text = fs::read_to_string(file).unwrap_or_default();
+    let mut parts = text.split_whitespace().map(str::parse::<u64>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(n)), Some(Ok(until))) => (u32::try_from(n).unwrap_or(u32::MAX), until),
+        _ => (0, 0),
+    }
+}
+
+/// Seconds before another password is accepted (capped: a changed clock cannot extend it).
+fn wait_secs(file: &Path) -> u64 {
+    attempts(file).1.saturating_sub(now_secs()).min(MAX_WAIT_SECS)
+}
+
+fn record_failure(file: &Path) -> u64 {
+    let failures = attempts(file).0.saturating_add(1);
+    let wait = delay_after(failures);
+    if let Some(dir) = file.parent() {
+        let _ = make_dir(dir);
+    }
+    let _ = fs::write(file, format!("{failures} {}", now_secs() + wait));
+    wait
+}
+
+fn wrong_password(file: &Path) -> Denied {
+    match record_failure(file) {
+        0 => Denied::Failed("wrong_password"),
+        wait => Denied::Wait(wait),
+    }
+}
+
 fn root() -> PathBuf {
     data_dir().join("profiles")
+}
+
+/// Folder of the hidden profile labelled `label`: found without listing, one Argon2id per try.
+fn hidden_id(label: &str) -> String {
+    let digest = Sha256::new().chain_update(b"crow-hidden-profile\0").chain_update(label.as_bytes()).finalize();
+    digest[..8].iter().fold(String::with_capacity(16), |mut s, b| {
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 fn valid_id(id: &str) -> bool {
@@ -75,7 +122,8 @@ fn read(root: &Path, id: &str) -> Option<Profile> {
     if !valid_id(id) || !Vault::exists(&dir) {
         return None;
     }
-    let stored = fs::read_to_string(dir.join(NAME_FILE)).unwrap_or_default();
+    // No name file: a hidden profile, never listed.
+    let stored = fs::read_to_string(dir.join(NAME_FILE)).ok()?;
     let name = clean_name(&stored).unwrap_or_else(|| id[..6].to_string());
     Some(Profile { id: id.to_string(), name, dir })
 }
@@ -91,20 +139,56 @@ fn list_in(root: &Path) -> Vec<Profile> {
     all
 }
 
-fn create_in(root: &Path, name: &str) -> Result<Profile, &'static str> {
+fn create_in(root: &Path, name: &str, hidden: bool) -> Result<Profile, &'static str> {
     let name = clean_name(name).ok_or("profile_name_invalid")?;
-    if list_in(root).iter().any(|p| p.name.to_lowercase() == name.to_lowercase()) {
+    let id = if hidden {
+        hidden_id(&name)
+    } else {
+        if list_in(root).iter().any(|p| p.name.to_lowercase() == name.to_lowercase()) {
+            return Err("profile_name_taken");
+        }
+        let mut raw = [0u8; 8];
+        OsRng.fill_bytes(&mut raw);
+        raw.iter().fold(String::with_capacity(16), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+    };
+    let dir = root.join(&id);
+    if Vault::exists(&dir) {
         return Err("profile_name_taken");
     }
-    let mut raw = [0u8; 8];
-    OsRng.fill_bytes(&mut raw);
-    let id = raw.iter().fold(String::with_capacity(16), |mut s, b| {
-        let _ = write!(s, "{b:02x}");
-        s
-    });
-    let dir = root.join(&id);
-    make_dir(&dir).and_then(|()| fs::write(dir.join(NAME_FILE), &name)).map_err(|_| "vault_save_failed")?;
+    make_dir(&dir).map_err(|_| "vault_save_failed")?;
+    if !hidden {
+        fs::write(dir.join(NAME_FILE), &name).map_err(|_| "vault_save_failed")?;
+    }
     Ok(Profile { id, name, dir })
+}
+
+/// A label that matches nothing costs the same Argon2id and gives the same answer as a wrong
+/// password, under one shared backoff: the screen does not tell which labels exist.
+fn unlock_hidden_in(root: &Path, label: &str, password: &str) -> Result<(Profile, Vault, VaultData), Denied> {
+    let file = root.join(HIDDEN_ATTEMPTS_FILE);
+    let wait = wait_secs(&file);
+    if wait > 0 {
+        return Err(Denied::Wait(wait));
+    }
+    let found = clean_name(label).and_then(|name| {
+        let id = hidden_id(&name);
+        let dir = root.join(&id);
+        (Vault::exists(&dir) && !dir.join(NAME_FILE).exists()).then_some(Profile { id, name, dir })
+    });
+    let Some(profile) = found else {
+        Vault::spend(password);
+        return Err(wrong_password(&file));
+    };
+    match Vault::unlock(&profile.dir, password) {
+        Ok((vault, data)) => {
+            let _ = fs::remove_file(&file);
+            Ok((profile, vault, data))
+        }
+        Err(_) => Err(wrong_password(&file)),
+    }
 }
 
 /// The vault of a single-profile install becomes a profile. The rename is atomic: it is either
@@ -129,8 +213,20 @@ pub fn find(id: &str) -> Option<Profile> {
 }
 
 /// Empty profile folder; the caller writes its first vault.
-pub fn create(name: &str) -> Result<Profile, &'static str> {
-    create_in(&root(), name)
+pub fn create(name: &str, hidden: bool) -> Result<Profile, &'static str> {
+    create_in(&root(), name, hidden)
+}
+
+pub fn unlock_hidden(label: &str, password: &str) -> Result<(Profile, Vault, VaultData), Denied> {
+    unlock_hidden_in(&root(), label, password)
+}
+
+/// Random code the user must retype to delete a profile (no look-alike characters).
+pub fn confirmation_code() -> String {
+    const ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+    let mut raw = [0u8; 10];
+    OsRng.fill_bytes(&mut raw);
+    raw.iter().map(|b| char::from(ALPHABET[usize::from(*b) % ALPHABET.len()])).collect()
 }
 
 pub fn migrate_legacy(name: &str) {
@@ -148,43 +244,34 @@ impl Profile {
         let _ = fs::remove_dir_all(&self.dir);
     }
 
-    fn attempts(&self) -> (u32, u64) {
-        let text = fs::read_to_string(self.dir.join(ATTEMPTS_FILE)).unwrap_or_default();
-        let mut parts = text.split_whitespace().map(str::parse::<u64>);
-        match (parts.next(), parts.next()) {
-            (Some(Ok(n)), Some(Ok(until))) => (u32::try_from(n).unwrap_or(u32::MAX), until),
-            _ => (0, 0),
-        }
+    pub fn is_hidden(&self) -> bool {
+        !self.dir.join(NAME_FILE).exists()
     }
 
-    /// Seconds before another password is accepted (capped: a changed clock cannot extend it).
-    fn wait_secs(&self) -> u64 {
-        self.attempts().1.saturating_sub(now_secs()).min(MAX_WAIT_SECS)
+    pub fn deletion_locked(&self) -> bool {
+        self.dir.join(DELETE_LOCK_FILE).exists()
     }
 
-    fn record_failure(&self) -> u64 {
-        let failures = self.attempts().0.saturating_add(1);
-        let wait = delay_after(failures);
-        let _ = fs::write(self.dir.join(ATTEMPTS_FILE), format!("{failures} {}", now_secs() + wait));
-        wait
+    /// Changed only from an unlocked session; undoing it without one takes access to the disk.
+    pub fn set_deletion_locked(&self, on: bool) {
+        let file = self.dir.join(DELETE_LOCK_FILE);
+        let _ = if on { fs::write(file, "") } else { fs::remove_file(file) };
     }
 
     /// The master password gate. While the backoff runs nothing is derived or decrypted, right
     /// password or not. The counter is on disk so that restarting the browser does not reset it.
     pub fn unlock(&self, password: &str) -> Result<(Vault, VaultData), Denied> {
-        let wait = self.wait_secs();
+        let file = self.dir.join(ATTEMPTS_FILE);
+        let wait = wait_secs(&file);
         if wait > 0 {
             return Err(Denied::Wait(wait));
         }
         match Vault::unlock(&self.dir, password) {
             Ok(opened) => {
-                let _ = fs::remove_file(self.dir.join(ATTEMPTS_FILE));
+                let _ = fs::remove_file(file);
                 Ok(opened)
             }
-            Err("wrong_password") => match self.record_failure() {
-                0 => Err(Denied::Failed("wrong_password")),
-                wait => Err(Denied::Wait(wait)),
-            },
+            Err("wrong_password") => Err(wrong_password(&file)),
             Err(e) => Err(Denied::Failed(e)),
         }
     }
@@ -204,7 +291,7 @@ mod tests {
     const SECRET_URL: &str = "https://secret-bookmark.example";
 
     fn sealed(root: &Path, name: &str, password: &str) -> Profile {
-        let p = create_in(root, name).unwrap();
+        let p = create_in(root, name, false).unwrap();
         let mut data = VaultData::default();
         data.bookmarks.push(Bookmark { url: SECRET_URL.into(), title: "Hidden title".into() });
         data.session.push("https://secret-tab.example".into());
@@ -311,8 +398,8 @@ mod tests {
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].name, "Osobný");
         assert!(read(&root, "../../etc").is_none());
-        assert_eq!(create_in(&root, "osobný").err(), Some("profile_name_taken"));
-        assert_eq!(create_in(&root, "  ").err(), Some("profile_name_invalid"));
+        assert_eq!(create_in(&root, "osobný", false).err(), Some("profile_name_taken"));
+        assert_eq!(create_in(&root, "  ", false).err(), Some("profile_name_invalid"));
         let _ = fs::remove_dir_all(root);
     }
 

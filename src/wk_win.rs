@@ -117,6 +117,9 @@ const WORLD: &str = "crow";
 const DATA_PREFIX: &str = "crow-wv2-";
 /// Folder tag of the lock screen's environment (no profile is open).
 const LOCK_TAG: &str = "lock";
+/// Passes (100 ms apart) a folder gets before it counts as still held, then in the background.
+const WIPE_TRIES: u32 = 30;
+const LINGER_TRIES: u32 = 600;
 /// A hung page reports "unresponsive" repeatedly; one crash report per tab in this window.
 const CRASH_DEBOUNCE: Duration = Duration::from_secs(5);
 
@@ -231,10 +234,11 @@ fn data_dir() -> PathBuf {
     })
 }
 
-/// Folders of earlier runs whose process is gone (a running instance keeps its own).
-fn remove_stale_data() {
+/// Folders of earlier runs whose process is gone (a running instance keeps its own). Called first
+/// thing in `main`; a folder an orphaned WebView2 process still holds is retried in the background.
+pub fn remove_stale_data() {
     let Ok(dir) = std::fs::read_dir(std::env::temp_dir()) else { return };
-    let own = data_dir();
+    let mut stale = Vec::new();
     for e in dir.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
         let Some(rest) = name.strip_prefix(DATA_PREFIX) else { continue };
@@ -248,22 +252,33 @@ fn remove_stale_data() {
         let alive = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
             .map(|h| unsafe { CloseHandle(h) })
             .is_ok();
-        if !alive && e.path() != own {
-            let _ = std::fs::remove_dir_all(e.path());
+        if !alive {
+            stale.push(e.path());
         }
     }
+    let left = remove_dirs(stale, 1);
+    linger(left);
 }
 
-/// Deletes `dirs`. The browser process exits shortly after its last controller closed and holds
-/// its folder until then; what still fails is removed on the next start (`remove_stale_data`).
-fn remove_dirs(dirs: Vec<PathBuf>) {
-    for dir in dirs {
-        for _ in 0..30 {
-            if std::fs::remove_dir_all(&dir).is_ok() || !dir.exists() {
-                break;
-            }
+/// Deletes `dirs`, `tries` passes 100 ms apart; returns the ones still there. The browser process
+/// exits shortly after its last controller closed and holds its folder until then.
+fn remove_dirs(mut dirs: Vec<PathBuf>, tries: u32) -> Vec<PathBuf> {
+    for attempt in 0..tries {
+        dirs.retain(|dir| std::fs::remove_dir_all(dir).is_err() && dir.exists());
+        if dirs.is_empty() {
+            break;
+        }
+        if attempt + 1 < tries {
             std::thread::sleep(Duration::from_millis(100));
         }
+    }
+    dirs
+}
+
+/// Keeps retrying in the background; what outlives the process goes on its next start.
+fn linger(dirs: Vec<PathBuf>) {
+    if !dirs.is_empty() {
+        std::thread::spawn(move || remove_dirs(dirs, LINGER_TRIES));
     }
 }
 
@@ -295,7 +310,7 @@ pub fn begin_profile(id: &str) {
 pub fn wipe_retired() {
     let dirs = RETIRED.with(|r| std::mem::take(&mut *r.borrow_mut()));
     if !dirs.is_empty() {
-        WIPES.with(|w| w.borrow_mut().push(std::thread::spawn(move || remove_dirs(dirs))));
+        WIPES.with(|w| w.borrow_mut().push(std::thread::spawn(move || linger(remove_dirs(dirs, WIPE_TRIES)))));
     }
 }
 
@@ -1515,7 +1530,6 @@ pub fn reveal(path: &str) {
 pub fn init_window(window: &Window, on_cmd: impl Fn(String) + 'static) {
     MAIN_HWND.with(|h| h.set(window.hwnd()));
     ON_CMD.with(|o| *o.borrow_mut() = Some(Rc::new(on_cmd)));
-    remove_stale_data();
     let hwnd = hwnd();
     unsafe {
         let _ = SetWindowSubclass(hwnd, Some(frame_proc), 1, 0);
@@ -1634,7 +1648,7 @@ pub fn shutdown() {
     PROFILES.with(|p| p.borrow_mut().clear());
     retire_env();
     join_wipes();
-    remove_dirs(RETIRED.with(|r| std::mem::take(&mut *r.borrow_mut())));
+    remove_dirs(RETIRED.with(|r| std::mem::take(&mut *r.borrow_mut())), WIPE_TRIES);
 }
 
 /// Route of web content for stores made from now on (the app rebuilds its stores after a
