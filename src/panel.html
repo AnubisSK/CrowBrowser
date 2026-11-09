@@ -346,7 +346,7 @@
       const pwBtn = h('button', { class: 'btn primary' }, t('change_password'));
       pwBtn.onclick = () => {
         if (pw[1].value !== pw[2].value) return toast(t('new_pw_mismatch'), true);
-        if ([...pw[1].value].length < 8) return toast(t('new_pw_too_short'), true);
+        if ([...pw[1].value].length < 12) return toast(t('new_pw_too_short'), true);
         pwBtn.disabled = true; pwBtn.textContent = t('changing');
         setTimeout(() => send('change-pw:' + JSON.stringify({ old: pw[0].value, new: pw[1].value })), 60);
       };

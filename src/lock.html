@@ -190,7 +190,7 @@
     scrub();
     if (create) {
       if (!name.trim()) return fail(t('profile_name_invalid'));
-      if ([...pw].length < 8) return fail(t('pw_too_short'));
+      if ([...pw].length < 12) return fail(t('pw_too_short'));
       if (pw !== again) return fail(t('pw_mismatch'));
     }
     if (!pw) return;

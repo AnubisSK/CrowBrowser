@@ -4,7 +4,7 @@ default-members = [".", "crates/crow-server"]
 
 [package]
 name = "crow-browser"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "CrowBrowser – lightweight, private browser for macOS, Linux (WebKit) and Windows (WebView2)"
 default-run = "crow-browser"
