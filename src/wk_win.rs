@@ -107,9 +107,9 @@ const BROWSER_ARGS: &str = "--in-memory --incognito \
 --disable-features=msSmartScreenProtection,AutofillServerCommunication,msWebOOUI,msPdfOOUI \
 --disable-sync --disable-gpu-shader-disk-cache --no-first-run \
 --disable-breakpad --disable-crash-reporter";
-/// Everything else a tab may open besides `file:` and built-in pages; any other scheme would be
-/// handed to the OS (`ms-msdt:`, `cmd:`, `powershell:`).
-const SAFE_SCHEMES: &[&str] = &["http://", "https://", "about:", "data:", "crow:"];
+/// Everything else a tab or frame may open besides `file:` (main frame, from Crow) and built-in
+/// pages; any other scheme would be handed to the OS (`ms-msdt:`, `search-ms:`, `cmd:`).
+const SAFE_SCHEMES: &[&str] = &["http://", "https://", "about:", "data:", "blob:", "crow:"];
 /// Proxy part of the arguments for a direct connection (Chromium's default is the system proxy).
 /// The browser UI's environment always has it: the UI never uses the network.
 const DIRECT_ARGS: &str = "--no-proxy-server";
@@ -696,6 +696,12 @@ fn has_prefix(uri: &str, prefix: &str) -> bool {
     uri.get(..prefix.len()).is_some_and(|p| p.eq_ignore_ascii_case(prefix))
 }
 
+/// `uri` is a web, in-memory or built-in address (`internal_base`: the view's built-in page,
+/// empty if none), never one for an OS protocol handler or the disk.
+fn safe_uri(uri: &str, internal_base: &str) -> bool {
+    SAFE_SCHEMES.iter().any(|p| has_prefix(uri, p)) || (!internal_base.is_empty() && uri.starts_with(internal_base))
+}
+
 /// Content blocker of `v` on/off. Requests of every frame and worker are routed through
 /// `WebResourceRequested` (see `watch`) once it was on.
 pub fn set_rules(v: &WebView, on: bool) {
@@ -1123,7 +1129,7 @@ fn watch_inner(v: &WebView, tab: u32) -> windows::core::Result<()> {
                     if internal && !std::mem::take(&mut s.internal_pending) {
                         return true; // only Crow opens built-in pages
                     }
-                    if !local && !internal && !SAFE_SCHEMES.iter().any(|p| has_prefix(&uri, p)) {
+                    if !local && !safe_uri(&uri, &s.internal_base) {
                         return true; // no OS protocol activation
                     }
                     if !internal {
@@ -1137,6 +1143,21 @@ fn watch_inner(v: &WebView, tab: u32) -> windows::core::Result<()> {
                     s.chain.clear();
                     false
                 });
+                if refuse {
+                    args.SetCancel(true)?;
+                }
+                Ok(())
+            })),
+            &mut token,
+        )?;
+
+        // Child frames (`<iframe>`, `<frame>`) get the same scheme rule and never `file:`:
+        // every frame of a tab belongs to a web page, none is Crow's own load.
+        w.add_FrameNavigationStarting(
+            &NavigationStartingEventHandler::create(Box::new(move |_, args| {
+                let Some(args) = args else { return Ok(()) };
+                let uri = pwstr(|p| args.Uri(p));
+                let refuse = has_prefix(&uri, "file:") || with_view(k, |s| !safe_uri(&uri, &s.internal_base));
                 if refuse {
                     args.SetCancel(true)?;
                 }
