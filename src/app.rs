@@ -65,10 +65,12 @@ const PAGE_LISTEN_JS: &str = "(() => { if (window.__crowOn) return; window.__cro
 window.__crowGl = 0; const e = /*EVENT*/''; document.addEventListener(e, () => { window.__crowPad = 1; }, true); \
 document.addEventListener(e + 'g', () => { window.__crowGl++; }, true); })();";
 /// Active page: gamepads read, WebGL contexts refused, a video ready for picture-in-picture
-/// (metadata loaded: before that WebKit refuses the mode), login badge clicked (`autofill.js`).
+/// (metadata loaded: before that WebKit refuses the mode), login badge clicked (`autofill.js`),
+/// media elements present and how many the booster had to leave alone (cross-origin).
 const PAGE_READ: &str = "JSON.stringify([window.__crowPad | 0, window.__crowGl | 0, \
 Array.from(document.querySelectorAll('video')).some(v => v.readyState > 0) ? 1 : 0, \
-window.__crowFillAsk ? (window.__crowFillAsk = 0, 1) : 0])";
+window.__crowFillAsk ? (window.__crowFillAsk = 0, 1) : 0, \
+document.querySelector('video, audio') ? 1 : 0, window.__crowBoostBlocked | 0])";
 /// Login badge and fill target, isolated world of the top document (`/*LABEL*/`: badge title).
 const AUTOFILL_JS: &str = include_str!("autofill.js");
 /// Bounds of what the login popover may store.
@@ -76,6 +78,11 @@ const MAX_LOGINS: usize = 5000;
 const MAX_LOGIN_FIELD: usize = 4096;
 /// CrowClarity video enhancement, isolated world of every frame; inert until `apply_clarity`.
 const CLARITY_JS: &str = include_str!("clarity.js");
+/// Volume booster (Web Audio), isolated world of every frame; inert until `apply_boost`.
+const BOOSTER_JS: &str = include_str!("booster.js");
+/// Volume boost range of a tab, in percent (100 = the page's own volume).
+const BOOST_MIN: u16 = 100;
+const BOOST_MAX: u16 = 600;
 /// Picture-in-picture toggle (macOS): the largest playing video, else the largest one. Run by
 /// the app, so WebKit counts it as a user gesture. Windows: `wk::toggle_pip`.
 #[cfg(not(target_os = "windows"))]
@@ -95,7 +102,13 @@ const MAX_DOWNLOADS: usize = 500;
 /// Shield estimates per blocked load (typical ad/tracker response size and request latency).
 const BLOCK_BYTES: u64 = 50 * 1024;
 const BLOCK_MS: u64 = 50;
-pub const MIN_PASSWORD_LEN: usize = 12;
+/// Master password policy: at least this many characters (Unicode scalar values, not bytes). No
+/// upper bound: the whole passphrase goes into Argon2id, nothing is cut.
+const MIN_PASSWORD_LEN: usize = 12;
+
+fn password_ok(password: &str) -> bool {
+    password.chars().count() >= MIN_PASSWORD_LEN
+}
 
 const FIND_JS: &str = r"(function (q, dir) {
   const sel = getSelection();
@@ -409,6 +422,7 @@ impl TabCtx {
             &PAGE_LISTEN_JS.replace("/*EVENT*/''", &js(&self.pad_event)),
         );
         wk::add_isolated_script(&view, CLARITY_JS);
+        wk::add_isolated_script(&view, BOOSTER_JS);
         let label = settings::tr(&self.lang.borrow(), "pw_badge", &[]);
         wk::add_isolated_script(&view, &AUTOFILL_JS.replace("/*LABEL*/''", &js(&label)));
         if let Some(url) = url {
@@ -613,6 +627,12 @@ struct Tab {
     video: bool,
     /// CrowClarity forced on/off on this tab (toolbar ✨); None = the global setting.
     clarity: Option<bool>,
+    /// Volume boost of this tab in percent (`BOOST_MIN`..=`BOOST_MAX`), kept across its pages.
+    boost: u16,
+    /// The current page has a `<video>` or `<audio>` element (booster chip).
+    media: bool,
+    /// Media elements of the current page the booster left alone (cross-origin without CORS).
+    boost_blocked: u32,
     /// Cookie/storage jar of the tab (`Container::Default` = the vault-backed one).
     container: Container,
     /// Showing a remote surface (Eco page or RBI stream); `internal` is set with it.
@@ -661,6 +681,9 @@ impl Tab {
             webgl_blocks: 0,
             video: false,
             clarity: None,
+            boost: BOOST_MIN,
+            media: false,
+            boost_blocked: 0,
             container: Container::Default,
             remote: false,
             rbi_live: false,
@@ -969,6 +992,9 @@ impl Session {
             "video": wk::PIP && cur.is_some_and(|t| t.video),
             "hasVideo": cur.is_some_and(|t| t.video),
             "clarity": cur.is_some_and(|t| t.clarity.unwrap_or(cfg.clarity)),
+            "media": cur.is_some_and(|t| t.media),
+            "boost": cur.map_or(BOOST_MIN, |t| t.boost),
+            "boostBlocked": cur.map_or(0, |t| t.boost_blocked),
             "bookmarked": self.data.bookmarks.iter().any(|b| b.url == url),
             "downloads": self.data.downloads.iter().filter(|d| d.state == "active").count(),
             "panel": if self.panel.is_some() { self.panel_section.as_str() } else { "" },
@@ -1936,7 +1962,7 @@ impl App {
                 let Ok(r) = serde_json::from_str::<Req>(arg) else {
                     return;
                 };
-                if r.password.chars().count() < MIN_PASSWORD_LEN {
+                if !password_ok(&r.password) {
                     return self.lock_fail("pw_too_short");
                 }
                 let p = match profile::create(&r.name, r.hidden) {
@@ -2385,6 +2411,8 @@ impl App {
             t.gamepad = false;
             t.webgl_blocks = 0;
             t.video = false;
+            t.media = false;
+            t.boost_blocked = 0;
         }
         if !started && interstitial {
             t.loading = false;
@@ -2430,6 +2458,10 @@ impl App {
         };
         if t.clarity.unwrap_or(self.cfg.clarity) {
             apply_clarity(&self.cfg, t);
+        }
+        // The new document starts unboosted; its contexts start once the media plays.
+        if t.boost > BOOST_MIN {
+            apply_boost(t, false);
         }
         match &t.view {
             Some(v) if url.starts_with("http") => {
@@ -2614,7 +2646,7 @@ impl App {
     fn page_state(&mut self, tab: u32, data: &str) {
         let Some(s) = self.s.as_mut() else { return };
         let Some(i) = s.tab_idx(tab) else { return };
-        let Ok([pad, gl, video, fill]) = serde_json::from_str::<[u32; 4]>(data) else {
+        let Ok([pad, gl, video, fill, media, boost_blocked]) = serde_json::from_str::<[u32; 6]>(data) else {
             return;
         };
         let t = &mut s.tabs[i];
@@ -2632,12 +2664,36 @@ impl App {
             t.video = video == 1;
             changed = true;
         }
+        if (media == 1) != t.media {
+            t.media = media == 1;
+            changed = true;
+        }
+        if boost_blocked != t.boost_blocked {
+            t.boost_blocked = boost_blocked;
+            changed = true;
+            if i == s.active
+                && let Some(p) = &s.site
+            {
+                let _ = p.evaluate_script(&format!("window.boostBlocked && boostBlocked({boost_blocked})"));
+            }
+        }
         if changed {
             s.sync(&self.cfg);
         }
         if fill == 1 && i == s.active {
             self.fill_popover();
         }
+    }
+
+    /// Volume booster popover under the toolbar's speaker chip (active tab).
+    fn boost_popover(&mut self) {
+        let Some(s) = self.s.as_mut() else { return };
+        let Some(t) = s.cur() else { return };
+        let data = json!({ "level": t.boost, "blocked": t.boost_blocked });
+        let html = include_str!("boost.html").replace("/*DATA*/", &data.to_string());
+        let h = if s.site_h > 0.0 { s.site_h } else { 200.0 };
+        s.shield_open = false;
+        s.site = self.ctx.ui_view(&html, site_rect(&self.ctx.window, s.site_x, h));
     }
 
     /// Crow's own popover for the login badge and ⌘/Ctrl+Shift+K: the page can ask for it but
@@ -4095,7 +4151,7 @@ impl App {
                 };
                 let (ok, msg) = if !s.vault.verify(&r.old) {
                     (false, "pw_wrong_current")
-                } else if r.new.chars().count() < MIN_PASSWORD_LEN {
+                } else if !password_ok(&r.new) {
                     (false, "new_pw_too_short")
                 } else {
                     // Transactional (`rotate_key`): the new vault must be on disk (tmp + fsync +
@@ -4155,6 +4211,27 @@ impl App {
                 apply_clarity(cfg, t);
                 s.note(if on { "clarity_on" } else { "clarity_off" }, &[]);
                 s.sync(cfg);
+            }
+            // 🔊 chip: booster popover (same toggle rule as site-info).
+            "boost-open" => {
+                if s.site.take().is_some() || s.site_closed.elapsed() < Duration::from_millis(300) {
+                    return;
+                }
+                s.site_x = arg.parse().unwrap_or(0.0);
+                self.boost_popover();
+            }
+            // Slider / preset of the popover: the active tab, in steps of 10 %.
+            "boost-set" => {
+                let Some(level) = arg.parse::<u16>().ok() else { return };
+                let level = (level.clamp(BOOST_MIN, BOOST_MAX) + 5) / 10 * 10;
+                let Some(t) = s.tabs.get_mut(s.active) else {
+                    return;
+                };
+                if t.boost != level {
+                    t.boost = level;
+                    apply_boost(t, true);
+                    s.sync(&self.cfg);
+                }
             }
             "pip" => {
                 let Some(v) = s.view() else { return };
@@ -4613,6 +4690,20 @@ fn apply_clarity(cfg: &Settings, t: &Tab) {
     );
 }
 
+/// Pushes the tab's volume boost into its page (main frame, isolated world). `gesture`: the user
+/// just set it, which lets the page's audio contexts start under autoplay rules.
+fn apply_boost(t: &Tab, gesture: bool) {
+    let Some(v) = t.view.as_ref().filter(|_| t.url.starts_with("http")) else {
+        return;
+    };
+    let script = format!("window.__crowBoost && window.__crowBoost({})", f64::from(t.boost) / 100.0);
+    if gesture {
+        wk::eval_isolated_gesture(v, &script, |_| {});
+    } else {
+        wk::eval_isolated(v, &script, |_| {});
+    }
+}
+
 fn bg_of(window: &Window) -> RGBA {
     if wk::is_light(window) {
         BG_LIGHT
@@ -4959,5 +5050,21 @@ fn to_url(input: &str, search_prefix: &str) -> String {
             }
         }
         q
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn master_password_needs_twelve_characters() {
+        assert!(!password_ok("elevenchars"));
+        assert!(password_ok("twelve chars"));
+        // Characters, not bytes: 11 two-byte letters are still too short.
+        assert!(!password_ok("ľščťžýáíéúä"));
+        assert!(password_ok("ľščťžýáíéúäô"));
+        assert!(password_ok(&"x".repeat(128)));
+        assert!(password_ok(&"ž".repeat(500)));
     }
 }

@@ -56,7 +56,7 @@
 
 1. Stiahni `dist/Crow-<verzia>-universal.dmg` (alebo verziu pre konkrétnu architektúru).
 2. Presuň ikonu **Crow** do priečinka **Aplikácie** (`/Applications`).
-3. Pri prvom spustení si nastav bezpečné heslo trezora (minimálne 8 znakov).
+3. Pri prvom spustení si nastav bezpečné heslo trezora (minimálne 12 znakov).
 
 > *Poznámka k macOS:* Ak bol DMG stiahnutý z internetu, systém môže zobraziť hlásenie Gatekeepera. Klikni na aplikáciu pravým tlačidlom myši a zvoľ **Otvoriť**.
 
@@ -114,7 +114,7 @@ Linux: `./scripts/install_linux.sh` (podrobnosti a systémové balíčky v [docs
 
 1. Download `dist/Crow-<version>-universal.dmg` (or your architecture-specific package).
 2. Drag **Crow** into your **Applications** folder (`/Applications`).
-3. On first launch, create a master vault password (minimum 8 characters).
+3. On first launch, create a master vault password (minimum 12 characters).
 
 > *macOS Gatekeeper note:* If downloaded directly via a web browser, right-click the application and select **Open** to bypass initial Gatekeeper prompts for ad-hoc signed binaries.
 

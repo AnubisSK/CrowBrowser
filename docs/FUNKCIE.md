@@ -26,7 +26,7 @@ Pri každom spustení sa Crow otvorí zamknutý.
 
 | Situácia | Čo uvidíš |
 |---|---|
-| Prvé spustenie | „Vitaj v Crow“: zadáš nové heslo dvakrát (min. 8 znakov) a vytvorí sa šifrovaný trezor |
+| Prvé spustenie | „Vitaj v Crow“: zadáš nové heslo dvakrát (min. 12 znakov) a vytvorí sa šifrovaný trezor |
 | Ďalšie spustenia | „Crow je zamknutý“: zadáš heslo |
 | Nesprávne heslo | Chybové hlásenie a zatrasenie formulára, môžeš skúsiť znova |
 | Zabudnuté heslo | Odkaz **„Zabudol som heslo – vymazať všetky dáta“** (treba kliknúť dvakrát). Trezor sa zmaže a začneš odznova |
@@ -200,7 +200,7 @@ Otvoríš ich cez **⌘,** alebo ⚙. Panel má bočné menu: **Nastavenia · Hi
 | Ochrana súkromia | Vymazať cookies a prihlásenia | odhlási zo všetkých webov | |
 | Ochrana súkromia | Vymazať zoznam stiahnutých | súbory zostanú | |
 | Šifrovanie | Zamknúť teraz | ⌃⌘L | |
-| Šifrovanie | Zmeniť heslo | aktuálne + nové 2× (min. 8 znakov) | |
+| Šifrovanie | Zmeniť heslo | aktuálne + nové 2× (min. 12 znakov) | |
 | O aplikácii | Automaticky kontrolovať aktualizácie | Zapnuté / Vypnuté | Zapnuté |
 | O aplikácii | Skontrolovať aktualizácie | ručná kontrola | |
 

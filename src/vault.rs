@@ -22,7 +22,9 @@ const MAGIC: &[u8; 6] = b"CROWV1";
 const HEADER: usize = 6 + 16;
 const NONCE: usize = 24;
 pub const MAX_HISTORY: usize = 20_000;
-pub const MAX_VAULT_SIZE_BYTES: u64 = 16 * 1024 * 1024;
+/// Largest vault accepted (checked before reading it into RAM) and written (`save`), so a vault
+/// Crow wrote can always be opened again.
+const MAX_VAULT_BYTES: u64 = 16 * 1024 * 1024; // 16 MiB
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct HistoryEntry {
@@ -199,7 +201,7 @@ impl Vault {
     pub fn unlock(dir: &Path, password: &str) -> Result<(Self, VaultData), &'static str> {
         let path = Self::file(dir);
         let meta = fs::metadata(&path).map_err(|_| "vault_unreadable")?;
-        if meta.len() > MAX_VAULT_SIZE_BYTES {
+        if meta.len() > MAX_VAULT_BYTES {
             return Err("vault_exceeds_max_size");
         }
         let bytes = fs::read(&path).map_err(|_| "vault_unreadable")?;
@@ -247,6 +249,10 @@ impl Vault {
             .map_err(|_| io::Error::other("encrypt"))?;
         out.extend_from_slice(&nonce);
         out.extend_from_slice(&ct);
+        // Over the cap `unlock` would refuse it: keep the previous vault.bin instead.
+        if out.len() as u64 > MAX_VAULT_BYTES {
+            return Err(io::Error::other("vault_exceeds_max_size"));
+        }
 
         // Transactional: full write + fsync to .vault.tmp, then atomic rename over vault.bin.
         // On any error the previous vault.bin stays intact.
@@ -374,8 +380,33 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = Vault::file(&dir);
         let f = fs::File::create(&path).unwrap();
-        f.set_len(MAX_VAULT_SIZE_BYTES + 1).unwrap();
+        f.set_len(MAX_VAULT_BYTES + 1).unwrap();
         assert_eq!(Vault::unlock(&dir, "any").err(), Some("vault_exceeds_max_size"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn vault_over_the_cap_is_never_written() {
+        let dir = dir_for("save-cap");
+        let v = Vault::create(&dir, "correct horse battery");
+        v.save(&sample()).unwrap();
+        let mut big = sample();
+        big.bookmarks.push(Bookmark { url: "x".repeat(usize::try_from(MAX_VAULT_BYTES).unwrap()), title: String::new() });
+        assert!(v.save(&big).is_err());
+        let (_, data) = Vault::unlock(&dir, "correct horse battery").unwrap();
+        assert_sample(&data);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn long_passphrase_is_not_truncated() {
+        let dir = dir_for("long-pw");
+        let pw = format!("{}a", "ž".repeat(127));
+        let other = format!("{}b", "ž".repeat(127));
+        assert_eq!(pw.chars().count(), 128);
+        Vault::create(&dir, &pw).save(&sample()).unwrap();
+        assert_eq!(Vault::unlock(&dir, &other).err(), Some("wrong_password"));
+        assert!(Vault::unlock(&dir, &pw).is_ok());
         let _ = fs::remove_dir_all(dir);
     }
 }

@@ -656,6 +656,12 @@ pub fn eval_isolated(v: &WebView, js: &str, done: impl FnOnce(String) + 'static)
     eval_world(v, js, false, done);
 }
 
+/// `eval_isolated` for an action the user just took in Crow's UI: counts as a user activation
+/// (audio contexts may start).
+pub fn eval_isolated_gesture(v: &WebView, js: &str, done: impl FnOnce(String) + 'static) {
+    eval_world(v, js, true, done);
+}
+
 /// Picture-in-picture toggle: the largest playing video, else the largest one, in Chromium's
 /// floating always-on-top window (MSE / blob streams stay in their page). Needs a user
 /// activation, granted to this one evaluation only. `done`: "pip" | "inline" | "none".

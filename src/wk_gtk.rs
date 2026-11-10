@@ -390,6 +390,12 @@ pub fn add_isolated_script(v: &WebView, js: &str) {
     manager.add_script(&script);
 }
 
+/// `eval_isolated` for an action the user just took in Crow's UI; WebKitGTK has no separate
+/// user-gesture evaluation, its autoplay policy decides.
+pub fn eval_isolated_gesture(v: &WebView, js: &str, done: impl FnOnce(String) + 'static) {
+    eval_isolated(v, js, done);
+}
+
 /// Runs `js` in the main frame in Crow's own JS world: same DOM, but globals set there are
 /// invisible to the page's scripts. `done` gets the result if it is a string, else "".
 pub fn eval_isolated(v: &WebView, js: &str, done: impl FnOnce(String) + 'static) {

@@ -134,6 +134,12 @@
   #pip { display: none; color: var(--accent); }
   #pip.show { display: grid; animation: padin .35s ease-out; }
   /* CrowClarity (✨): shown with a video; lit while the tab's video is enhanced. */
+  /* Volume booster: shown with media or a boost; warm color above 200 %. */
+  #boost { display: none; width: auto; min-width: 30px; padding: 0 6px; gap: 3px; grid-auto-flow: column; font-size: 11px; font-weight: 600; }
+  #boost.show { display: grid; animation: padin .35s ease-out; }
+  #boost.on { color: var(--accent); background: rgba(91, 141, 239, .14); }
+  #boost.hot { color: #e5884b; background: rgba(229, 136, 75, .16); }
+  #boost .pct:empty { display: none; }
   #clarity { display: none; font-size: 14px; line-height: 1; opacity: .5; }
   #clarity.show { display: grid; animation: padin .35s ease-out; }
   #clarity.on { opacity: 1; background: rgba(91, 141, 239, .14); }
@@ -225,6 +231,7 @@
       <button id="star" data-i18n-title="bookmark_page" data-hint=" (⌘D)"><svg viewBox="0 0 24 24"><path d="M12 2l3.1 6.3 6.9 1-5 4.9 1.2 6.8L12 17.8 5.8 21l1.2-6.8-5-4.9 6.9-1z"/></svg></button>
     </div>
     <button id="pip" data-i18n-title="pip_title"><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><rect x="12" y="11" width="8" height="7" rx="1"/></svg></button>
+    <button id="boost" data-i18n-title="boost_title"><svg viewBox="0 0 24 24"><path d="M11 5L6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg><span class="pct"></span></button>
     <button id="clarity" data-i18n-title="clarity_title"><span aria-hidden="true">✨</span></button>
     <button id="pad" data-i18n-title="gamepad_chip"><span aria-hidden="true">🎮</span><span class="txt" data-i18n="gamepad_chip"></span></button>
     <button id="shield" data-i18n-title="adblock"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span id="shieldn"></span></button>
@@ -285,6 +292,7 @@
   // Shield: click = stats popover (per-site switch inside), ⌥/Alt+click = global switch.
   $('pad').onclick = () => send('gamepad-open:' + Math.round($('pad').getBoundingClientRect().left));
   $('pip').onclick = () => send('pip');
+  $('boost').onclick = () => send('boost-open:' + Math.round($('boost').getBoundingClientRect().left));
   $('clarity').onclick = () => {
     const b = $('clarity');
     b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash');
@@ -434,6 +442,12 @@
     $('profile').title = t('profile_active', st.profile || '');
     $('pad').classList.toggle('show', !!st.gamepad);
     $('pip').classList.toggle('show', !!st.video);
+    const boost = st.boost || 100, bb = $('boost');
+    bb.classList.toggle('show', !!st.media || boost !== 100);
+    bb.classList.toggle('on', boost > 100 && boost <= 200);
+    bb.classList.toggle('hot', boost > 200);
+    bb.querySelector('.pct').textContent = boost !== 100 ? boost + '%' : '';
+    bb.title = t('boost_title') + ': ' + boost + '%' + (st.boostBlocked ? ' · ' + t('boost_blocked') : '');
     $('clarity').classList.toggle('show', !!st.hasVideo);
     $('clarity').classList.toggle('on', !!st.clarity);
     $('dl').classList.toggle('busy', st.downloads > 0);

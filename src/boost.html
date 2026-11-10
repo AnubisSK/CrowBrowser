@@ -1,0 +1,89 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #222226; --line: #33333a; --fg: #e6e6e9; --mute: #9a9aa3; --input: #2a2a2f; --accent: #5b8def; --warn: #e5884b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { color-scheme: light; --bg: #fff; --line: #e3e3e8; --fg: #1d1d1f; --mute: #6e6e76; --input: #f0f0f3; --warn: #c2571a; }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    font: 13px -apple-system, BlinkMacSystemFont, system-ui, "Inter", "Cantarell", "Noto Sans", sans-serif; color: var(--fg);
+    user-select: none; -webkit-user-select: none; cursor: default;
+  }
+  #card { background: var(--bg); border: 1px solid var(--line); padding: 14px 16px; display: grid; gap: 12px; }
+  header { display: flex; align-items: center; gap: 10px; }
+  .title { flex: 1; font-size: 14px; font-weight: 600; }
+  #pct { min-width: 56px; text-align: center; padding: 2px 8px; border-radius: 10px; background: var(--input); font-weight: 600; font-variant-numeric: tabular-nums; }
+  body.hot #pct { background: var(--warn); color: #fff; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  body.hot input[type=range] { accent-color: var(--warn); }
+  .presets { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn { font: inherit; color: var(--fg); border: 1px solid var(--line); background: var(--input); padding: 4px 10px; border-radius: 7px; white-space: nowrap; }
+  .btn:hover { border-color: var(--mute); }
+  .btn.on { border-color: var(--accent); color: var(--accent); }
+  #warn { display: none; color: var(--warn); font-size: 12px; }
+  body.hot #warn { display: block; }
+  #blocked { display: none; color: var(--mute); font-size: 12px; line-height: 1.4; }
+  #blocked.show { display: block; }
+</style>
+</head>
+<body>
+<div id="card">
+  <header><span aria-hidden="true">🔊</span><span class="title" data-i18n="boost_title"></span><span id="pct"></span></header>
+  <input id="level" type="range" min="100" max="600" step="10">
+  <div class="presets" id="presets"></div>
+  <div id="warn" data-i18n="boost_warn"></div>
+  <div id="blocked"></div>
+</div>
+<script>
+  // `level`: percent of the active tab, `blocked`: media the page loaded without CORS.
+  const D = /*DATA*/;
+  const send = (m) => window.ipc.postMessage(m);
+  const $ = (id) => document.getElementById(id);
+  const PRESETS = [[100, 'boost_default'], [200, null], [400, null], [600, 'boost_max']];
+  let level = D.level, queued = false;
+
+  function paint() {
+    $('level').value = level;
+    $('pct').textContent = level + '%';
+    document.body.classList.toggle('hot', level > 200);
+    for (const b of $('presets').children) b.classList.toggle('on', Number(b.dataset.v) === level);
+  }
+  // Slider drags are sent once per frame, the last value always goes out.
+  function set(v) {
+    level = Math.min(600, Math.max(100, Math.round(v / 10) * 10));
+    paint();
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => { queued = false; send('boost-set:' + level); });
+  }
+  function presets() {
+    $('presets').replaceChildren(...PRESETS.map(([v, key]) => {
+      const b = document.createElement('button');
+      b.className = 'btn';
+      b.dataset.v = v;
+      b.textContent = key ? t(key, v + '%') : v + '%';
+      b.onclick = () => set(v);
+      return b;
+    }));
+    paint();
+  }
+  window.boostBlocked = (n) => {
+    $('blocked').textContent = n > 0 ? t('boost_blocked') : '';
+    $('blocked').classList.toggle('show', n > 0);
+    requestAnimationFrame(() => send('site-size:' + Math.ceil(document.body.scrollHeight)));
+  };
+  $('level').oninput = (e) => set(Number(e.target.value));
+  window.onLanguage = () => { presets(); window.boostBlocked(D.blocked); };
+  document.onkeydown = (e) => { if (e.key === 'Escape') send('site-close'); };
+  window.onblur = () => send('site-close');
+  presets();
+  window.boostBlocked(D.blocked);
+</script>
+</body>
+</html>

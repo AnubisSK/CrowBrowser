@@ -429,6 +429,12 @@ pub fn attach(b: WebViewBuilder, rect: Rect, window: &Window) -> wry::Result<Web
     b.with_bounds(rect).build_as_child(window)
 }
 
+/// `eval_isolated` for an action the user just took in Crow's UI; WebKit already counts
+/// evaluations by the app as user gestures.
+pub fn eval_isolated_gesture(v: &WebView, js: &str, done: impl FnOnce(String) + 'static) {
+    eval_isolated(v, js, done);
+}
+
 /// Runs `js` in the main frame in Crow's own JS world: same DOM, but globals set there are
 /// invisible to the page's scripts. `done` gets the result if it is a string, else "".
 pub fn eval_isolated(v: &WebView, js: &str, done: impl FnOnce(String) + 'static) {
